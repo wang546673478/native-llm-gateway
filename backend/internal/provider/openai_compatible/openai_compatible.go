@@ -31,6 +31,8 @@ type Config struct {
 	// ModelsOverride 若非空,覆盖 cfg.Models(用于 DeepSeek v4 时代)
 	ModelsOverride []string
 	// StreamUsage 控制是否在流式请求里加 stream_options.include_usage=true
+	// 默认 true:让响应最后一个 chunk 带 usage,Gateway 才能正确计费
+	// DeepSeek / Qwen / Kimi / GLM 都支持
 	StreamUsage bool
 }
 
@@ -50,6 +52,9 @@ func NewBase(cfg Config) *Base {
 	if cfg.ChatPath == "" {
 		cfg.ChatPath = "/v1/chat/completions"
 	}
+	// 默认开启 stream_options.include_usage:让流式响应最后一个 chunk 带 usage,
+	// Gateway 才能正确计费。OpenAI 兼容家族(DeepSeek/Qwen/Kimi/GLM)都支持。
+	cfg.StreamUsage = true
 	return &Base{
 		cfg:    cfg,
 		client: &http.Client{Timeout: timeout},

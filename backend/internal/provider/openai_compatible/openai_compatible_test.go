@@ -2,6 +2,7 @@ package openai_compatible
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -385,3 +386,37 @@ func errorsAs(err error, target interface{}) bool {
 // silence unused
 var _ = bufio.NewReader
 var _ = json.Marshal
+
+// TestStreamUsageInjectedByDefault P25: 验证 OpenAI 兼容 Provider 默认开启
+// stream_options.include_usage=true,这样流式响应最后一个 chunk 带 usage,
+// Gateway 才能正确计费。
+func TestStreamUsageInjectedByDefault(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{
+		Name:     "test",
+		Endpoint: upstream.URL,
+		Timeout:  5 * time.Second,
+		Pool:     pool,
+		// 注意:不设置 StreamUsage,验证默认是 true
+	})
+
+	_, _, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Body: []byte(`{"model":"m","stream":true}`),
+	})
+	if err != nil {
+		t.Fatalf("SendStreamRequest: %v", err)
+	}
+
+	if !bytes.Contains(gotBody, []byte(`"include_usage":true`)) {
+		t.Errorf("expected stream_options.include_usage=true by default, got body: %s", gotBody)
+	}
+}
