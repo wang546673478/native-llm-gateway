@@ -4,8 +4,9 @@
 //   2. 加载配置
 //   3. 初始化日志
 //   4. 打开数据库 + 迁移
-//   5. 启动 HTTP 服务
-//   6. 监听信号,触发优雅关停
+//   5. 构建 Provider Manager 并加载所有 enabled Provider
+//   6. 启动 HTTP 服务
+//   7. 监听信号,触发优雅关停
 package main
 
 import (
@@ -20,8 +21,11 @@ import (
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek" // 触发 init() 注册
+
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/server"
 )
 
@@ -80,19 +84,65 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	logger.Info("database ready", zap.String("driver", cfg.Database.Driver))
 
+	// P2: Provider Manager
+	// 每个 Provider 包通过 init() 已注册到 provider.Default()
+	registry := provider.Default()
+	logger.Info("provider registry",
+		zap.Strings("registered", registry.ListRegistered()),
+	)
+
+	manager := provider.NewManager(registry, logger)
+	if err := manager.LoadFromConfig(context.Background(), toManagerConfig(cfg)); err != nil {
+		return fmt.Errorf("load providers: %w", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := server.New(cfg, logger, db)
+	srv := server.New(cfg, logger, db, manager)
 	if err := srv.Run(ctx); err != nil {
 		return err
 	}
 
-	// 关闭 DB 连接
+	// 清理资源
+	_ = manager.Close()
 	if sqlDB, err := db.DB(); err == nil {
 		_ = sqlDB.Close()
 	}
 	return nil
+}
+
+// toManagerConfig 把完整 cfg 投影成 Manager 关心的子集
+func toManagerConfig(cfg *config.Config) *provider.ManagerConfig {
+	mcfg := &provider.ManagerConfig{
+		Providers: make(map[string]provider.ManagerProviderConfig, len(cfg.Providers)),
+	}
+	for name, p := range cfg.Providers {
+		proto, _ := provider.ParseProtocol(p.Protocol) // config.validate() 已确保合法
+		keys := make([]string, 0, len(p.Keys))
+		for _, k := range p.Keys {
+			keys = append(keys, k.Key)
+		}
+		models := make([]string, 0, len(p.Models))
+		for _, m := range p.Models {
+			models = append(models, m.ID)
+		}
+		mcfg.Providers[name] = provider.ManagerProviderConfig{
+			Enabled:  p.Enabled,
+			Endpoint: p.Endpoint,
+			Protocol: proto,
+			Timeout:  p.Timeout,
+			Models:   models,
+			APIKeys:  keys,
+			Circuit: provider.ManagerCircuitConfig{
+				FailureThreshold: p.CircuitBreaker.FailureThreshold,
+				FailureWindow:    p.CircuitBreaker.FailureWindow,
+				OpenTimeout:      p.CircuitBreaker.OpenTimeout,
+				HalfOpenRequests: p.CircuitBreaker.HalfOpenRequests,
+			},
+		}
+	}
+	return mcfg
 }
 
 // newLogger 根据 level 构造 zap logger

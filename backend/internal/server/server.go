@@ -14,29 +14,33 @@ import (
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
 // Server 持有所有运行时依赖
-// 阶段 P0: 只持有 config 和 logger
-// 阶段 P1: + db
-// 阶段 P2+: + providerManager, router, keypools, circuitBreakers, ...
+// P0: config + logger
+// P1: + db
+// P2: + provider.Manager
+// P5+: + router, proxy, keypools, circuitBreakers, ...
 type Server struct {
-	cfg    *config.Config
-	logger *zap.Logger
-	db     *gorm.DB
-	http   *http.Server
+	cfg     *config.Config
+	logger  *zap.Logger
+	db      *gorm.DB
+	manager *provider.Manager
+	http    *http.Server
 }
 
 // New 构造 Server
-func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB) *Server {
+func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.Manager) *Server {
 	return &Server{
-		cfg:    cfg,
-		logger: logger,
-		db:     db,
+		cfg:     cfg,
+		logger:  logger,
+		db:      db,
+		manager: manager,
 	}
 }
 
-// Run 启动 HTTP 服务,直到收到 shutdown 信号或 server 异常退出
+// Run 启动 HTTP 服务
 func (s *Server) Run(ctx context.Context) error {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -74,7 +78,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// shutdown 优雅关闭,等待 in-flight 请求完成
+// shutdown 优雅关闭
 func (s *Server) shutdown() error {
 	timeout := s.cfg.Server.ShutdownTimeout
 	if timeout == 0 {
@@ -87,18 +91,15 @@ func (s *Server) shutdown() error {
 }
 
 // registerRoutes 注册路由
-// P0 阶段只暴露健康检查和占位的 v1 代理入口
 func (s *Server) registerRoutes(r *gin.Engine) {
-	// /healthz — 进程存活,不做任何外部依赖检查
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "ok",
-			"version": "0.2.0-p1",
+			"version": "0.3.0-p2",
 			"time":    time.Now().UTC().Format(time.RFC3339),
 		})
 	})
 
-	// /readyz — P1 新增:依赖健康(目前是 DB),用于 k8s readinessProbe
 	r.GET("/readyz", func(c *gin.Context) {
 		if s.db == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db_not_initialized"})
@@ -118,17 +119,33 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
 
+	// P2 新增:列出已加载的 Provider(只读,调试用)
+	r.GET("/admin/providers", func(c *gin.Context) {
+		all := s.manager.GetAll()
+		out := make([]gin.H, 0, len(all))
+		for name, p := range all {
+			out = append(out, gin.H{
+				"name":     name,
+				"protocol": string(p.Protocol()),
+				"models":   p.Models(),
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"count":     len(out),
+			"providers": out,
+		})
+	})
+
 	// P5 之前,/v1/* 的代理入口只返回 501 Not Implemented
 	v1 := r.Group("/v1")
 	v1.Any("/*path", func(c *gin.Context) {
 		c.JSON(http.StatusNotImplemented, gin.H{
 			"error": gin.H{
 				"type":    "not_implemented",
-				"message": "proxy engine is not wired yet (phase P1 has DB only)",
+				"message": "proxy engine is not wired yet (phase P2 has Provider Registry only)",
 			},
 		})
 	})
 }
 
-// silence unused for early-phase imports
-var _ = database.Provider{}
+var _ = database.Provider{} // keep database import alive (GORM models live there)
