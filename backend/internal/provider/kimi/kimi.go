@@ -18,16 +18,18 @@ const (
 	ChatPath       = "/v1/chat/completions"
 )
 
-// DefaultModels Kimi 在用模型(2026-07)
-// 完整列表见 https://platform.moonshot.cn/docs/intro
+// DefaultModels Kimi 当前在用模型(2026-07)
+// 完整列表见 https://platform.kimi.ai/docs/models
+// 注意:
+//   - moonshot-v1-* 系列已不对新用户开放,仅老用户可用
+//   - kimi-k2-0905-preview / kimi-latest / kimi-thinking-preview 全部已弃用
+//   - 当前主推 kimi-k3 / kimi-k2.7-code / kimi-k2.6 / kimi-k2.5
 var DefaultModels = []string{
-	"moonshot-v1-8k",
-	"moonshot-v1-32k",
-	"moonshot-v1-128k",
-	"moonshot-v1-auto",     // 自动选择
-	"moonshot-v1-8k-vision-preview",  // 多模态
-	"moonshot-v1-32k-vision-preview",
-	"kimi-k2-0905-preview",  // 新版 K2
+	"kimi-k3",                  // 当前最新
+	"kimi-k2.7-code",           // 代码专用(2.7)
+	"kimi-k2.7-code-highspeed", // 代码高速版
+	"kimi-k2.6",
+	"kimi-k2.5",
 }
 
 type Provider struct {

@@ -96,18 +96,26 @@ providers:
     protocol: "openai"
     timeout: 60s
     models:
-      - id: "glm-4-flash"
+      - id: "glm-4-flash"          # 免费,稳定,默认推荐
         aliases: ["glm-flash"]
-        cost_per_1k_input: 0.0     # glm-4-flash 免费
+        cost_per_1k_input: 0.0
         cost_per_1k_output: 0.0
-      - id: "glm-4.6"
+      - id: "glm-4.7-flash"        # 2026-01 最新免费(替代 glm-4.5-flash)
+        aliases: []
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+      - id: "glm-4-air"            # 轻量
         aliases: []
         cost_per_1k_input: 0.001
         cost_per_1k_output: 0.001
-      - id: "glm-4"
+      - id: "glm-4-long"           # 长上下文
         aliases: []
-        cost_per_1k_input: 0.1      # 标准价,实际看官方
-        cost_per_1k_output: 0.1
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.001
+      - id: "glm-4-plus"           # 高级
+        aliases: []
+        cost_per_1k_input: 0.05
+        cost_per_1k_output: 0.05
     keys:
       - name: "glm-key-1"
         key: "REPLACE-ME.glm-key"
@@ -120,7 +128,7 @@ providers:
       excluded_errors: ["429"]
 
   # --- 通义千问 Qwen (OpenAI 兼容模式,DashScope) ---
-  # 文档:https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api
+  # 文档:https://help.aliyun.com/zh/model-studio/completions
   # 端点:https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
   qwen:
     enabled: true
@@ -128,26 +136,34 @@ providers:
     protocol: "openai"
     timeout: 60s
     models:
-      - id: "qwen-plus"
+      - id: "qwen-plus"             # 商用主力
         aliases: []
         cost_per_1k_input: 0.0008
         cost_per_1k_output: 0.002
-      - id: "qwen-turbo"
+      - id: "qwen-turbo"            # 更快更便宜
         aliases: []
         cost_per_1k_input: 0.0003
         cost_per_1k_output: 0.0006
-      - id: "qwen-max"
+      - id: "qwen-max"              # 旗舰
         aliases: []
         cost_per_1k_input: 0.02
         cost_per_1k_output: 0.06
-      - id: "qwen-coder-plus"
+      - id: "qwen-coder-plus"       # 代码
         aliases: ["qwen-coder"]
         cost_per_1k_input: 0.0035
         cost_per_1k_output: 0.007
-      - id: "qwen-long"
+      - id: "qwen-long"             # 长上下文(1M tokens)
         aliases: []
         cost_per_1k_input: 0.0005
         cost_per_1k_output: 0.002
+      - id: "qwen-vl-max"           # 多模态视觉
+        aliases: []
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.009
+      - id: "qwen3-235b-a22b"       # Qwen3 旗舰 MoE
+        aliases: []
+        cost_per_1k_input: 0.004
+        cost_per_1k_output: 0.012
     keys:
       - name: "qwen-key-1"
         key: "sk-REPLACE-ME"
@@ -160,30 +176,35 @@ providers:
       excluded_errors: ["429"]
 
   # --- Kimi (Moonshot,OpenAI 兼容) ---
-  # 文档:https://platform.moonshot.cn/docs/intro
+  # 文档:https://platform.kimi.ai/docs/models
   # 端点:https://api.moonshot.cn/v1/chat/completions
+  # 注意:moonshot-v1-* 已不对新用户开放;kimi-k2-0905-preview / kimi-latest 已弃用
   kimi:
     enabled: true
     endpoint: "https://api.moonshot.cn"
     protocol: "openai"
-    timeout: 120s   # 长上下文模型需要更长超时
+    timeout: 120s
     models:
-      - id: "moonshot-v1-8k"
+      - id: "kimi-k3"               # 当前最新
         aliases: []
-        cost_per_1k_input: 0.012   # 官方定价,实际以控制台为准
+        cost_per_1k_input: 0.012
         cost_per_1k_output: 0.012
-      - id: "moonshot-v1-32k"
+      - id: "kimi-k2.7-code"        # 代码专用
         aliases: []
-        cost_per_1k_input: 0.024
-        cost_per_1k_output: 0.024
-      - id: "moonshot-v1-128k"
-        aliases: ["kimi-long"]
-        cost_per_1k_input: 0.06
-        cost_per_1k_output: 0.06
-      - id: "kimi-k2-0905-preview"
+        cost_per_1k_input: 0.015
+        cost_per_1k_output: 0.015
+      - id: "kimi-k2.7-code-highspeed"  # 代码高速
         aliases: []
         cost_per_1k_input: 0.005
         cost_per_1k_output: 0.005
+      - id: "kimi-k2.6"
+        aliases: []
+        cost_per_1k_input: 0.012
+        cost_per_1k_output: 0.012
+      - id: "kimi-k2.5"
+        aliases: []
+        cost_per_1k_input: 0.012
+        cost_per_1k_output: 0.012
     keys:
       - name: "kimi-key-1"
         key: "sk-REPLACE-ME"
@@ -201,25 +222,34 @@ providers:
   #   - 其他走 Anthropic 协议的 vendor
   # 鉴权:x-api-key header + anthropic-version: 2023-06-01
   # 端点:POST /v1/messages
-  # 文档:https://docs.anthropic.com/en/api/messages
+  # 文档:https://platform.claude.com/docs/en/docs/about-claude/models
+  # 注意:Claude 4.5+ 之后,模型 ID 分为 dated snapshot(20251001 之类)和 dateless alias
   minimax:
     enabled: true
     endpoint: "https://api.anthropic.com"
     protocol: "anthropic"
     timeout: 90s
     models:
-      - id: "claude-sonnet-4-5"
+      - id: "claude-fable-5"             # 2026-06 最新 GA
+        aliases: ["fable"]
+        cost_per_1k_input: 0.01
+        cost_per_1k_output: 0.05
+      - id: "claude-opus-4-8"            # 复杂任务
+        aliases: ["opus"]
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.025
+      - id: "claude-sonnet-5"            # 速度+智能
         aliases: ["sonnet"]
         cost_per_1k_input: 0.003
         cost_per_1k_output: 0.015
-      - id: "claude-3-5-haiku-20241022"
+      - id: "claude-haiku-4-5"           # 最快
         aliases: ["haiku"]
-        cost_per_1k_input: 0.0008
-        cost_per_1k_output: 0.004
-      - id: "claude-3-opus-20240229"
-        aliases: ["opus"]
-        cost_per_1k_input: 0.015
-        cost_per_1k_output: 0.075
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.005
+      - id: "claude-haiku-4-5-20251001"  # dated alias
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.005
     keys:
       - name: "minimax-key-1"
         key: "sk-ant-REPLACE-ME"
@@ -232,33 +262,38 @@ providers:
       excluded_errors: ["429"]
 
   # --- Google Gemini (Google 协议) ---
-  # 文档:https://ai.google.dev/gemini-api/docs
+  # 文档:https://ai.google.dev/gemini-api/docs/models
   # 端点:POST {endpoint}/models/{model}:generateContent
-  # 鉴权:x-goog-api-key header(不是 ?key= query)
+  # 鉴权:x-goog-api-key header
   # Body:{contents:[{parts:[{text:"..."}], role:"user"}]}
   # Usage 字段名:promptTokenCount / candidatesTokenCount / totalTokenCount
+  # 注意:gemini-2.0-flash / gemini-1.5-pro 已 shut down / deprecated
   gemini:
     enabled: true
     endpoint: "https://generativelanguage.googleapis.com/v1beta"
     protocol: "google"
     timeout: 60s
     models:
-      - id: "gemini-2.0-flash"
+      - id: "gemini-2.5-flash"           # stable 推荐
         aliases: ["gemini-flash"]
-        cost_per_1k_input: 0.000075    # 2026 公开价
+        cost_per_1k_input: 0.000075
         cost_per_1k_output: 0.0003
-      - id: "gemini-2.0-flash-lite"
+      - id: "gemini-2.5-flash-lite"      # stable 便宜
         aliases: []
         cost_per_1k_input: 0.0000375
         cost_per_1k_output: 0.00015
-      - id: "gemini-1.5-pro"
-        aliases: []
+      - id: "gemini-2.5-pro"             # stable 强
+        aliases: ["gemini-pro"]
         cost_per_1k_input: 0.00125
         cost_per_1k_output: 0.005
-      - id: "gemini-3.5-flash"
+      - id: "gemini-3.5-flash"           # stable 新
         aliases: []
         cost_per_1k_input: 0.0001
         cost_per_1k_output: 0.0004
+      - id: "gemini-3.1-flash-lite"      # stable
+        aliases: []
+        cost_per_1k_input: 0.000025
+        cost_per_1k_output: 0.0001
     keys:
       - name: "gemini-key-1"
         key: "REPLACE-ME.gemini-key"

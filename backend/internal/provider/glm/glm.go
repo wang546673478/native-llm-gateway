@@ -18,13 +18,20 @@ const (
 	ChatPath       = "/chat/completions"
 )
 
-// DefaultModels 智谱 GLM 在用模型(2026-07)
-// 完整模型列表见 https://open.bigmodel.cn/dev/api#glm-4
+// DefaultModels 智谱 GLM 商用 Stable 模型(2026-07)
+// 完整列表见 https://open.bigmodel.cn/dev/api
+// 注意:"glm-4.6" / "glm-4.7" 这种命名不存在!
+// 智谱实际命名:glm-4-flash(免费)/ glm-4-air / glm-4-airx / glm-4-long / glm-4-plus / glm-4-flashx
+// GLM-4.5-Flash 已下线(2026-01-30),自动路由到 GLM-4.7-Flash(后者 2026-01-20 开源)
 var DefaultModels = []string{
-	"glm-4-flash",
-	"glm-4",
-	"glm-4.6",
-	"glm-4.7",
+	"glm-4-flash",  // 免费,稳定,适合大多数场景
+	"glm-4.7-flash", // 最新免费(替代 glm-4.5-flash)
+	"glm-4-flashx", // 高速版
+	"glm-4-air",    // 轻量
+	"glm-4-airx",   // 增强轻量
+	"glm-4-long",   // 长上下文
+	"glm-4-plus",   // 高级版
+	"glm-4",        // 基础
 }
 
 // Provider GLM Provider

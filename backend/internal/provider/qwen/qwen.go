@@ -18,16 +18,23 @@ const (
 	ChatPath       = "/chat/completions"
 )
 
-// DefaultModels Qwen 在用模型(2026-07)
-// 完整列表见 DashScope 模型广场
+// DefaultModels Qwen DashScope 商用 Stable 模型(2026-07)
+// 完整列表 https://help.aliyun.com/zh/model-studio/completions
+// 注意:百炼 DashScope 历史上用过 qwen-turbo / qwen-plus / qwen-max 等 alias,
+// 当前主推 qwen3 系列(开源+闭源商用)
 var DefaultModels = []string{
-	"qwen-plus",
-	"qwen-turbo",
-	"qwen-max",
-	"qwen-long",
-	"qwen-vl-max",
-	"qwen-coder-plus",
-	"qwen-doc-turbo",
+	"qwen-plus",          // 通义千问增强版,商用主力
+	"qwen-turbo",         // 更快更便宜
+	"qwen-max",           // 旗舰
+	"qwen-max-latest",    // 旗舰最新版
+	"qwen-long",          // 长上下文(1M tokens)
+	"qwen-coder-plus",    // 代码专用
+	"qwen-coder-turbo",   // 代码更快版
+	"qwen-vl-max",        // 多模态视觉
+	"qwen-vl-plus",       // 多模态视觉便宜
+	"qwen3-235b-a22b",    // Qwen3 旗舰开源 MoE(可通过 API)
+	"qwen3-32b",          // Qwen3 dense 32B
+	"qwen3-max",          // Qwen3 闭源旗舰(若已 GA)
 }
 
 type Provider struct {

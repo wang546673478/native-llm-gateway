@@ -23,13 +23,18 @@ const (
 	ChatPath       = "" // Gemini 不用 chat path,model 拼在 URL 里
 )
 
-// DefaultModels Gemini 在用模型(2026-07)
+// DefaultModels Google Gemini 当前 Stable 模型(2026-07)
 // 完整列表见 https://ai.google.dev/gemini-api/docs/models
+// 重要:"gemini-2.0-flash" / "gemini-1.5-pro" 已停用!
+// Gemini 1.5 整个系列已弃用
+// Gemini 2.0 整个系列已 shut down
+// 当前 stable:Gemini 2.5 + Gemini 3.x
 var DefaultModels = []string{
-	"gemini-2.0-flash",
-	"gemini-2.0-flash-lite",
-	"gemini-1.5-pro",
-	"gemini-3.5-flash",
+	"gemini-2.5-flash",      // stable,推荐默认
+	"gemini-2.5-flash-lite", // stable,便宜
+	"gemini-2.5-pro",        // stable,强
+	"gemini-3.5-flash",      // stable,新
+	"gemini-3.1-flash-lite", // stable
 }
 
 type Provider struct {

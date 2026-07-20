@@ -25,13 +25,25 @@ const (
 	ChatPath       = "/v1/messages"
 )
 
-// DefaultModels 通用 Anthropic 模型
-// 实际可用模型取决于指向的 vendor
+// DefaultModels Anthropic Claude 当前在用模型(2026-07)
+// 来源:https://platform.claude.com/docs/en/docs/about-claude/models
+// 注意:
+//   - "claude-sonnet-4-5" / "claude-opus-4-5" 这种"无日期后缀"不存在!
+//     真实 ID 是 dated snapshot,如 "claude-sonnet-4-5-20250929"
+//   - Claude 4.6+ 开始用 dateless ID 如 "claude-opus-4-7"
+//   - Claude 3.x 已不在当前主推列表
 var DefaultModels = []string{
-	"claude-sonnet-4-5",
-	"claude-3-5-sonnet-20241022",
-	"claude-3-5-haiku-20241022",
-	"claude-3-opus-20240229",
+	"claude-fable-5",                  // 2026-06 GA,最新旗舰
+	"claude-opus-4-8",                 // 复杂任务
+	"claude-sonnet-5",                 // 速度+智能平衡
+	"claude-haiku-4-5",                // 最快
+	"claude-haiku-4-5-20251001",       // dated alias
+	// Legacy(仍然可用,但官方推荐迁到上面)
+	"claude-opus-4-7",
+	"claude-opus-4-6",
+	"claude-sonnet-4-6",
+	"claude-sonnet-4-5-20250929",
+	"claude-opus-4-5-20251101",
 }
 
 type Provider struct {
