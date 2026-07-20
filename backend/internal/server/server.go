@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -29,6 +30,7 @@ type Server struct {
 	router  *router.Router
 	engine  *proxy.Engine
 	pools   map[string]*keypool.Pool
+	cm      *circuit.Manager
 	http    *http.Server
 }
 
@@ -41,12 +43,30 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		DefaultStrategy: cfg.Routing.DefaultStrategy,
 		MaxAttempts:     cfg.Retry.MaxAttempts,
 	})
+	// P6: Circuit Breaker
+	cm := circuit.NewManager(r)
+	reporter := circuit.NewReporter(cm)
+	// 为每个 enabled Provider 创建 Breaker
+	for name, p := range cfg.Providers {
+		if !p.Enabled {
+			continue
+		}
+		cm.GetOrCreate(name, circuit.Config{
+			FailureThreshold: p.CircuitBreaker.FailureThreshold,
+			FailureWindow:    p.CircuitBreaker.FailureWindow,
+			OpenTimeout:      p.CircuitBreaker.OpenTimeout,
+			HalfOpenRequests: p.CircuitBreaker.HalfOpenRequests,
+			CountableErrors:  p.CircuitBreaker.CountableErrors,
+			ExcludedErrors:   p.CircuitBreaker.ExcludedErrors,
+		})
+	}
+
 	eng := proxy.NewEngine(proxy.Config{
 		Router:   r,
 		Logger:   logger,
 		Usage:    proxy.NoopUsageRecorder{},
 		Metrics:  proxy.NoopMetricsRecorder{},
-		Breaker:  proxy.NoopCircuitReporter{},
+		Breaker:  reporter,
 		MaxRetry: cfg.Retry.MaxAttempts,
 	})
 	return &Server{
@@ -57,6 +77,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		router:  r,
 		engine:  eng,
 		pools:   pools,
+		cm:      cm,
 	}
 }
 

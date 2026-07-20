@@ -235,3 +235,9 @@ func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
 	}
 	r.pools[providerName] = pool
 }
+
+// SetProviderHealth 实现 circuit.ProviderHealth 接口
+// 由 Circuit Breaker 调用,告诉 Router 某个 Provider 是否 OPEN
+func (r *Router) SetProviderHealth(providerName string, open bool) {
+	r.healthStatus[providerName] = open
+}
