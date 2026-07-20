@@ -28,6 +28,7 @@ type Server struct {
 	manager *provider.Manager
 	router  *router.Router
 	engine  *proxy.Engine
+	pools   map[string]*keypool.Pool
 	http    *http.Server
 }
 
@@ -55,6 +56,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		manager: manager,
 		router:  r,
 		engine:  eng,
+		pools:   pools,
 	}
 }
 

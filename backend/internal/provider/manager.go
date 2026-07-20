@@ -14,6 +14,8 @@ import (
 // ManagerConfig Manager 需要的配置视图
 type ManagerConfig struct {
 	Providers map[string]ManagerProviderConfig
+	// Pools 预先构造好的 Pool 映射,LoadFromConfig 会注入到 ProviderConfig.Pool
+	Pools map[string]any // name → *keypool.Pool(用 any 避免循环依赖)
 }
 
 // ManagerProviderConfig 单个 Provider 的配置(对应 config.yaml 中 providers.<name>.*)
@@ -72,6 +74,7 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			Timeout:          pcfg.Timeout,
 			Models:           pcfg.Models,
 			APIKeys:          pcfg.APIKeys,
+			Pool:             cfg.Pools[name],
 			FailureThreshold: pcfg.Circuit.FailureThreshold,
 			FailureWindow:    pcfg.Circuit.FailureWindow,
 			OpenTimeout:      pcfg.Circuit.OpenTimeout,
@@ -179,4 +182,11 @@ func (m *Manager) Close() error {
 	}
 	m.providers = make(map[string]Provider)
 	return firstErr
+}
+
+// SetForTesting 直接塞入一个已构造的 Provider(仅测试用)
+func (m *Manager) SetForTesting(name string, p Provider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.providers[name] = p
 }

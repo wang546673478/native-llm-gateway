@@ -390,11 +390,12 @@ func statusFromErr(pe *provider.ProviderError) int {
 }
 
 // extractOrGenTraceID 提取 X-Request-Id,没有则生成
+// 总是回写到响应 header,方便客户端链路追踪
 func extractOrGenTraceID(c *gin.Context) string {
-	if id := c.GetHeader("X-Request-Id"); id != "" {
-		return id
+	id := c.GetHeader("X-Request-Id")
+	if id == "" {
+		id = uuid.NewString()
 	}
-	id := uuid.NewString()
 	c.Writer.Header().Set("X-Request-Id", id)
 	return id
 }

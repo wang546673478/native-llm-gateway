@@ -16,12 +16,13 @@ type Factory func(config ProviderConfig) (Provider, error)
 // ProviderConfig 是创建 Provider 实例所需的最小配置
 // 对应 config.yaml 中的 providers.<name>.*
 type ProviderConfig struct {
-	Name            string
-	Endpoint        string
-	Protocol        Protocol
-	Timeout         time.Duration
-	Models          []string
-	APIKeys         []string // 明文,内部会加密传给 KeyPool
+	Name             string
+	Endpoint         string
+	Protocol         Protocol
+	Timeout          time.Duration
+	Models           []string
+	APIKeys          []string // 明文,内部会加密传给 KeyPool
+	Pool             interface{} // *keypool.Pool — 用 interface{} 避免循环依赖
 	FailureThreshold int
 	FailureWindow    time.Duration
 	OpenTimeout      time.Duration
