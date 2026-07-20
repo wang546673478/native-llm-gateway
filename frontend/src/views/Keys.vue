@@ -32,6 +32,17 @@
             :placeholder="editing ? '留空表示不修改' : 'gw-...'"
           />
         </n-form-item>
+        <n-form-item label="绑定 Provider" path="provider">
+          <n-select
+            v-model:value="form.provider"
+            :options="providerOptions"
+            placeholder="不选 = 可用于任意 Provider"
+            clearable
+          />
+          <n-text depth="3" style="font-size: 12px; display: block; margin-top: 4px">
+            绑定后,此 Key 只能用于路由到该 Provider 的请求;留空 = 不限制
+          </n-text>
+        </n-form-item>
         <n-form-item label="允许的模型" path="allowed_models">
           <n-dynamic-tags v-model:value="form.allowed_models" />
           <n-text depth="3" style="font-size: 12px; display: block; margin-top: 4px">
@@ -62,17 +73,19 @@
 </template>
 
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import {
   NButton, NCard, NDataTable, NDynamicTags, NForm, NFormItem,
-  NInput, NInputNumber, NModal, NSpace, NSpin, NSwitch, NH3, NText,
-  useMessage,
+  NInput, NInputNumber, NModal, NSpace, NSpin, NSwitch, NSelect,
+  NH3, NText, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
+import { api } from '../api/client'
 
 interface KeyView {
   name: string
+  provider: string
   allowed_models: string[]
   rpm: number
   tpm: number
@@ -80,6 +93,7 @@ interface KeyView {
 }
 
 const keys = ref<KeyView[]>([])
+const providers = ref<Array<{name: string; protocol: string}>>([])
 const loading = ref(false)
 const saving = ref(false)
 const modalVisible = ref(false)
@@ -89,6 +103,7 @@ const message = useMessage()
 const form = ref({
   name: '',
   key: '',
+  provider: '' as string,
   allowed_models: ['*'] as string[],
   rpm: 100,
   tpm: 500000,
@@ -100,8 +115,23 @@ const rules = {
   key: { required: true, message: '密钥必填', trigger: 'blur' },
 }
 
+const providerOptions = computed(() =>
+  providers.value.map(p => ({
+    label: `${p.name} (${p.protocol})`,
+    value: p.name,
+  })),
+)
+
 const columns: DataTableColumns<KeyView> = [
   { title: '名称', key: 'name' },
+  {
+    title: 'Provider',
+    key: 'provider',
+    render: (row) =>
+      row.provider
+        ? h('span', { style: { color: '#2080f0' } }, `🔒 ${row.provider}`)
+        : h('span', { style: { color: '#999' } }, '任意'),
+  },
   {
     title: '允许模型',
     key: 'allowed_models',
@@ -137,8 +167,12 @@ const columns: DataTableColumns<KeyView> = [
 async function load() {
   loading.value = true
   try {
-    const resp = await axios.get('/api/v1/keys')
-    keys.value = resp.data.keys
+    const [keysResp, provResp] = await Promise.all([
+      axios.get('/api/v1/keys'),
+      api.providers(),
+    ])
+    keys.value = keysResp.data.keys
+    providers.value = provResp.providers.map(p => ({ name: p.name, protocol: p.protocol }))
   } catch (e: any) {
     message.error('加载失败: ' + (e.message ?? e))
   } finally {
@@ -151,6 +185,7 @@ function openCreate() {
   form.value = {
     name: '',
     key: '',
+    provider: '',
     allowed_models: ['*'],
     rpm: 100,
     tpm: 500000,
@@ -163,7 +198,8 @@ function openEdit(row: KeyView) {
   editing.value = true
   form.value = {
     name: row.name,
-    key: '', // 编辑时不填,留空表示不改
+    key: '',
+    provider: row.provider || '',
     allowed_models: row.allowed_models,
     rpm: row.rpm,
     tpm: row.tpm,
@@ -183,24 +219,19 @@ async function save() {
   }
   saving.value = true
   try {
+    const body = {
+      key: form.value.key,
+      provider: form.value.provider,
+      allowed_models: form.value.allowed_models,
+      rpm: form.value.rpm,
+      tpm: form.value.tpm,
+      enabled: form.value.enabled,
+    }
     if (editing.value) {
-      await axios.put(`/api/v1/keys/${encodeURIComponent(form.value.name)}`, {
-        key: form.value.key,
-        allowed_models: form.value.allowed_models,
-        rpm: form.value.rpm,
-        tpm: form.value.tpm,
-        enabled: form.value.enabled,
-      })
+      await axios.put(`/api/v1/keys/${encodeURIComponent(form.value.name)}`, body)
       message.success('已更新')
     } else {
-      await axios.post('/api/v1/keys', {
-        name: form.value.name,
-        key: form.value.key,
-        allowed_models: form.value.allowed_models,
-        rpm: form.value.rpm,
-        tpm: form.value.tpm,
-        enabled: form.value.enabled,
-      })
+      await axios.post('/api/v1/keys', { name: form.value.name, ...body })
       message.success('已创建')
     }
     modalVisible.value = false

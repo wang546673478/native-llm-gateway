@@ -17,6 +17,8 @@ type GatewayKey struct {
 	ID            string
 	Name          string
 	KeyHash       string
+	// Provider 绑定:空字符串 = 不限制;非空 = 只能用路由解析到这个 Provider 的请求
+	Provider      string
 	AllowedModels []string
 	RateLimit     RateLimitConfig
 }
@@ -33,7 +35,24 @@ var (
 	ErrInvalidAuthFormat = errors.New("auth: Authorization must be Bearer <token>")
 	ErrUnknownKey        = errors.New("auth: unknown gateway key")
 	ErrModelNotAllowed   = errors.New("auth: model not allowed for this key")
+	ErrKeyProviderMismatch = errors.New("auth: key is bound to a different provider")
 )
+
+// CheckProvider 验证 key 是否能用指定 provider
+// 当 key.Provider 为空时,允许任意 provider(返回 nil)
+// 否则只允许 key.Provider == providerName
+func (a *Authenticator) CheckProvider(key *GatewayKey, providerName string) error {
+	if key == nil {
+		return ErrUnknownKey
+	}
+	if key.Provider == "" {
+		return nil // 未绑定,任意 provider 都行
+	}
+	if key.Provider == providerName {
+		return nil
+	}
+	return ErrKeyProviderMismatch
+}
 
 // Authenticator 持有所有 Gateway Keys
 // 简单内存存储,启动时从 config 加载;生产可换 DB 后端(P7)

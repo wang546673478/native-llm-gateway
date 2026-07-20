@@ -78,6 +78,7 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 			ID:            string(rune(k.ID)),
 			Name:          k.Name,
 			KeyHash:       k.KeyHash,
+			Provider:      k.Provider,
 			AllowedModels: parseAllowedModels(k.AllowedModels),
 			RateLimit:     RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
 		})
@@ -88,6 +89,7 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 // KeyView 返回给前端的形态(不含密钥 hash)
 type KeyView struct {
 	Name          string   `json:"name"`
+	Provider      string   `json:"provider"`
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
 	TPM           int      `json:"tpm"`
@@ -97,6 +99,7 @@ type KeyView struct {
 func toView(k dbpkg.GatewayKey) KeyView {
 	return KeyView{
 		Name:          k.Name,
+		Provider:      k.Provider,
 		AllowedModels: parseAllowedModels(k.AllowedModels),
 		RPM:           k.RPM,
 		TPM:           k.TPM,
@@ -108,6 +111,7 @@ func toView(k dbpkg.GatewayKey) KeyView {
 type KeyCreateReq struct {
 	Name          string   `json:"name" binding:"required"`
 	Key           string   `json:"key" binding:"required"`
+	Provider      string   `json:"provider"` // 可选,空 = 不限制
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
 	TPM           int      `json:"tpm"`
@@ -117,6 +121,7 @@ type KeyCreateReq struct {
 // KeyUpdateReq PUT body(name 在 URL 里,body 不需要)
 type KeyUpdateReq struct {
 	Key           string   `json:"key"`
+	Provider      string   `json:"provider"`
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
 	TPM           int      `json:"tpm"`
@@ -159,6 +164,7 @@ func (h *KeysHandler) create(c *gin.Context) {
 	k := &dbpkg.GatewayKey{
 		Name:          req.Name,
 		KeyHash:       req.Key, // Repository 会原样存;Authenticator 内部 hash
+		Provider:      req.Provider,
 		AllowedModels: serializeAllowedModels(models),
 		RPM:           req.RPM,
 		TPM:           req.TPM,
@@ -192,6 +198,8 @@ func (h *KeysHandler) update(c *gin.Context) {
 	if strings.TrimSpace(req.Key) != "" {
 		existing.KeyHash = req.Key
 	}
+	// Provider 字段允许随时改(包括清空)
+	existing.Provider = req.Provider
 	if req.AllowedModels != nil {
 		existing.AllowedModels = serializeAllowedModels(req.AllowedModels)
 	}
@@ -229,16 +237,14 @@ func (h *KeysHandler) reloadAll(ctx context.Context) {
 	}
 	keys := make([]GatewayKey, 0, len(rows))
 	for _, k := range rows {
-		enabled := k.Enabled
 		keys = append(keys, GatewayKey{
 			ID:            string(rune(k.ID)),
 			Name:          k.Name,
 			KeyHash:       k.KeyHash,
+			Provider:      k.Provider, // P19: 必须传,否则 binding check 失效
 			AllowedModels: parseAllowedModels(k.AllowedModels),
 			RateLimit:     RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
-			// 暂时忽略 Enabled 字段(Authenticator 暂不支持 disable,留 TODO)
 		})
-		_ = enabled
 	}
 	h.reload(keys)
 }

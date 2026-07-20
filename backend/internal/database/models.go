@@ -109,6 +109,9 @@ type GatewayKey struct {
 	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	Name          string    `gorm:"column:name;uniqueIndex;not null" json:"name"`
 	KeyHash       string    `gorm:"column:key_hash;uniqueIndex;not null" json:"-"`
+	// Provider 绑定:空 = 不限制(可用于任意 Provider);
+	// 非空 = 只能用路由解析到这个 Provider 的请求
+	Provider      string    `gorm:"column:provider;default:''" json:"provider"`
 	AllowedModels string    `gorm:"column:allowed_models;not null;default:'[\"*\"]'" json:"allowed_models"`
 	RPM           int       `gorm:"column:rpm;not null;default:100" json:"rpm"`
 	TPM           int       `gorm:"column:tpm;not null;default:500000" json:"tpm"`

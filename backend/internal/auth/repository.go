@@ -63,6 +63,7 @@ func (s *gormKeyStore) Update(ctx context.Context, name string, k *dbpkg.Gateway
 		Where("name = ?", name).
 		Updates(map[string]interface{}{
 			"key_hash":       k.KeyHash,
+			"provider":       k.Provider,
 			"allowed_models": k.AllowedModels,
 			"rpm":            k.RPM,
 			"tpm":            k.TPM,

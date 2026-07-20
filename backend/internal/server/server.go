@@ -108,6 +108,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		Metrics:       metrics.NewAdapter(metricsC),
 		Breaker:       reporter,
 		TokenRecorder: newAuthTokenRecorder(authn), // P13: TPM 计数(若 auth 启用)
+		Authenticator: authn,                        // P19: Provider 绑定检查
 		MaxRetry:      cfg.Retry.MaxAttempts,
 	})
 	return &Server{

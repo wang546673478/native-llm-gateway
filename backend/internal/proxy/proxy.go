@@ -13,19 +13,21 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
 
 // Engine 是 Gateway 的代理引擎
 type Engine struct {
-	logger       *zap.Logger
-	router       *router.Router
-	usage        UsageRecorder
-	metrics      MetricsRecorder
-	breaker      CircuitReporter
+	logger        *zap.Logger
+	router        *router.Router
+	usage         UsageRecorder
+	metrics       MetricsRecorder
+	breaker       CircuitReporter
 	tokenRecorder TokenUsageRecorder // P13: TPM 计数回调(可选)
-	maxRetry     int
+	authn         *auth.Authenticator // P19: Provider binding 检查
+	maxRetry      int
 }
 
 // Config 构造 Engine 的配置
@@ -36,6 +38,7 @@ type Config struct {
 	Metrics       MetricsRecorder
 	Breaker       CircuitReporter
 	TokenRecorder TokenUsageRecorder // P13: 可选
+	Authenticator *auth.Authenticator // P19: 可选,绑定 Provider 检查
 	MaxRetry      int // 最大 failover 次数,默认 3
 }
 
@@ -63,6 +66,7 @@ func NewEngine(cfg Config) *Engine {
 		metrics:       cfg.Metrics,
 		breaker:       cfg.Breaker,
 		tokenRecorder: cfg.TokenRecorder,
+		authn:         cfg.Authenticator,
 		maxRetry:      cfg.MaxRetry,
 	}
 }
@@ -119,6 +123,38 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		writeJSONError(c, http.StatusServiceUnavailable, "no_route",
 			fmt.Sprintf("no available provider for model %q", model))
 		return
+	}
+
+	// 4.5 P19: 检查 Gateway Key 是否绑定了 Provider
+	// 若 key.Provider 非空,则只能路由到那个 Provider;若路由解析到别的 Provider,直接 403
+	if gkVal, ok := c.Get("gateway_key"); ok {
+		if gk, ok := gkVal.(*auth.GatewayKey); ok && gk.Provider != "" {
+			// 取路由结果看 ProviderName;failover iterator 第一个就是
+			probeResult, probeErr := iter.Next()
+			if probeErr == nil {
+				if e.authn != nil && e.authn.CheckProvider(gk, probeResult.ProviderName) != nil {
+					e.logger.Warn("key provider mismatch",
+						zap.String("key", gk.Name),
+						zap.String("key_provider", gk.Provider),
+						zap.String("routed_provider", probeResult.ProviderName),
+						zap.String("model", model),
+						zap.String("trace_id", traceID),
+					)
+					c.JSON(http.StatusForbidden, gin.H{
+						"error": gin.H{
+							"type":    "key_provider_mismatch",
+							"message": fmt.Sprintf("key %q is bound to provider %q but request routes to %q",
+								gk.Name, gk.Provider, probeResult.ProviderName),
+						},
+					})
+					return
+				}
+				// 检查通过,把这个候选放回 iterator(不太好做,所以重置当前 idx)
+				// 简单做法:迭代器不支持 reset,改为手动用 probeResult 开始循环
+				e.runWithFirstResult(c, ctx, req, iter, probeResult)
+				return
+			}
+		}
 	}
 
 	// 5. 依次尝试,failover
@@ -421,7 +457,83 @@ func statusFromErr(pe *provider.ProviderError) int {
 	return pe.StatusCode
 }
 
-// extractOrGenTraceID 提取 X-Request-Id,没有则生成
+// runWithFirstResult 用已经 Next 出来的第一个 result 开始循环
+// (P19:把 provider-binding 检查 pass 的第一个候选"放回"循环)
+func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *provider.Request, iter *router.RouteIterator, first *router.RouteResult) {
+	var lastErr *provider.ProviderError
+	attempts := 0
+
+	// 先处理 first
+	if e.tryOneCandidate(c, ctx, req, first, &lastErr) {
+		return
+	}
+	if lastErr != nil && !errorIsRetryable(lastErr) {
+		return
+	}
+
+	// 再继续 Next 剩下的
+	for {
+		if attempts >= e.maxRetry-1 {
+			break
+		}
+		attempts++
+		result, err := iter.Next()
+		if err != nil {
+			break
+		}
+		if e.tryOneCandidate(c, ctx, req, result, &lastErr) {
+			return
+		}
+		if lastErr != nil && !errorIsRetryable(lastErr) {
+			return
+		}
+	}
+	e.handleAllFailed(c, req, lastErr, req.TraceID)
+}
+
+// tryOneCandidate 试一次候选。返回 true 表示成功处理(应该 return)
+// lastErr 在错误时被更新
+func (e *Engine) tryOneCandidate(
+	c *gin.Context,
+	ctx context.Context,
+	req *provider.Request,
+	result *router.RouteResult,
+	lastErr **provider.ProviderError,
+) bool {
+	req.Headers.Set("X-Request-Id", req.TraceID)
+	if result.Key != nil {
+		req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
+	}
+	pv, ok := e.router.Manager().Get(result.ProviderName)
+	if !ok {
+		*lastErr = &provider.ProviderError{
+			ProviderName: result.ProviderName,
+			ErrorType:    provider.ErrorTypeConnection,
+			Message:      "provider instance not found",
+		}
+		return false
+	}
+
+	start := time.Now()
+	if req.IsStream {
+		ok, perr := e.doStream(ctx, c, pv, req, result)
+		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
+		if ok {
+			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", true, nil)
+			return true
+		}
+		*lastErr = perr
+	} else {
+		resp, perr := e.doRequest(ctx, pv, req, result)
+		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), false, perr)
+		if perr == nil && resp != nil {
+			e.writeNonStreamResponse(c, req, resp, result, time.Since(start))
+			return true
+		}
+		*lastErr = perr
+	}
+	return false
+}
 // 总是回写到响应 header,方便客户端链路追踪
 func extractOrGenTraceID(c *gin.Context) string {
 	id := c.GetHeader("X-Request-Id")
