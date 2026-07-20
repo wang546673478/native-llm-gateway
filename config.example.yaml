@@ -1,0 +1,115 @@
+# Native LLM Gateway — config 示例
+# 完整规格见 Native LLM Gateway — 完整实现规格书 v2.md 第 4.1 节
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 120s       # 流式响应需要较长写超时
+  idle_timeout: 120s
+  shutdown_timeout: 30s
+
+database:
+  driver: "sqlite"          # sqlite | postgres
+  dsn: "data/gateway.db"
+  max_open_conns: 25
+  max_idle_conns: 10
+  conn_max_lifetime: 300s
+
+redis:
+  enabled: false            # 单实例 P0 阶段不需要,集群/P1+ 启用
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+  pool_size: 10
+
+# 客户端认证(P7 阶段真正生效)
+auth:
+  enabled: false            # P0 阶段先关掉,免得请求被 401 挡掉
+  keys:
+    - name: "dev-key"
+      key: "gw-key-dev-please-change-me"
+      allowed_models: ["*"]
+      rate_limit:
+        rpm: 100
+        tpm: 500000
+
+# Provider 配置
+providers:
+  deepseek:
+    enabled: true
+    endpoint: "https://api.deepseek.com"
+    protocol: "openai"
+    timeout: 60s
+    models:
+      - id: "deepseek-chat"
+        aliases: ["coding-model", "chat-model"]
+        cost_per_1k_input: 0.0014
+        cost_per_1k_output: 0.0028
+    keys:
+      - name: "deepseek-key-1"
+        key: "sk-REPLACE-ME"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+# 路由规则(P4 阶段真正生效)
+routing:
+  aliases:
+    coding-model:
+      strategy: "priority"
+      providers:
+        - name: "deepseek"
+          model: "deepseek-chat"
+          priority: 1
+  default_strategy: "priority"
+
+# Key Pool 配置(P3 阶段真正生效)
+keypool:
+  cooling_duration: 60s
+  max_cooling_count: 5
+  health_check_interval: 30s
+  key_rotation: "round_robin"
+
+# 超时与重试(P5 阶段真正生效)
+timeouts:
+  server_read: 30s
+  server_write: 120s
+  server_idle: 120s
+  provider_default: 60s
+  request_total: 300s
+
+retry:
+  enabled: true
+  max_attempts: 3
+  no_failover_on:
+    - "invalid_request"
+    - "auth"
+  failover_on:
+    - "rate_limit"
+    - "server_error"
+    - "timeout"
+    - "connection"
+
+# 日志
+logging:
+  level: "info"
+  format: "console"         # P0 阶段用 console 方便看;生产改 json
+  output: "stdout"
+  file_path: "logs/gateway.log"
+
+# 指标(P8 阶段真正生效)
+metrics:
+  enabled: false
+  path: "/metrics"
+  port: 9090
+
+# Usage(P8 阶段真正生效)
+usage:
+  flush_interval: 10s
+  batch_size: 100
+  retention_days: 90
