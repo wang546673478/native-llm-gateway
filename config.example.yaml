@@ -65,6 +65,29 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  # DeepSeek 也提供 Anthropic 兼容端点,给 Anthropic SDK 用户用
+  # https://api-docs.deepseek.com — 选 Anthropic 协议即可使用
+  deepseek-anthropic:
+    enabled: false  # 默认关掉,有需要再开
+    endpoint: "https://api.deepseek.com/anthropic"
+    protocol: "anthropic"
+    timeout: 90s
+    models:
+      - id: "deepseek-v4-flash"
+        aliases: []
+        cost_per_1k_input: 0.0001
+        cost_per_1k_output: 0.0004
+    keys:
+      - name: "deepseek-anthropic-key-1"
+        key: "sk-REPLACE-ME"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
 # 路由规则(P4 阶段真正生效)
 routing:
   aliases:

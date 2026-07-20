@@ -22,7 +22,8 @@ import (
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek" // 触发 init() 注册
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"               // 触发 init() 注册
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek_anthropic"    // DeepSeek 的 Anthropic 兼容端点
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
