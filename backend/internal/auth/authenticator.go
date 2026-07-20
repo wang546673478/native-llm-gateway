@@ -51,20 +51,42 @@ func New(keys []GatewayKey) *Authenticator {
 		rpm:  make(map[string]*rpmCounter, len(keys)),
 		tpm:  make(map[string]*tpmCounter, len(keys)),
 	}
+	a.addKeys(keys)
+	return a
+}
+
+// addKeys 内部 helper:把 keys 加到 map(也用于 Reload)
+// KeyHash 是"密钥原值"(明文),内部统一 hash 后存入 keys map
+func (a *Authenticator) addKeys(keys []GatewayKey) {
 	for i := range keys {
 		k := keys[i]
 		if k.KeyHash == "" && k.Name != "" {
-			// 兼容未 hash 的 key(测试用):用 name 当 hash
-			k.KeyHash = hashKey(k.Name)
+			// 兼容测试:用 name 当密钥
+			k.KeyHash = k.Name
 		}
 		if k.ID == "" {
 			k.ID = k.Name
 		}
-		a.keys[k.KeyHash] = &k
-		a.rpm[k.ID] = &rpmCounter{}
-		a.tpm[k.ID] = &tpmCounter{usage: make(map[int64]int64)}
+		// 统一把"密钥原值"hash 后作为 map key
+		hashedKey := hashKey(k.KeyHash)
+		k.KeyHash = hashedKey // 存 hash 后的版本,lookup 时也用 hash 比较
+		a.keys[hashedKey] = &k
+		if _, ok := a.rpm[k.ID]; !ok {
+			a.rpm[k.ID] = &rpmCounter{}
+		}
+		if _, ok := a.tpm[k.ID]; !ok {
+			a.tpm[k.ID] = &tpmCounter{usage: make(map[int64]int64)}
+		}
 	}
-	return a
+}
+
+// Reload 重新加载 Gateway Keys(P14 热重载)
+// 保留现有 keys 的 RPM/TPM 计数(避免重置限流窗口)
+func (a *Authenticator) Reload(keys []GatewayKey) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.keys = make(map[string]*GatewayKey, len(keys))
+	a.addKeys(keys)
 }
 
 // hashKey 计算 SHA256
@@ -88,6 +110,8 @@ func (a *Authenticator) Authenticate(r *http.Request) (*GatewayKey, error) {
 		return nil, ErrInvalidAuthFormat
 	}
 
+	// token 与 KeyHash 都统一走 hashKey 函数比较
+	// (config 里的 KeyHash 是明文时会被 addKeys 内部 hash 一次)
 	hash := hashKey(token)
 	a.mu.RLock()
 	key, ok := a.keys[hash]

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -38,12 +39,13 @@ type RouteResult struct {
 
 // Router 持有所有路由决策所需的状态
 type Router struct {
-	logger       *zap.Logger
-	manager      *provider.Manager
-	pools        map[string]*keypool.Pool
-	aliases      map[string]AliasConfig
-	policies     map[string]policy.Policy
-	cfg          Config
+	mu          sync.RWMutex
+	logger      *zap.Logger
+	manager     *provider.Manager
+	pools       map[string]*keypool.Pool
+	aliases     map[string]AliasConfig
+	policies    map[string]policy.Policy
+	cfg         Config
 	healthStatus map[string]bool // P6 接 Circuit Breaker
 }
 
@@ -220,6 +222,15 @@ func (r *Router) Aliases() map[string]AliasConfig {
 		out[k] = v
 	}
 	return out
+}
+
+// ReloadAliases 原子替换别名表(P14 热重载)
+// 注意:这不会改变 underlying Manager / Pools,只更新路由规则
+func (r *Router) ReloadAliases(aliases map[string]AliasConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.aliases = aliases
+	r.logger.Info("router aliases reloaded", zap.Int("count", len(aliases)))
 }
 
 // Manager 返回底层 provider.Manager(Proxy 用来查 Provider 实例)

@@ -110,6 +110,14 @@ func run(cmd *cobra.Command, args []string) error {
 	defer stop()
 
 	srv := server.New(cfg, logger, db, manager)
+
+	// P14: 配置热重载
+	if err := config.Watch(ctx, cfgPath, logger, func(newCfg *config.Config) {
+		srv.Reload(newCfg)
+	}); err != nil {
+		logger.Warn("config watch disabled", zap.Error(err))
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		return err
 	}

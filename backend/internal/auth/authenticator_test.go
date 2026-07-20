@@ -37,7 +37,9 @@ func TestAuthenticator_UnknownKey(t *testing.T) {
 
 func TestAuthenticator_ValidKey(t *testing.T) {
 	plain := "gw-secret-123"
-	a := New([]GatewayKey{{Name: "test-key", KeyHash: hashKey(plain)}})
+	// KeyHash 字段在 New 里会被当作"密钥原值"再次 hash
+	// 所以测试时直接传明文即可
+	a := New([]GatewayKey{{Name: "test-key", KeyHash: plain}})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+plain)
 	key, err := a.Authenticate(req)

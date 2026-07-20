@@ -348,3 +348,33 @@ func newAuthTokenRecorder(a *auth.Authenticator) *authTokenRecorder {
 func (r *authTokenRecorder) RecordUsage(keyID string, tokens int64) {
 	r.a.RecordTokens(keyID, tokens)
 }
+
+// Reload 热重载 — 替换 Aliases 和 Auth Keys
+// 注意:Provider Manager / KeyPool / Circuit Breaker 不在此函数内重载
+// (它们的 Reload 已在 Manager 上,但涉及 HTTP 客户端重建,留给后续阶段)
+func (s *Server) Reload(newCfg *config.Config) {
+	if newCfg == nil {
+		return
+	}
+	// Router aliases
+	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases))
+
+	// Authenticator
+	if s.auth != nil && newCfg.Auth.Enabled {
+		gkKeys := make([]auth.GatewayKey, 0, len(newCfg.Auth.Keys))
+		for _, k := range newCfg.Auth.Keys {
+			gkKeys = append(gkKeys, auth.GatewayKey{
+				Name:          k.Name,
+				KeyHash:       k.Key,
+				AllowedModels: k.AllowedModels,
+				RateLimit:     auth.RateLimitConfig{RPM: k.RateLimit.RPM, TPM: k.RateLimit.TPM},
+			})
+		}
+		s.auth.Reload(gkKeys)
+	}
+
+	s.logger.Info("config reloaded",
+		zap.Int("aliases", len(newCfg.Routing.Aliases)),
+		zap.Int("auth_keys", len(newCfg.Auth.Keys)),
+	)
+}
