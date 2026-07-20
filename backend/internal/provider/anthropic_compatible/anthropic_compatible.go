@@ -1,0 +1,316 @@
+// Package anthropic_compatible 实现 Anthropic Messages API 兼容协议的共享逻辑
+// 对应规格书 8.3
+//
+// 适用 Provider: MiniMax / 任意 Anthropic 兼容 API
+package anthropic_compatible
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
+)
+
+// Config 构造 Provider 所需的最小配置
+type Config struct {
+	Name     string
+	Endpoint string // e.g. https://api.minimax.chat
+	Timeout  time.Duration
+	Pool     *keypool.Pool
+}
+
+// Base Anthropic 兼容 Provider 的共享实现
+type Base struct {
+	cfg    Config
+	client *http.Client
+}
+
+// NewBase 构造 Base
+func NewBase(cfg Config) *Base {
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	return &Base{
+		cfg:    cfg,
+		client: &http.Client{Timeout: timeout},
+	}
+}
+
+// Name 由 wrapper 提供
+
+// SendRequest 发送非流式 Anthropic Messages 请求
+//   POST {endpoint}/v1/messages
+//   Headers:
+//     x-api-key: {key}
+//     anthropic-version: 2023-06-01
+//     Content-Type: application/json
+//   Body 原样透传
+func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
+	if b.cfg.Pool == nil {
+		return nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
+	}
+	key, err := b.cfg.Pool.Acquire()
+	if err != nil {
+		return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
+		bytes.NewReader(req.Body))
+	if err != nil {
+		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+	}
+	httpReq.Header.Set("x-api-key", key.Key)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("Content-Type", "application/json")
+	if req.TraceID != "" {
+		httpReq.Header.Set("X-Request-Id", req.TraceID)
+	}
+
+	httpResp, err := b.client.Do(httpReq)
+	if err != nil {
+		errType := provider.ErrorTypeConnection
+		if ctx.Err() == context.DeadlineExceeded {
+			errType = provider.ErrorTypeTimeout
+		}
+		b.cfg.Pool.ReportError(key, string(errType))
+		return nil, b.newError(0, errType, err.Error())
+	}
+	defer httpResp.Body.Close()
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		b.cfg.Pool.ReportError(key, "io_error")
+		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+	}
+
+	if httpResp.StatusCode >= 400 {
+		errType := provider.ClassifyError(httpResp.StatusCode)
+		if errType == provider.ErrorTypeRateLimit {
+			b.cfg.Pool.ReportRateLimit(key, parseRetryAfter(httpResp.Header.Get("Retry-After")))
+		} else {
+			b.cfg.Pool.ReportError(key, string(errType))
+		}
+		return nil, b.newError(httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
+	}
+
+	b.cfg.Pool.ReportSuccess(key)
+	usage := parseAnthropicUsage(body)
+
+	return &provider.Response{
+		StatusCode: httpResp.StatusCode,
+		Headers:    httpResp.Header,
+		Body:       body,
+		Usage:      usage,
+	}, nil
+}
+
+// SendStreamRequest 发送流式 Anthropic Messages 请求
+// Anthropic SSE 格式:
+//   event: message_start
+//   data: {"type":"message_start","message":{...}}
+//
+//   event: content_block_delta
+//   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}
+//
+//   event: message_delta
+//   data: {"type":"message_delta","usage":{"output_tokens":N}}
+//
+//   event: message_stop
+//   data: {"type":"message_stop"}
+func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
+	if b.cfg.Pool == nil {
+		return nil, nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
+	}
+	key, err := b.cfg.Pool.Acquire()
+	if err != nil {
+		return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+	}
+
+	streamTimeout := b.cfg.Timeout
+	if streamTimeout < 120*time.Second {
+		streamTimeout = 120 * time.Second
+	}
+	client := &http.Client{Timeout: streamTimeout}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
+		bytes.NewReader(req.Body))
+	if err != nil {
+		return nil, nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+	}
+	httpReq.Header.Set("x-api-key", key.Key)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	if req.TraceID != "" {
+		httpReq.Header.Set("X-Request-Id", req.TraceID)
+	}
+
+	httpResp, err := client.Do(httpReq)
+	if err != nil {
+		errType := provider.ErrorTypeConnection
+		if ctx.Err() == context.DeadlineExceeded {
+			errType = provider.ErrorTypeTimeout
+		}
+		b.cfg.Pool.ReportError(key, string(errType))
+		return nil, nil, b.newError(0, errType, err.Error())
+	}
+
+	if httpResp.StatusCode >= 400 {
+		body, _ := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		errType := provider.ClassifyError(httpResp.StatusCode)
+		if errType == provider.ErrorTypeRateLimit {
+			b.cfg.Pool.ReportRateLimit(key, 0)
+		} else {
+			b.cfg.Pool.ReportError(key, string(errType))
+		}
+		return nil, nil, b.newError(httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
+	}
+
+	b.cfg.Pool.ReportSuccess(key)
+
+	ch := make(chan *provider.StreamChunk, 16)
+	go func() {
+		defer close(ch)
+		defer httpResp.Body.Close()
+		reader := bufio.NewReader(httpResp.Body)
+
+		// Anthropic SSE: 每行以 event: / data: 开头,空行分隔事件
+		// 把整段当作一个 SSE 事件转发(保留原格式)
+		var buf bytes.Buffer
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				if err == io.EOF {
+					if buf.Len() > 0 {
+						ch <- &provider.StreamChunk{Data: append([]byte{}, buf.Bytes()...)}
+					}
+					ch <- &provider.StreamChunk{Err: io.EOF}
+				} else {
+					ch <- &provider.StreamChunk{Err: err}
+				}
+				return
+			}
+			line = bytes.TrimRight(line, "\r\n")
+			// 空行 = 一个 event 结束
+			if len(line) == 0 {
+				if buf.Len() > 0 {
+					// 还原成完整 SSE 事件:每行 + \n + 空行
+					eventData := append([]byte{}, buf.Bytes()...)
+					eventData = append(eventData, '\n', '\n')
+					ch <- &provider.StreamChunk{Data: eventData}
+					buf.Reset()
+				}
+				continue
+			}
+			// 注释行
+			if bytes.HasPrefix(line, []byte(":")) {
+				continue
+			}
+			// 累积行
+			buf.Write(line)
+			buf.WriteByte('\n')
+		}
+	}()
+
+	return ch, &provider.Response{
+		StatusCode: httpResp.StatusCode,
+		Headers:    httpResp.Header,
+	}, nil
+}
+
+// HealthCheck 简单 GET 检查
+func (b *Base) HealthCheck(ctx context.Context) error {
+	hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// Anthropic 兼容 API 通常没有 /models 端点,直接 TCP 检查
+	req, err := http.NewRequestWithContext(hctx, http.MethodGet,
+		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages", nil)
+	if err != nil {
+		return err
+	}
+	if b.cfg.Pool != nil {
+		if k, err := b.cfg.Pool.Acquire(); err == nil {
+			req.Header.Set("x-api-key", k.Key)
+			defer b.cfg.Pool.ReportSuccess(k)
+		}
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	// 任何 2xx/4xx 都说明 endpoint 通了(401/405 都 OK)
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("health check: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// Close 释放 http client
+func (b *Base) Close() error {
+	b.client.CloseIdleConnections()
+	return nil
+}
+
+// newError helper
+func (b *Base) newError(status int, errType provider.ErrorType, msg string, rawErr ...[]byte) *provider.ProviderError {
+	pe := &provider.ProviderError{
+		ProviderName: b.cfg.Name,
+		StatusCode:   status,
+		ErrorType:    errType,
+		Message:      msg,
+	}
+	if len(rawErr) > 0 {
+		pe.RawError = rawErr[0]
+	}
+	return pe
+}
+
+// parseAnthropicUsage 从 Anthropic 响应抽取 usage
+// 格式: {"usage": {"input_tokens": N, "output_tokens": M}}
+func parseAnthropicUsage(body []byte) *provider.Usage {
+	var resp struct {
+		Usage *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Usage == nil {
+		return nil
+	}
+	return &provider.Usage{
+		PromptTokens:     resp.Usage.InputTokens,
+		CompletionTokens: resp.Usage.OutputTokens,
+		TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		RawUsage: map[string]interface{}{
+			"input_tokens":  resp.Usage.InputTokens,
+			"output_tokens": resp.Usage.OutputTokens,
+		},
+	}
+}
+
+func parseRetryAfter(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	var secs int
+	if _, err := fmt.Sscanf(v, "%d", &secs); err != nil {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}

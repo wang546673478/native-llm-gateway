@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/wang546673478/native-llm-gateway/internal/api/http/handler"
 	"github.com/wang546673478/native-llm-gateway/internal/api/http/middleware"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/circuit"
@@ -37,6 +38,7 @@ type Server struct {
 	cm       *circuit.Manager
 	auth     *auth.Authenticator
 	usageC   *usage.Collector
+	usageR   *usage.Repository
 	metricsC *metrics.Collector
 	http     *http.Server
 }
@@ -86,6 +88,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 
 	// P8: Usage Collector + Metrics Collector
 	usageC := usage.NewCollector(db, cfg.Usage.BatchSize, int(cfg.Usage.FlushInterval.Milliseconds()))
+	usageRepo := usage.NewRepository(db)
 	metricsC := metrics.NewCollector()
 
 	eng := proxy.NewEngine(proxy.Config{
@@ -107,6 +110,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		cm:       cm,
 		auth:     authn,
 		usageC:   usageC,
+		usageR:   usageRepo,
 		metricsC: metricsC,
 	}
 }
@@ -266,6 +270,27 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 
 	// P8: /metrics(Prometheus 格式)
 	r.GET("/metrics", gin.WrapH(s.metricsC.Handler()))
+
+	// P12: 管理 API
+	gkInfos := make([]handler.GatewayKeyInfo, 0, len(s.cfg.Auth.Keys))
+	for _, k := range s.cfg.Auth.Keys {
+		gkInfos = append(gkInfos, handler.GatewayKeyInfo{
+			Name:          k.Name,
+			AllowedModels: k.AllowedModels,
+			RPM:           k.RateLimit.RPM,
+			TPM:           k.RateLimit.TPM,
+		})
+	}
+	admin := &handler.Admin{
+		Manager:  s.manager,
+		Pools:    s.pools,
+		Router:   s.router,
+		Breakers: s.cm,
+		Usage:    s.usageR,
+		Aliases:  toRouterAliases(s.cfg.Routing.Aliases),
+		Keys:     gkInfos,
+	}
+	admin.Register(r.Group("/api/v1"))
 
 	// P5: 真代理接入
 	// 注册具体协议路径 + NoRoute 兜底(覆盖其他 /v1/* 子路径)
