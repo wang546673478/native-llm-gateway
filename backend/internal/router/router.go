@@ -221,3 +221,17 @@ func (r *Router) Aliases() map[string]AliasConfig {
 	}
 	return out
 }
+
+// Manager 返回底层 provider.Manager(Proxy 用来查 Provider 实例)
+func (r *Router) Manager() *provider.Manager { return r.manager }
+
+// Pool 返回指定 Provider 的 KeyPool(Proxy 用来 ReportSuccess/ReportRateLimit)
+func (r *Router) Pool(providerName string) *keypool.Pool { return r.pools[providerName] }
+
+// SetPool 注入 Pool(由 main.go 在启动时调用,把 cfg 里声明的 KeyPool 绑到 Router)
+func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
+	if r.pools == nil {
+		r.pools = make(map[string]*keypool.Pool)
+	}
+	r.pools[providerName] = pool
+}

@@ -14,30 +14,102 @@ import (
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/proxy"
+	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
 
 // Server 持有所有运行时依赖
-// P0: config + logger
-// P1: + db
-// P2: + provider.Manager
-// P5+: + router, proxy, keypools, circuitBreakers, ...
 type Server struct {
 	cfg     *config.Config
 	logger  *zap.Logger
 	db      *gorm.DB
 	manager *provider.Manager
+	router  *router.Router
+	engine  *proxy.Engine
 	http    *http.Server
 }
 
 // New 构造 Server
 func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.Manager) *Server {
+	// P3+P4+P5: 构造 KeyPool map + Router + Proxy
+	pools := buildKeyPools(cfg, logger)
+	r := router.NewRouter(logger, manager, pools, router.Config{
+		Aliases:         toRouterAliases(cfg.Routing.Aliases),
+		DefaultStrategy: cfg.Routing.DefaultStrategy,
+		MaxAttempts:     cfg.Retry.MaxAttempts,
+	})
+	eng := proxy.NewEngine(proxy.Config{
+		Router:   r,
+		Logger:   logger,
+		Usage:    proxy.NoopUsageRecorder{},
+		Metrics:  proxy.NoopMetricsRecorder{},
+		Breaker:  proxy.NoopCircuitReporter{},
+		MaxRetry: cfg.Retry.MaxAttempts,
+	})
 	return &Server{
 		cfg:     cfg,
 		logger:  logger,
 		db:      db,
 		manager: manager,
+		router:  r,
+		engine:  eng,
 	}
+}
+
+// buildKeyPools 为每个 enabled Provider 构造一个 KeyPool
+func buildKeyPools(cfg *config.Config, logger *zap.Logger) map[string]*keypool.Pool {
+	out := make(map[string]*keypool.Pool)
+	sched := keypool.NewScheduler(cfg.KeyPool.KeyRotation)
+	for name, p := range cfg.Providers {
+		if !p.Enabled {
+			continue
+		}
+		keys := make([]*keypool.Key, 0, len(p.Keys))
+		for i, k := range p.Keys {
+			now := time.Now().UTC()
+			keys = append(keys, &keypool.Key{
+				ID:           fmt.Sprintf("%s-%d", name, i),
+				ProviderName: name,
+				Name:         k.Name,
+				Key:          k.Key,
+				Status:       keypool.KeyStatusActive,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			})
+		}
+		pool := keypool.NewPool(name, keys, sched, keypool.Config{
+			CoolingDuration: cfg.KeyPool.CoolingDuration,
+			MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
+		})
+		out[name] = pool
+		logger.Info("keypool built",
+			zap.String("provider", name),
+			zap.Int("keys", len(keys)),
+			zap.String("rotation", cfg.KeyPool.KeyRotation),
+		)
+	}
+	return out
+}
+
+// toRouterAliases 把 config 风格别名表转 router 风格
+func toRouterAliases(in map[string]config.AliasRule) map[string]router.AliasConfig {
+	out := make(map[string]router.AliasConfig, len(in))
+	for alias, rule := range in {
+		ps := make([]router.ProviderRoute, 0, len(rule.Providers))
+		for _, p := range rule.Providers {
+			ps = append(ps, router.ProviderRoute{
+				Name: p.Name, Model: p.Model, Priority: p.Priority, Weight: p.Weight,
+			})
+		}
+		out[alias] = router.AliasConfig{
+			Alias:     alias,
+			Strategy:  rule.Strategy,
+			Providers: ps,
+		}
+	}
+	return out
 }
 
 // Run 启动 HTTP 服务
@@ -95,7 +167,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "ok",
-			"version": "0.3.0-p2",
+			"version": "0.5.0-p5",
 			"time":    time.Now().UTC().Format(time.RFC3339),
 		})
 	})
@@ -119,7 +191,6 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
 
-	// P2 新增:列出已加载的 Provider(只读,调试用)
 	r.GET("/admin/providers", func(c *gin.Context) {
 		all := s.manager.GetAll()
 		out := make([]gin.H, 0, len(all))
@@ -136,16 +207,22 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		})
 	})
 
-	// P5 之前,/v1/* 的代理入口只返回 501 Not Implemented
-	v1 := r.Group("/v1")
-	v1.Any("/*path", func(c *gin.Context) {
-		c.JSON(http.StatusNotImplemented, gin.H{
-			"error": gin.H{
-				"type":    "not_implemented",
-				"message": "proxy engine is not wired yet (phase P2 has Provider Registry only)",
-			},
-		})
+	// P5: 真代理接入
+	// 注册具体协议路径 + NoRoute 兜底(覆盖其他 /v1/* 子路径)
+	r.POST("/v1/chat/completions", s.engine.HandleRequest)
+	r.POST("/v1/messages", s.engine.HandleRequest)
+	r.POST("/v1/completions", s.engine.HandleRequest)
+	// 流式请求也走 HandleRequest,Engine 内部从 body.stream 判断
+	// 没匹配到的路径兜底(例如 /v1/embeddings 之类)
+	r.NoRoute(func(c *gin.Context) {
+		if c.Request.Method == http.MethodPost && len(c.Request.URL.Path) > 4 && c.Request.URL.Path[:4] == "/v1/" {
+			s.engine.HandleRequest(c)
+			return
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
+			"type": "not_found", "message": "no route for " + c.Request.URL.Path,
+		}})
 	})
 }
 
-var _ = database.Provider{} // keep database import alive (GORM models live there)
+var _ = database.Provider{} // keep database import alive

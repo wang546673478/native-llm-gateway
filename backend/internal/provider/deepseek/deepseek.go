@@ -46,11 +46,21 @@ func (p *Provider) HealthCheck(ctx context.Context) error {
 }
 
 func (p *Provider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
-	return nil, fmt.Errorf("deepseek: SendRequest not implemented yet (planned in P9)")
+	return nil, &provider.ProviderError{
+		ProviderName: name,
+		StatusCode:   501,
+		ErrorType:    provider.ErrorTypeServerError,
+		Message:      "deepseek: SendRequest not implemented yet (planned in P9)",
+	}
 }
 
 func (p *Provider) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
-	return nil, nil, fmt.Errorf("deepseek: SendStreamRequest not implemented yet (planned in P9)")
+	return nil, nil, &provider.ProviderError{
+		ProviderName: name,
+		StatusCode:   501,
+		ErrorType:    provider.ErrorTypeServerError,
+		Message:      "deepseek: SendStreamRequest not implemented yet (planned in P9)",
+	}
 }
 
 func (p *Provider) Close() error {
