@@ -41,11 +41,19 @@ providers:
     endpoint: "https://api.deepseek.com"
     protocol: "openai"
     timeout: 60s
+    # DeepSeek 当前在用模型(2026-07):
+    #   deepseek-v4-flash  — 默认,快
+    #   deepseek-v4-pro    — 更强
+    # 旧名 deepseek-chat / deepseek-reasoner 已于 2026/07/24 弃用
     models:
-      - id: "deepseek-chat"
+      - id: "deepseek-v4-flash"
         aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.0014
-        cost_per_1k_output: 0.0028
+        cost_per_1k_input: 0.0001
+        cost_per_1k_output: 0.0004
+      - id: "deepseek-v4-pro"
+        aliases: ["pro-model"]
+        cost_per_1k_input: 0.002
+        cost_per_1k_output: 0.008
     keys:
       - name: "deepseek-key-1"
         key: "sk-REPLACE-ME"
@@ -64,7 +72,13 @@ routing:
       strategy: "priority"
       providers:
         - name: "deepseek"
-          model: "deepseek-chat"
+          model: "deepseek-v4-flash"
+          priority: 1
+    pro-model:
+      strategy: "priority"
+      providers:
+        - name: "deepseek"
+          model: "deepseek-v4-pro"
           priority: 1
   default_strategy: "priority"
 

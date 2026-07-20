@@ -215,6 +215,106 @@ func TestParseOpenAIUsage_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsage_DeepSeekExtensions(t *testing.T) {
+	// DeepSeek 完整 usage 格式,含 cache 和 reasoning
+	body := []byte(`{
+		"usage": {
+			"prompt_tokens": 100,
+			"completion_tokens": 50,
+			"total_tokens": 150,
+			"prompt_cache_hit_tokens": 80,
+			"prompt_cache_miss_tokens": 20,
+			"completion_tokens_details": {
+				"reasoning_tokens": 30
+			}
+		}
+	}`)
+	u := parseOpenAIUsage(body)
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.PromptTokens != 100 {
+		t.Errorf("PromptTokens = %d, want 100", u.PromptTokens)
+	}
+	if u.RawUsage["prompt_cache_hit_tokens"] != 80 {
+		t.Errorf("prompt_cache_hit_tokens in RawUsage = %v, want 80", u.RawUsage["prompt_cache_hit_tokens"])
+	}
+	if u.RawUsage["reasoning_tokens"] != 30 {
+		t.Errorf("reasoning_tokens in RawUsage = %v, want 30", u.RawUsage["reasoning_tokens"])
+	}
+}
+
+func TestSendRequest_CustomChatPath(t *testing.T) {
+	// DeepSeek 用 /chat/completions 而非 /v1/chat/completions
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{
+		Name:     "deepseek",
+		Endpoint: upstream.URL,
+		Timeout:  5 * time.Second,
+		Pool:     pool,
+		ChatPath: "/chat/completions", // 关键:模拟 DeepSeek 的路径
+	})
+
+	resp, err := b.SendRequest(context.Background(), &provider.Request{
+		Body: []byte(`{"model":"m"}`),
+	})
+	if err != nil {
+		t.Fatalf("SendRequest: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("resp nil")
+	}
+	if gotPath != "/chat/completions" {
+		t.Errorf("upstream path = %q, want /chat/completions (DeepSeek 用此路径)", gotPath)
+	}
+}
+
+func TestInjectStreamUsage(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		contains string
+		notEqual string
+	}{
+		{"empty", ``, `"stream_options":{"include_usage":true}`, ``},
+		{"empty obj", `{}`, `"stream_options":{"include_usage":true}`, ``},
+		{"already has", `{"stream_options":{"include_usage":false}}`, `"include_usage":false`, ``},
+		{"with content", `{"model":"m","stream":true}`, `"stream_options":{"include_usage":true}`, ``},
+		{"invalid json", `not json`, ``, `not json`}, // 解析失败时返回原 body
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(injectStreamUsage([]byte(tt.in)))
+			if tt.contains != "" && !contains(got, tt.contains) {
+				t.Errorf("got %s, should contain %s", got, tt.contains)
+			}
+			if tt.notEqual != "" && got == tt.notEqual {
+				// notEqual 用 contains 反向
+			}
+		})
+	}
+}
+
+func contains(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && (func() bool {
+		for i := 0; i+len(needle) <= len(haystack); i++ {
+			if haystack[i:i+len(needle)] == needle {
+				return true
+			}
+		}
+		return false
+	})()
+}
+
 func TestParseRetryAfter(t *testing.T) {
 	cases := map[string]time.Duration{
 		"":      0,

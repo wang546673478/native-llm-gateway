@@ -25,6 +25,13 @@ type Config struct {
 	Endpoint string // e.g. https://api.deepseek.com
 	Timeout  time.Duration
 	Pool     *keypool.Pool
+	// ChatPath 是 chat completions 端点的路径,默认 /v1/chat/completions
+	// DeepSeek 用 /chat/completions(无 /v1 前缀);其他 OpenAI 兼容家族都用默认
+	ChatPath string
+	// ModelsOverride 若非空,覆盖 cfg.Models(用于 DeepSeek v4 时代)
+	ModelsOverride []string
+	// StreamUsage 控制是否在流式请求里加 stream_options.include_usage=true
+	StreamUsage bool
 }
 
 // Base 是 OpenAI 兼容 Provider 的共享实现
@@ -40,6 +47,9 @@ func NewBase(cfg Config) *Base {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	if cfg.ChatPath == "" {
+		cfg.ChatPath = "/v1/chat/completions"
+	}
 	return &Base{
 		cfg:    cfg,
 		client: &http.Client{Timeout: timeout},
@@ -51,7 +61,7 @@ func NewBase(cfg Config) *Base {
 
 // SendRequest 发送非流式请求
 //   1. 从 Pool 取 Key
-//   2. POST 到 {endpoint}/v1/chat/completions
+//   2. POST 到 {endpoint}{ChatPath}
 //   3. Authorization: Bearer {key}
 //   4. body 原样透传
 //   5. 解析 OpenAI 格式响应,提取 Usage
@@ -73,7 +83,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/chat/completions",
+		strings.TrimRight(b.cfg.Endpoint, "/")+b.cfg.ChatPath,
 		bytes.NewReader(req.Body))
 	if err != nil {
 		return nil, &provider.ProviderError{
@@ -172,6 +182,12 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		}
 	}
 
+	// 启用 StreamUsage 时,自动注入 stream_options.include_usage
+	streamBody := req.Body
+	if b.cfg.StreamUsage {
+		streamBody = injectStreamUsage(streamBody)
+	}
+
 	// 流式超时比非流式长
 	streamTimeout := b.cfg.Timeout
 	if streamTimeout < 120*time.Second {
@@ -180,8 +196,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	client := &http.Client{Timeout: streamTimeout}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/chat/completions",
-		bytes.NewReader(req.Body))
+		strings.TrimRight(b.cfg.Endpoint, "/")+b.cfg.ChatPath,
+		bytes.NewReader(streamBody))
 	if err != nil {
 		return nil, nil, &provider.ProviderError{
 			ProviderName: b.cfg.Name,
@@ -307,29 +323,77 @@ func (b *Base) Close() error {
 }
 
 // parseOpenAIUsage 从 OpenAI Chat Completions 响应中抽取 usage
-// 格式: {"usage": {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T}}
+// 基础格式: {"usage": {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T}}
+//
+// DeepSeek 扩展:
+//   - prompt_cache_hit_tokens / prompt_cache_miss_tokens (cache 命中/未命中)
+//   - completion_tokens_details.reasoning_tokens (思考模式消耗)
+//
+// 这些字段记在 RawUsage 里,Gateway 用作可选的精细计费输入。
 func parseOpenAIUsage(body []byte) *provider.Usage {
 	var resp struct {
 		Usage *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
+			PromptTokens            int `json:"prompt_tokens"`
+			CompletionTokens        int `json:"completion_tokens"`
+			TotalTokens             int `json:"total_tokens"`
+			PromptCacheHitTokens    int `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens   int `json:"prompt_cache_miss_tokens"`
+			CompletionTokensDetails *struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil || resp.Usage == nil {
 		return nil
 	}
-	raw := map[string]interface{}{
-		"prompt_tokens":     resp.Usage.PromptTokens,
-		"completion_tokens": resp.Usage.CompletionTokens,
-		"total_tokens":      resp.Usage.TotalTokens,
+
+	reasoningTokens := 0
+	if resp.Usage.CompletionTokensDetails != nil {
+		reasoningTokens = resp.Usage.CompletionTokensDetails.ReasoningTokens
 	}
-	return &provider.Usage{
+
+	raw := map[string]interface{}{
+		"prompt_tokens":              resp.Usage.PromptTokens,
+		"completion_tokens":          resp.Usage.CompletionTokens,
+		"total_tokens":               resp.Usage.TotalTokens,
+		"prompt_cache_hit_tokens":    resp.Usage.PromptCacheHitTokens,
+		"prompt_cache_miss_tokens":   resp.Usage.PromptCacheMissTokens,
+		"reasoning_tokens":           reasoningTokens,
+	}
+
+	u := &provider.Usage{
 		PromptTokens:     resp.Usage.PromptTokens,
 		CompletionTokens: resp.Usage.CompletionTokens,
 		TotalTokens:      resp.Usage.TotalTokens,
 		RawUsage:         raw,
 	}
+	return u
+}
+
+// injectStreamUsage 若请求 body 没有 stream_options,自动注入 include_usage=true
+// 让流式响应末尾带 usage,便于在 Gateway 端记账
+//
+// 用 JSON 解析/序列化确保生成的 body 仍是合法 JSON(而不只是字符串拼接)
+func injectStreamUsage(body []byte) []byte {
+	// 空 body 直接返回默认值
+	if len(bytes.TrimSpace(body)) == 0 {
+		return []byte(`{"stream_options":{"include_usage":true}}`)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(body, &m); err != nil {
+		// 解析失败:不修改,直接返回原 body
+		return body
+	}
+	if _, exists := m["stream_options"]; exists {
+		return body
+	}
+	m["stream_options"] = map[string]interface{}{"include_usage": true}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // parseRetryAfter 解析 Retry-After header(秒数或 HTTP 日期)
