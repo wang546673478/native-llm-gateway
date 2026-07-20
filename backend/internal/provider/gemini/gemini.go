@@ -1,4 +1,11 @@
 // Package gemini 实现 Google Gemini Provider
+// 官方文档:https://ai.google.dev/gemini-api/docs
+// 协议:Google Generative AI (generateContent / streamGenerateContent)
+// 鉴权:x-goog-api-key header(不是 ?key= query,避免 key 进 URL 日志)
+// 端点:POST {endpoint}/models/{model}:generateContent
+// Body 格式:{contents: [{parts: [{text: "..."}], role: "user"}]}
+// Usage 字段:promptTokenCount / candidatesTokenCount / totalTokenCount /
+//   cachedContentTokenCount / thoughtsTokenCount
 package gemini
 
 import (
@@ -10,7 +17,20 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider/google"
 )
 
-const name = "gemini"
+const (
+	name           = "gemini"
+	DefaultEndpoint = "https://generativelanguage.googleapis.com/v1beta"
+	ChatPath       = "" // Gemini 不用 chat path,model 拼在 URL 里
+)
+
+// DefaultModels Gemini 在用模型(2026-07)
+// 完整列表见 https://ai.google.dev/gemini-api/docs/models
+var DefaultModels = []string{
+	"gemini-2.0-flash",
+	"gemini-2.0-flash-lite",
+	"gemini-1.5-pro",
+	"gemini-3.5-flash",
+}
 
 type Provider struct {
 	base *google.Base

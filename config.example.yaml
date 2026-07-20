@@ -35,16 +35,16 @@ auth:
         tpm: 500000
 
 # Provider 配置
+# 7 个 Provider 都启用,key 用占位符 sk-REPLACE-ME / xxx.REPLACE-ME,部署前替换
+# 每个 Provider 默认 endpoint 和模型列表参考各 vendor 官方文档(2026-07)
 providers:
+  # --- DeepSeek (OpenAI 兼容,端点 /chat/completions 不带 /v1) ---
+  # 文档:https://api-docs.deepseek.com/zh-cn/
   deepseek:
     enabled: true
     endpoint: "https://api.deepseek.com"
     protocol: "openai"
     timeout: 60s
-    # DeepSeek 当前在用模型(2026-07):
-    #   deepseek-v4-flash  — 默认,快
-    #   deepseek-v4-pro    — 更强
-    # 旧名 deepseek-chat / deepseek-reasoner 已于 2026/07/24 弃用
     models:
       - id: "deepseek-v4-flash"
         aliases: ["coding-model", "chat-model"]
@@ -65,10 +65,10 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-  # DeepSeek 也提供 Anthropic 兼容端点,给 Anthropic SDK 用户用
-  # https://api-docs.deepseek.com — 选 Anthropic 协议即可使用
+  # --- DeepSeek Anthropic 兼容(给 Anthropic SDK 用户) ---
+  # 文档:https://api-docs.deepseek.com/zh-cn/ (Anthropic 协议部分)
   deepseek-anthropic:
-    enabled: false  # 默认关掉,有需要再开
+    enabled: true
     endpoint: "https://api.deepseek.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
@@ -88,6 +88,188 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  # --- 智谱 GLM (OpenAI 兼容) ---
+  # 文档:https://open.bigmodel.cn/dev/api
+  glm:
+    enabled: true
+    endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    protocol: "openai"
+    timeout: 60s
+    models:
+      - id: "glm-4-flash"
+        aliases: ["glm-flash"]
+        cost_per_1k_input: 0.0     # glm-4-flash 免费
+        cost_per_1k_output: 0.0
+      - id: "glm-4.6"
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.001
+      - id: "glm-4"
+        aliases: []
+        cost_per_1k_input: 0.1      # 标准价,实际看官方
+        cost_per_1k_output: 0.1
+    keys:
+      - name: "glm-key-1"
+        key: "REPLACE-ME.glm-key"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # --- 通义千问 Qwen (OpenAI 兼容模式,DashScope) ---
+  # 文档:https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api
+  # 端点:https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+  qwen:
+    enabled: true
+    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    protocol: "openai"
+    timeout: 60s
+    models:
+      - id: "qwen-plus"
+        aliases: []
+        cost_per_1k_input: 0.0008
+        cost_per_1k_output: 0.002
+      - id: "qwen-turbo"
+        aliases: []
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0006
+      - id: "qwen-max"
+        aliases: []
+        cost_per_1k_input: 0.02
+        cost_per_1k_output: 0.06
+      - id: "qwen-coder-plus"
+        aliases: ["qwen-coder"]
+        cost_per_1k_input: 0.0035
+        cost_per_1k_output: 0.007
+      - id: "qwen-long"
+        aliases: []
+        cost_per_1k_input: 0.0005
+        cost_per_1k_output: 0.002
+    keys:
+      - name: "qwen-key-1"
+        key: "sk-REPLACE-ME"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # --- Kimi (Moonshot,OpenAI 兼容) ---
+  # 文档:https://platform.moonshot.cn/docs/intro
+  # 端点:https://api.moonshot.cn/v1/chat/completions
+  kimi:
+    enabled: true
+    endpoint: "https://api.moonshot.cn"
+    protocol: "openai"
+    timeout: 120s   # 长上下文模型需要更长超时
+    models:
+      - id: "moonshot-v1-8k"
+        aliases: []
+        cost_per_1k_input: 0.012   # 官方定价,实际以控制台为准
+        cost_per_1k_output: 0.012
+      - id: "moonshot-v1-32k"
+        aliases: []
+        cost_per_1k_input: 0.024
+        cost_per_1k_output: 0.024
+      - id: "moonshot-v1-128k"
+        aliases: ["kimi-long"]
+        cost_per_1k_input: 0.06
+        cost_per_1k_output: 0.06
+      - id: "kimi-k2-0905-preview"
+        aliases: []
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.005
+    keys:
+      - name: "kimi-key-1"
+        key: "sk-REPLACE-ME"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # --- MiniMax / Anthropic 兼容 ---
+  # 规格书里的占位名,实际指向任何 Anthropic Messages 兼容端点:
+  #   - Anthropic Claude API (https://api.anthropic.com)
+  #   - 其他走 Anthropic 协议的 vendor
+  # 鉴权:x-api-key header + anthropic-version: 2023-06-01
+  # 端点:POST /v1/messages
+  # 文档:https://docs.anthropic.com/en/api/messages
+  minimax:
+    enabled: true
+    endpoint: "https://api.anthropic.com"
+    protocol: "anthropic"
+    timeout: 90s
+    models:
+      - id: "claude-sonnet-4-5"
+        aliases: ["sonnet"]
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.015
+      - id: "claude-3-5-haiku-20241022"
+        aliases: ["haiku"]
+        cost_per_1k_input: 0.0008
+        cost_per_1k_output: 0.004
+      - id: "claude-3-opus-20240229"
+        aliases: ["opus"]
+        cost_per_1k_input: 0.015
+        cost_per_1k_output: 0.075
+    keys:
+      - name: "minimax-key-1"
+        key: "sk-ant-REPLACE-ME"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # --- Google Gemini (Google 协议) ---
+  # 文档:https://ai.google.dev/gemini-api/docs
+  # 端点:POST {endpoint}/models/{model}:generateContent
+  # 鉴权:x-goog-api-key header(不是 ?key= query)
+  # Body:{contents:[{parts:[{text:"..."}], role:"user"}]}
+  # Usage 字段名:promptTokenCount / candidatesTokenCount / totalTokenCount
+  gemini:
+    enabled: true
+    endpoint: "https://generativelanguage.googleapis.com/v1beta"
+    protocol: "google"
+    timeout: 60s
+    models:
+      - id: "gemini-2.0-flash"
+        aliases: ["gemini-flash"]
+        cost_per_1k_input: 0.000075    # 2026 公开价
+        cost_per_1k_output: 0.0003
+      - id: "gemini-2.0-flash-lite"
+        aliases: []
+        cost_per_1k_input: 0.0000375
+        cost_per_1k_output: 0.00015
+      - id: "gemini-1.5-pro"
+        aliases: []
+        cost_per_1k_input: 0.00125
+        cost_per_1k_output: 0.005
+      - id: "gemini-3.5-flash"
+        aliases: []
+        cost_per_1k_input: 0.0001
+        cost_per_1k_output: 0.0004
+    keys:
+      - name: "gemini-key-1"
+        key: "REPLACE-ME.gemini-key"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
 # 路由规则(P4 阶段真正生效)
 routing:
   aliases:
@@ -97,12 +279,42 @@ routing:
         - name: "deepseek"
           model: "deepseek-v4-flash"
           priority: 1
+        - name: "qwen"
+          model: "qwen-coder-plus"
+          priority: 2
+        - name: "kimi"
+          model: "kimi-k2-0905-preview"
+          priority: 3
+        - name: "glm"
+          model: "glm-4-flash"
+          priority: 4
     pro-model:
       strategy: "priority"
       providers:
         - name: "deepseek"
           model: "deepseek-v4-pro"
           priority: 1
+        - name: "minimax"
+          model: "claude-sonnet-4-5"
+          priority: 2
+        - name: "qwen"
+          model: "qwen-max"
+          priority: 3
+    chat-model:
+      strategy: "weight"
+      providers:
+        - name: "deepseek"
+          model: "deepseek-v4-flash"
+          weight: 40
+        - name: "qwen"
+          model: "qwen-plus"
+          weight: 30
+        - name: "glm"
+          model: "glm-4-flash"
+          weight: 20
+        - name: "gemini"
+          model: "gemini-2.0-flash"
+          weight: 10
   default_strategy: "priority"
 
 # Key Pool 配置(P3 阶段真正生效)

@@ -50,7 +50,8 @@ func NewBase(cfg Config) *Base {
 	}
 }
 
-// SendRequest POST {endpoint}/models/{model}:generateContent?key={apiKey}
+// SendRequest POST {endpoint}/models/{model}:generateContent
+// 鉴权: x-goog-api-key header(官方推荐;不用 ?key= query 是为了不让 key 进 URL 日志)
 // body 原样透传(Gateway 已经抽出了 model,这里直接从 body 找 model)
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	if b.cfg.Pool == nil {
@@ -69,6 +70,8 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// 官方推荐用 header 而不是 ?key= query
+	httpReq.Header.Set("x-goog-api-key", key.Key)
 	if req.TraceID != "" {
 		httpReq.Header.Set("X-Request-Id", req.TraceID)
 	}
@@ -134,6 +137,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		return nil, nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", key.Key)
 	if req.TraceID != "" {
 		httpReq.Header.Set("X-Request-Id", req.TraceID)
 	}
@@ -198,7 +202,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	}, nil
 }
 
-// HealthCheck GET {endpoint}/models?key={apiKey}
+// HealthCheck GET {endpoint}/models
+// 鉴权用 x-goog-api-key header(避免 URL 日志泄露)
 func (b *Base) HealthCheck(ctx context.Context) error {
 	hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -209,9 +214,7 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	}
 	if b.cfg.Pool != nil {
 		if k, err := b.cfg.Pool.Acquire(); err == nil {
-			q := req.URL.Query()
-			q.Set("key", k.Key)
-			req.URL.RawQuery = q.Encode()
+			req.Header.Set("x-goog-api-key", k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
 		}
 	}

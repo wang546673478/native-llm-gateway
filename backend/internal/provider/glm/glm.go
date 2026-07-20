@@ -1,5 +1,6 @@
 // Package glm 实现智谱 GLM Provider
 // GLM 兼容 OpenAI Chat Completions
+// 官方文档:https://open.bigmodel.cn/dev/api
 package glm
 
 import (
@@ -11,7 +12,20 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider/openai_compatible"
 )
 
-const name = "glm"
+const (
+	name           = "glm"
+	DefaultEndpoint = "https://open.bigmodel.cn/api/paas/v4"
+	ChatPath       = "/chat/completions"
+)
+
+// DefaultModels 智谱 GLM 在用模型(2026-07)
+// 完整模型列表见 https://open.bigmodel.cn/dev/api#glm-4
+var DefaultModels = []string{
+	"glm-4-flash",
+	"glm-4",
+	"glm-4.6",
+	"glm-4.7",
+}
 
 // Provider GLM Provider
 type Provider struct {

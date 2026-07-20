@@ -1,5 +1,6 @@
 // Package qwen 实现通义千问 Qwen Provider
-// 通过 DashScope OpenAI 兼容模式接入
+// 通过阿里云百炼 DashScope 的 OpenAI 兼容模式接入
+// 官方文档:https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api
 package qwen
 
 import (
@@ -11,7 +12,23 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider/openai_compatible"
 )
 
-const name = "qwen"
+const (
+	name           = "qwen"
+	DefaultEndpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	ChatPath       = "/chat/completions"
+)
+
+// DefaultModels Qwen 在用模型(2026-07)
+// 完整列表见 DashScope 模型广场
+var DefaultModels = []string{
+	"qwen-plus",
+	"qwen-turbo",
+	"qwen-max",
+	"qwen-long",
+	"qwen-vl-max",
+	"qwen-coder-plus",
+	"qwen-doc-turbo",
+}
 
 type Provider struct {
 	base *openai_compatible.Base
