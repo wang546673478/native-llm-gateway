@@ -19,22 +19,24 @@ import (
 
 // Engine 是 Gateway 的代理引擎
 type Engine struct {
-	logger   *zap.Logger
-	router   *router.Router
-	usage    UsageRecorder
-	metrics  MetricsRecorder
-	breaker  CircuitReporter
-	maxRetry int
+	logger       *zap.Logger
+	router       *router.Router
+	usage        UsageRecorder
+	metrics      MetricsRecorder
+	breaker      CircuitReporter
+	tokenRecorder TokenUsageRecorder // P13: TPM 计数回调(可选)
+	maxRetry     int
 }
 
 // Config 构造 Engine 的配置
 type Config struct {
-	Router   *router.Router
-	Logger   *zap.Logger
-	Usage    UsageRecorder
-	Metrics  MetricsRecorder
-	Breaker  CircuitReporter
-	MaxRetry int // 最大 failover 次数,默认 3
+	Router        *router.Router
+	Logger        *zap.Logger
+	Usage         UsageRecorder
+	Metrics       MetricsRecorder
+	Breaker       CircuitReporter
+	TokenRecorder TokenUsageRecorder // P13: 可选
+	MaxRetry      int // 最大 failover 次数,默认 3
 }
 
 // NewEngine 构造 Proxy Engine
@@ -55,12 +57,13 @@ func NewEngine(cfg Config) *Engine {
 		cfg.MaxRetry = 3
 	}
 	return &Engine{
-		logger:   cfg.Logger,
-		router:   cfg.Router,
-		usage:    cfg.Usage,
-		metrics:  cfg.Metrics,
-		breaker:  cfg.Breaker,
-		maxRetry: cfg.MaxRetry,
+		logger:        cfg.Logger,
+		router:        cfg.Router,
+		usage:         cfg.Usage,
+		metrics:       cfg.Metrics,
+		breaker:       cfg.Breaker,
+		tokenRecorder: cfg.TokenRecorder,
+		maxRetry:      cfg.MaxRetry,
 	}
 }
 
@@ -372,6 +375,10 @@ func (e *Engine) recordUsageWithTokens(
 			RecordTokens(string, int, int)
 		}); ok {
 			mr.RecordTokens(result.ProviderName, u.PromptTokens, u.CompletionTokens)
+		}
+		// TPM 计数:回填到 Authenticator
+		if e.tokenRecorder != nil && req.GatewayKeyID != "" && r.TotalTokens > 0 {
+			e.tokenRecorder.RecordUsage(req.GatewayKeyID, int64(r.TotalTokens))
 		}
 	}
 	e.usage.Record(r)

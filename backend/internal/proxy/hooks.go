@@ -62,3 +62,9 @@ func (NoopCircuitReporter) RecordFailure(string, string) {}
 func errorIsRetryable(pe *provider.ProviderError) bool {
 	return pe != nil && pe.IsRetryable()
 }
+
+// TokenUsageRecorder TPM 计数回调(P13)
+// 在拿到 Provider.Usage 后由 Engine 回调,用于客户端 TPM 限流
+type TokenUsageRecorder interface {
+	RecordUsage(keyID string, tokens int64)
+}

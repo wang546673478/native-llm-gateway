@@ -102,3 +102,43 @@ func TestAllowRequest_WindowExpires(t *testing.T) {
 	// 跳过这个 case,只验证限流触发
 	_ = time.Now()
 }
+
+func TestTPM_AllowTokens(t *testing.T) {
+	a := New([]GatewayKey{{Name: "k"}})
+	ok, _ := a.CheckTPM("k", 1000, 100)
+	if !ok {
+		t.Error("first 100 tokens should fit in 1000 TPM")
+	}
+	ok, _ = a.CheckTPM("k", 1000, 500)
+	if !ok {
+		t.Error("additional 500 should fit (600 total)")
+	}
+	ok, reason := a.CheckTPM("k", 1000, 500)
+	if ok {
+		t.Error("additional 500 should exceed limit (1100 > 1000)")
+	}
+	if reason != "tpm_exceeded" {
+		t.Errorf("reason = %q, want tpm_exceeded", reason)
+	}
+}
+
+func TestTPM_RecordTokens(t *testing.T) {
+	a := New([]GatewayKey{{Name: "k"}})
+	a.RecordTokens("k", 600)
+	ok, _ := a.CheckTPM("k", 1000, 500)
+	if ok {
+		t.Error("600+500 > 1000 should be denied")
+	}
+	ok, _ = a.CheckTPM("k", 1000, 300)
+	if !ok {
+		t.Error("600+300 = 900 < 1000 should be allowed")
+	}
+}
+
+func TestTPM_NoLimitAllowsAnything(t *testing.T) {
+	a := New([]GatewayKey{{Name: "k"}})
+	ok, _ := a.CheckTPM("k", 0, 1_000_000)
+	if !ok {
+		t.Error("limit=0 should always allow")
+	}
+}

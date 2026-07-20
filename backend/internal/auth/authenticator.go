@@ -41,6 +41,7 @@ type Authenticator struct {
 	mu    sync.RWMutex
 	keys  map[string]*GatewayKey // hash → key
 	rpm   map[string]*rpmCounter // key ID → rpm 计数
+	tpm   map[string]*tpmCounter // key ID → tpm 计数(token)
 }
 
 // New 构造 Authenticator
@@ -48,6 +49,7 @@ func New(keys []GatewayKey) *Authenticator {
 	a := &Authenticator{
 		keys: make(map[string]*GatewayKey, len(keys)),
 		rpm:  make(map[string]*rpmCounter, len(keys)),
+		tpm:  make(map[string]*tpmCounter, len(keys)),
 	}
 	for i := range keys {
 		k := keys[i]
@@ -60,6 +62,7 @@ func New(keys []GatewayKey) *Authenticator {
 		}
 		a.keys[k.KeyHash] = &k
 		a.rpm[k.ID] = &rpmCounter{}
+		a.tpm[k.ID] = &tpmCounter{usage: make(map[int64]int64)}
 	}
 	return a
 }
@@ -122,11 +125,47 @@ func (a *Authenticator) AllowRequest(keyID string, limitRPM int) bool {
 	return c.allow(limitRPM)
 }
 
+// CheckTPM 检查 token 配额
+//   - limitTPM=0 → 不限
+//   - estimatedTokens 是预估消耗(可以填 0 表示不预订,只追加)
+// 返回 (allowed, reason)
+//   allowed=false 时 reason 描述被拒原因
+func (a *Authenticator) CheckTPM(keyID string, limitTPM int, estimatedTokens int64) (bool, string) {
+	if limitTPM <= 0 {
+		return true, ""
+	}
+	a.mu.RLock()
+	c, ok := a.tpm[keyID]
+	a.mu.RUnlock()
+	if !ok {
+		return true, ""
+	}
+	allowed, _ := c.AllowTokens(limitTPM, estimatedTokens)
+	if !allowed {
+		return false, "tpm_exceeded"
+	}
+	return true, ""
+}
+
+// RecordTokens 把实际用量追加到 TPM 计数
+func (a *Authenticator) RecordTokens(keyID string, tokens int64) {
+	if tokens <= 0 {
+		return
+	}
+	a.mu.RLock()
+	c, ok := a.tpm[keyID]
+	a.mu.RUnlock()
+	if !ok {
+		return
+	}
+	c.RecordTokens(tokens)
+}
+
 // rpmCounter 简单的 1-minute 滑动窗口计数器
 type rpmCounter struct {
-	mu      sync.Mutex
-	hits    []time.Time
-	limit   int
+	mu    sync.Mutex
+	hits  []time.Time
+	limit int
 }
 
 func (c *rpmCounter) allow(limit int) bool {
@@ -150,4 +189,47 @@ func (c *rpmCounter) allow(limit int) bool {
 	}
 	c.hits = append(c.hits, now)
 	return true
+}
+
+// tpmCounter token 计数器(按分钟累计)
+// 用 map[minute_bucket]token 累加,旧 bucket 自然过期
+type tpmCounter struct {
+	mu    sync.Mutex
+	usage map[int64]int64 // minute unix timestamp → tokens used
+	limit int
+}
+
+// AllowTokens 检查剩余配额是否够用 tokens
+// 返回 (allowed, usedInWindow)
+// 简单实现:不允许"超量预订",而是请求进来时检查当前用量 + tokens 是否超 limit
+func (c *tpmCounter) AllowTokens(limit int, tokens int64) (bool, int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	bucket := now.Unix() / 60
+
+	// 清掉上一分钟及之前的 bucket
+	for b := range c.usage {
+		if b < bucket {
+			delete(c.usage, b)
+		}
+	}
+
+	used := c.usage[bucket]
+	if used+tokens > int64(limit) {
+		return false, used
+	}
+	c.usage[bucket] = used + tokens
+	return true, used + tokens
+}
+
+// RecordTokens 强制累加(用于请求结束后追加实际用量)
+func (c *tpmCounter) RecordTokens(tokens int64) {
+	if tokens <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	bucket := time.Now().Unix() / 60
+	c.usage[bucket] += tokens
 }

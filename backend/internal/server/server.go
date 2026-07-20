@@ -92,12 +92,13 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	metricsC := metrics.NewCollector()
 
 	eng := proxy.NewEngine(proxy.Config{
-		Router:   r,
-		Logger:   logger,
-		Usage:    usage.NewAdapter(usageC),
-		Metrics:  metrics.NewAdapter(metricsC),
-		Breaker:  reporter,
-		MaxRetry: cfg.Retry.MaxAttempts,
+		Router:        r,
+		Logger:        logger,
+		Usage:         usage.NewAdapter(usageC),
+		Metrics:       metrics.NewAdapter(metricsC),
+		Breaker:       reporter,
+		TokenRecorder: newAuthTokenRecorder(authn), // P13: TPM 计数(若 auth 启用)
+		MaxRetry:      cfg.Retry.MaxAttempts,
 	})
 	return &Server{
 		cfg:      cfg,
@@ -331,3 +332,19 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 }
 
 var _ = database.Provider{} // keep database import alive
+
+// authTokenRecorder 把 auth.Authenticator 适配到 proxy.TokenUsageRecorder
+type authTokenRecorder struct {
+	a *auth.Authenticator
+}
+
+func newAuthTokenRecorder(a *auth.Authenticator) *authTokenRecorder {
+	if a == nil {
+		return nil
+	}
+	return &authTokenRecorder{a: a}
+}
+
+func (r *authTokenRecorder) RecordUsage(keyID string, tokens int64) {
+	r.a.RecordTokens(keyID, tokens)
+}

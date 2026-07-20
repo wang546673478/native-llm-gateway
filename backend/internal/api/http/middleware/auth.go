@@ -45,10 +45,16 @@ func RateLimitMiddleware(a *auth.Authenticator) gin.HandlerFunc {
 		gk := v.(*auth.GatewayKey)
 		if !a.AllowRequest(keyID, gk.RateLimit.RPM) {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": gin.H{"type": "rate_limit_exceeded", "message": "gateway key rate limit exceeded"},
+				"error": gin.H{"type": "rate_limit_exceeded", "message": "gateway key rate limit exceeded (rpm)"},
 			})
 			return
 		}
 		c.Next()
 	}
+}
+
+// TokenUsageRecorder 让 handler/Engine 在拿到 Usage 后回填 token 计数
+// 由 Server 在启动时把 Recorer 注入到 Proxy.Engine
+type TokenUsageRecorder interface {
+	RecordUsage(keyID string, tokens int64)
 }
