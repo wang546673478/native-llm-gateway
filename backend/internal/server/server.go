@@ -12,6 +12,8 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/wang546673478/native-llm-gateway/internal/api/http/middleware"
+	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
@@ -31,6 +33,7 @@ type Server struct {
 	engine  *proxy.Engine
 	pools   map[string]*keypool.Pool
 	cm      *circuit.Manager
+	auth    *auth.Authenticator
 	http    *http.Server
 }
 
@@ -61,6 +64,23 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		})
 	}
 
+	// P7: Authenticator
+	var authn *auth.Authenticator
+	if cfg.Auth.Enabled {
+		gkKeys := make([]auth.GatewayKey, 0, len(cfg.Auth.Keys))
+		for i, k := range cfg.Auth.Keys {
+			gkKeys = append(gkKeys, auth.GatewayKey{
+				Name:          k.Name,
+				KeyHash:       k.Key, // 注:P7 简化,直接用明文比对;生产应该 hash
+				AllowedModels: k.AllowedModels,
+				RateLimit:     auth.RateLimitConfig{RPM: k.RateLimit.RPM, TPM: k.RateLimit.TPM},
+			})
+			_ = i
+		}
+		authn = auth.New(gkKeys)
+		logger.Info("auth enabled", zap.Int("keys", len(gkKeys)))
+	}
+
 	eng := proxy.NewEngine(proxy.Config{
 		Router:   r,
 		Logger:   logger,
@@ -78,6 +98,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		engine:  eng,
 		pools:   pools,
 		cm:      cm,
+		auth:    authn,
 	}
 }
 
@@ -232,13 +253,33 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 
 	// P5: 真代理接入
 	// 注册具体协议路径 + NoRoute 兜底(覆盖其他 /v1/* 子路径)
-	r.POST("/v1/chat/completions", s.engine.HandleRequest)
-	r.POST("/v1/messages", s.engine.HandleRequest)
-	r.POST("/v1/completions", s.engine.HandleRequest)
+	// P7: 当 auth.enabled=true 时,代理端点前挂 Auth + RateLimit 中间件
+	proxyHandlers := []gin.HandlerFunc{}
+	if s.auth != nil {
+		proxyHandlers = append(proxyHandlers,
+			middleware.AuthMiddleware(s.auth),
+			middleware.RateLimitMiddleware(s.auth),
+		)
+	}
+	proxyHandlers = append(proxyHandlers, s.engine.HandleRequest)
+
+	r.POST("/v1/chat/completions", proxyHandlers...)
+	r.POST("/v1/messages", proxyHandlers...)
+	r.POST("/v1/completions", proxyHandlers...)
 	// 流式请求也走 HandleRequest,Engine 内部从 body.stream 判断
 	// 没匹配到的路径兜底(例如 /v1/embeddings 之类)
 	r.NoRoute(func(c *gin.Context) {
 		if c.Request.Method == http.MethodPost && len(c.Request.URL.Path) > 4 && c.Request.URL.Path[:4] == "/v1/" {
+			if s.auth != nil {
+				middleware.AuthMiddleware(s.auth)(c)
+				if c.IsAborted() {
+					return
+				}
+				middleware.RateLimitMiddleware(s.auth)(c)
+				if c.IsAborted() {
+					return
+				}
+			}
 			s.engine.HandleRequest(c)
 			return
 		}
