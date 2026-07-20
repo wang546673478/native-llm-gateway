@@ -70,9 +70,10 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		})
 	}
 
-	// P7: Authenticator
+	// P7: Authenticator(从 DB 加载;config keys 在启动时被 seed 到 DB)
 	var authn *auth.Authenticator
 	if cfg.Auth.Enabled {
+		// 把 config 里的 keys seed 到 DB
 		gkKeys := make([]auth.GatewayKey, 0, len(cfg.Auth.Keys))
 		for _, k := range cfg.Auth.Keys {
 			gkKeys = append(gkKeys, auth.GatewayKey{
@@ -82,8 +83,17 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 				RateLimit:     auth.RateLimitConfig{RPM: k.RateLimit.RPM, TPM: k.RateLimit.TPM},
 			})
 		}
-		authn = auth.New(gkKeys)
-		logger.Info("auth enabled", zap.Int("keys", len(gkKeys)))
+		if err := auth.SeedFromConfig(context.Background(), db, gkKeys); err != nil {
+			logger.Warn("seed keys from config failed", zap.Error(err))
+		}
+		// 从 DB 加载所有 keys(含 config seed + UI 添加的)
+		dbKeys, err := auth.LoadFromDB(context.Background(), db)
+		if err != nil {
+			logger.Warn("load keys from DB failed", zap.Error(err))
+			dbKeys = gkKeys // fallback to config
+		}
+		authn = auth.New(dbKeys)
+		logger.Info("auth enabled", zap.Int("keys", len(dbKeys)))
 	}
 
 	// P8: Usage Collector + Metrics Collector
@@ -292,6 +302,17 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		Keys:     gkInfos,
 	}
 	admin.Register(r.Group("/api/v1"))
+
+	// P16: Gateway Keys CRUD handler
+	// 注意:CRUD 端点本身不要求 auth.enabled,这样即使没启用 auth 也能管理 keys
+	// Authenticator 用一个 noop wrapper,把 Reload 调用变 no-op
+	noopReload := func(keys []auth.GatewayKey) {
+		if s.auth != nil {
+			s.auth.Reload(keys)
+		}
+	}
+	keysHandler := auth.NewKeysHandler(s.db, noopReload)
+	keysHandler.Register(r.Group("/api/v1"))
 
 	// P5: 真代理接入
 	// 注册具体协议路径 + NoRoute 兜底(覆盖其他 /v1/* 子路径)

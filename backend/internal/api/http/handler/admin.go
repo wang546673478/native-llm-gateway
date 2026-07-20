@@ -36,10 +36,11 @@ type GatewayKeyInfo struct {
 }
 
 // Register 把所有管理 API 路由注册到 r
+// 注意:GET /keys 由 auth.KeysHandler 提供(P16,DB-backed CRUD),
+// Admin 不再重复注册
 func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/providers", a.listProviders)
 	r.GET("/providers/:name", a.getProvider)
-	r.GET("/keys", a.listKeys)
 	r.GET("/routing", a.listRouting)
 	r.GET("/usage", a.queryUsage)
 	r.GET("/usage/aggregate", a.aggregateUsage)
@@ -100,10 +101,7 @@ func (a *Admin) getProvider(c *gin.Context) {
 	c.JSON(http.StatusOK, info)
 }
 
-// listKeys GET /api/v1/keys(只返回名称和配额,不返回密钥)
-func (a *Admin) listKeys(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"keys": a.Keys, "count": len(a.Keys)})
-}
+// listKeys 移除:P16 起由 auth.KeysHandler 提供 DB-backed 的 GET /api/v1/keys
 
 // listRouting GET /api/v1/routing
 func (a *Admin) listRouting(c *gin.Context) {
