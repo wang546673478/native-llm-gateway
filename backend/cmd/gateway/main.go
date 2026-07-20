@@ -3,8 +3,9 @@
 //   1. 解析命令行参数(config 路径)
 //   2. 加载配置
 //   3. 初始化日志
-//   4. 启动 HTTP 服务
-//   5. 监听信号,触发优雅关停
+//   4. 打开数据库 + 迁移
+//   5. 启动 HTTP 服务
+//   6. 监听信号,触发优雅关停
 package main
 
 import (
@@ -17,8 +18,10 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gorm.io/gorm"
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
+	"github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/server"
 )
 
@@ -67,11 +70,29 @@ func run(cmd *cobra.Command, args []string) error {
 		zap.Int("port", cfg.Server.Port),
 	)
 
+	// P1: 数据库 + 迁移
+	db, err := database.Open(&cfg.Database)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	if err := database.Migrate(db); err != nil {
+		return fmt.Errorf("migrate db: %w", err)
+	}
+	logger.Info("database ready", zap.String("driver", cfg.Database.Driver))
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := server.New(cfg, logger)
-	return srv.Run(ctx)
+	srv := server.New(cfg, logger, db)
+	if err := srv.Run(ctx); err != nil {
+		return err
+	}
+
+	// 关闭 DB 连接
+	if sqlDB, err := db.DB(); err == nil {
+		_ = sqlDB.Close()
+	}
+	return nil
 }
 
 // newLogger 根据 level 构造 zap logger
@@ -91,3 +112,6 @@ func newLogger(level string, json bool) (*zap.Logger, error) {
 	cfg.Level = zap.NewAtomicLevelAt(lvl)
 	return cfg.Build()
 }
+
+// silence unused warning when gorm import isn't used in early phases
+var _ = gorm.ErrRecordNotFound

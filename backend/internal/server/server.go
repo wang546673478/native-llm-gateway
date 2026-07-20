@@ -10,23 +10,29 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
+	"github.com/wang546673478/native-llm-gateway/internal/database"
 )
 
 // Server 持有所有运行时依赖
-// 阶段 P0: 只持有 config 和 logger,后续阶段注入 provider manager / router 等
+// 阶段 P0: 只持有 config 和 logger
+// 阶段 P1: + db
+// 阶段 P2+: + providerManager, router, keypools, circuitBreakers, ...
 type Server struct {
 	cfg    *config.Config
 	logger *zap.Logger
+	db     *gorm.DB
 	http   *http.Server
 }
 
 // New 构造 Server
-func New(cfg *config.Config, logger *zap.Logger) *Server {
+func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB) *Server {
 	return &Server{
 		cfg:    cfg,
 		logger: logger,
+		db:     db,
 	}
 }
 
@@ -83,23 +89,46 @@ func (s *Server) shutdown() error {
 // registerRoutes 注册路由
 // P0 阶段只暴露健康检查和占位的 v1 代理入口
 func (s *Server) registerRoutes(r *gin.Engine) {
+	// /healthz — 进程存活,不做任何外部依赖检查
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "ok",
-			"version": "0.1.0-p0",
+			"version": "0.2.0-p1",
 			"time":    time.Now().UTC().Format(time.RFC3339),
 		})
 	})
 
+	// /readyz — P1 新增:依赖健康(目前是 DB),用于 k8s readinessProbe
+	r.GET("/readyz", func(c *gin.Context) {
+		if s.db == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db_not_initialized"})
+			return
+		}
+		sqlDB, err := s.db.DB()
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db_handle_error", "error": err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+		defer cancel()
+		if err := sqlDB.PingContext(ctx); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db_unreachable", "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ready"})
+	})
+
 	// P5 之前,/v1/* 的代理入口只返回 501 Not Implemented
-	// 不暴露真实路由,避免客户端把请求发到这里
 	v1 := r.Group("/v1")
 	v1.Any("/*path", func(c *gin.Context) {
 		c.JSON(http.StatusNotImplemented, gin.H{
 			"error": gin.H{
 				"type":    "not_implemented",
-				"message": "proxy engine is not wired yet (phase P0 skeleton)",
+				"message": "proxy engine is not wired yet (phase P1 has DB only)",
 			},
 		})
 	})
 }
+
+// silence unused for early-phase imports
+var _ = database.Provider{}
