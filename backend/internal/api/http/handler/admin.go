@@ -15,16 +15,25 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/usage"
 )
 
+// type alias 避免和 router.Router 同名
+type Protocol = provider.Protocol
+
+const (
+	ProtocolOpenAI    = provider.ProtocolOpenAI
+	ProtocolAnthropic = provider.ProtocolAnthropic
+	ProtocolGoogle    = provider.ProtocolGoogle
+)
+
 // Admin 持有管理 API 所需的依赖
 type Admin struct {
-	Manager  *provider.Manager
-	Pools    map[string]*keypool.Pool
-	Router   *router.Router
-	Breakers *circuit.Manager
-	Usage    *usage.Repository
-	// Config 快照(用于返回当前生效的配置)
-	Aliases map[string]router.AliasConfig
-	Keys    []GatewayKeyInfo
+	Manager     *provider.Manager
+	Registry    *provider.Registry
+	Pools       map[string]*keypool.Pool
+	Router      *router.Router
+	Breakers    *circuit.Manager
+	Usage       *usage.Repository
+	Aliases     map[string]router.AliasConfig
+	Keys        []GatewayKeyInfo
 }
 
 // GatewayKeyInfo 用于管理 API 返回的 Gateway Key 信息(不含密钥明文)
@@ -40,11 +49,48 @@ type GatewayKeyInfo struct {
 // Admin 不再重复注册
 func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/providers", a.listProviders)
+	r.GET("/providers/registered", a.listRegisteredProviders)
 	r.GET("/providers/:name", a.getProvider)
 	r.GET("/routing", a.listRouting)
 	r.GET("/usage", a.queryUsage)
 	r.GET("/usage/aggregate", a.aggregateUsage)
 	r.GET("/dashboard", a.dashboard)
+}
+
+// listRegisteredProviders GET /api/v1/providers/registered
+// 返回所有已注册到 Registry 的 Provider(不管 config 里 enabled 与否)
+// 用于前端"绑定 Provider"下拉 — 用户应能选任何协议上支持的 Provider
+func (a *Admin) listRegisteredProviders(c *gin.Context) {
+	if a.Registry == nil {
+		c.JSON(http.StatusOK, gin.H{"providers": []string{}})
+		return
+	}
+	names := a.Registry.ListRegistered()
+	protocols := a.Registry.ListRegisteredProtocols()
+	out := make([]gin.H, 0, len(names))
+	loaded := a.Manager.GetAll()
+	for _, name := range names {
+		// 优先用 Registry 记录的 protocol 元数据(由 init() 时声明),
+		// 其次 fallback 到已加载实例的 protocol
+		protocol, ok := protocols[name]
+		if !ok {
+			protocol = ProtocolOpenAI // 老注册方式没记录,默认 openai
+		}
+		var loadedOK bool
+		if p, ok := loaded[name]; ok {
+			protocol = Protocol(p.Protocol())
+			loadedOK = true
+		}
+		out = append(out, gin.H{
+			"name":     name,
+			"protocol": string(protocol),
+			"loaded":   loadedOK,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"providers": out,
+		"count":     len(out),
+	})
 }
 
 // listProviders GET /api/v1/providers

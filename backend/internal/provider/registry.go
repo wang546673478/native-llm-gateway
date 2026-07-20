@@ -28,17 +28,19 @@ type ProviderConfig struct {
 	OpenTimeout      time.Duration
 }
 
-// Registry 维护 name → Factory 的映射
+// Registry 维护 name → Factory + Protocol 的映射
 // 每个 Provider 包在 init() 时调用 Register 注册自己
 type Registry struct {
-	mu        sync.RWMutex
-	factories map[string]Factory
+	mu          sync.RWMutex
+	factories   map[string]Factory
+	protocols   map[string]Protocol // 用于前端显示绑定选项,即使 provider 未启用
 }
 
 // NewRegistry 构造空 Registry
 func NewRegistry() *Registry {
 	return &Registry{
 		factories: make(map[string]Factory),
+		protocols: make(map[string]Protocol),
 	}
 }
 
@@ -51,7 +53,15 @@ func Default() *Registry { return defaultRegistry }
 
 // RegisterGlobal 把 factory 注册到全局 Registry
 // 每个 Provider 包在 init() 时调用一次
-func RegisterGlobal(name string, factory Factory) { defaultRegistry.Register(name, factory) }
+func RegisterGlobal(name string, factory Factory) {
+	defaultRegistry.Register(name, factory)
+}
+
+// RegisterGlobalWithProtocol 注册时同时记录 protocol 元数据,
+// 让 /providers/registered 接口在 provider 未加载时也能返回正确的 protocol
+func RegisterGlobalWithProtocol(name string, factory Factory, proto Protocol) {
+	defaultRegistry.RegisterWithProtocol(name, factory, proto)
+}
 
 // Register 注册一个 Provider factory
 // name 必须唯一;重复注册会 panic,因为这是编程错误
@@ -62,6 +72,28 @@ func (r *Registry) Register(name string, factory Factory) {
 		panic(fmt.Sprintf("provider factory %q already registered", name))
 	}
 	r.factories[name] = factory
+}
+
+// RegisterWithProtocol 同 Register,但额外记录 protocol 元数据
+func (r *Registry) RegisterWithProtocol(name string, factory Factory, proto Protocol) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.factories[name]; exists {
+		panic(fmt.Sprintf("provider factory %q already registered", name))
+	}
+	r.factories[name] = factory
+	r.protocols[name] = proto
+}
+
+// ListRegisteredProtocols 返回所有已注册 provider 的 protocol
+func (r *Registry) ListRegisteredProtocols() map[string]Protocol {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]Protocol, len(r.protocols))
+	for k, v := range r.protocols {
+		out[k] = v
+	}
+	return out
 }
 
 // Create 用已注册的 factory 创建 Provider 实例

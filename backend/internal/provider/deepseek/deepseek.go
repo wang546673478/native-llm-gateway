@@ -102,5 +102,5 @@ func (p *Provider) Close() error { return p.base.Close() }
 
 // init 自动注册到 Registry
 func init() {
-	provider.RegisterGlobal(name, New)
+	provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolOpenAI)
 }

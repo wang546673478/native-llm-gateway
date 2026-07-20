@@ -90,4 +90,4 @@ func (p *Provider) HealthCheck(ctx context.Context) error {
 
 func (p *Provider) Close() error { return p.base.Close() }
 
-func init() { provider.RegisterGlobal(name, New) }
+func init() { provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolAnthropic) }

@@ -24,6 +24,11 @@ import (
 
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"               // 触发 init() 注册
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek_anthropic"    // DeepSeek 的 Anthropic 兼容端点
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm"                   // 智谱
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/qwen"                  // 通义千问
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/kimi"                  // 月之暗面
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"               // Anthropic 兼容
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/gemini"                // Google 协议
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"

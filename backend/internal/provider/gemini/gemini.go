@@ -54,4 +54,4 @@ func (p *Provider) SendStreamRequest(ctx context.Context, req *provider.Request)
 func (p *Provider) HealthCheck(ctx context.Context) error { return p.base.HealthCheck(ctx) }
 func (p *Provider) Close() error                          { return p.base.Close() }
 
-func init() { provider.RegisterGlobal(name, New) }
+func init() { provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolGoogle) }

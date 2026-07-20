@@ -295,6 +295,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	}
 	admin := &handler.Admin{
 		Manager:  s.manager,
+		Registry: provider.Default(),
 		Pools:    s.pools,
 		Router:   s.router,
 		Breakers: s.cm,
