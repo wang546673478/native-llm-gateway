@@ -298,7 +298,7 @@ func (e *Engine) writeNonStreamResponse(
 	if _, err := c.Writer.Write(resp.Body); err != nil {
 		e.logger.Warn("write response", zap.Error(err))
 	}
-	e.recordUsage(req, result, latency, resp.StatusCode, "", req.IsStream)
+	e.recordUsageWithTokens(req, result, latency, resp.StatusCode, "", req.IsStream, resp.Usage)
 }
 
 // handleAllFailed 所有 failover 都失败
@@ -330,7 +330,7 @@ func (e *Engine) handleAllFailed(
 		fmt.Sprintf("all providers failed: %s", lastErr.Message))
 }
 
-// recordUsage 异步上报用量
+// recordUsage 异步上报用量(无 token 计数)
 func (e *Engine) recordUsage(
 	req *provider.Request,
 	result *router.RouteResult,
@@ -339,7 +339,20 @@ func (e *Engine) recordUsage(
 	errorType string,
 	isStream bool,
 ) {
-	e.usage.Record(&UsageRecord{
+	e.recordUsageWithTokens(req, result, latency, statusCode, errorType, isStream, nil)
+}
+
+// recordUsageWithTokens 上报用量(含 token 数,如果有 resp.Usage)
+func (e *Engine) recordUsageWithTokens(
+	req *provider.Request,
+	result *router.RouteResult,
+	latency time.Duration,
+	statusCode int,
+	errorType string,
+	isStream bool,
+	u *provider.Usage,
+) {
+	r := &UsageRecord{
 		TraceID:      req.TraceID,
 		GatewayKeyID: req.GatewayKeyID,
 		ProviderName: result.ProviderName,
@@ -349,7 +362,19 @@ func (e *Engine) recordUsage(
 		StatusCode:   statusCode,
 		ErrorType:    errorType,
 		IsStream:     isStream,
-	})
+	}
+	if u != nil {
+		r.InputTokens = u.PromptTokens
+		r.OutputTokens = u.CompletionTokens
+		r.TotalTokens = u.TotalTokens
+		// 同时记入 metrics
+		if mr, ok := e.metrics.(interface {
+			RecordTokens(string, int, int)
+		}); ok {
+			mr.RecordTokens(result.ProviderName, u.PromptTokens, u.CompletionTokens)
+		}
+	}
+	e.usage.Record(r)
 }
 
 func (e *Engine) recordMetrics(providerName string, statusCode int, latency time.Duration, isStream bool, perr *provider.ProviderError) {

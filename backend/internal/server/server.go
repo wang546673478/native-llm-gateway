@@ -18,23 +18,27 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/proxy"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
+	"github.com/wang546673478/native-llm-gateway/internal/usage"
 )
 
 // Server 持有所有运行时依赖
 type Server struct {
-	cfg     *config.Config
-	logger  *zap.Logger
-	db      *gorm.DB
-	manager *provider.Manager
-	router  *router.Router
-	engine  *proxy.Engine
-	pools   map[string]*keypool.Pool
-	cm      *circuit.Manager
-	auth    *auth.Authenticator
-	http    *http.Server
+	cfg      *config.Config
+	logger   *zap.Logger
+	db       *gorm.DB
+	manager  *provider.Manager
+	router   *router.Router
+	engine   *proxy.Engine
+	pools    map[string]*keypool.Pool
+	cm       *circuit.Manager
+	auth     *auth.Authenticator
+	usageC   *usage.Collector
+	metricsC *metrics.Collector
+	http     *http.Server
 }
 
 // New 构造 Server
@@ -68,37 +72,42 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	var authn *auth.Authenticator
 	if cfg.Auth.Enabled {
 		gkKeys := make([]auth.GatewayKey, 0, len(cfg.Auth.Keys))
-		for i, k := range cfg.Auth.Keys {
+		for _, k := range cfg.Auth.Keys {
 			gkKeys = append(gkKeys, auth.GatewayKey{
 				Name:          k.Name,
-				KeyHash:       k.Key, // 注:P7 简化,直接用明文比对;生产应该 hash
+				KeyHash:       k.Key,
 				AllowedModels: k.AllowedModels,
 				RateLimit:     auth.RateLimitConfig{RPM: k.RateLimit.RPM, TPM: k.RateLimit.TPM},
 			})
-			_ = i
 		}
 		authn = auth.New(gkKeys)
 		logger.Info("auth enabled", zap.Int("keys", len(gkKeys)))
 	}
 
+	// P8: Usage Collector + Metrics Collector
+	usageC := usage.NewCollector(db, cfg.Usage.BatchSize, int(cfg.Usage.FlushInterval.Milliseconds()))
+	metricsC := metrics.NewCollector()
+
 	eng := proxy.NewEngine(proxy.Config{
 		Router:   r,
 		Logger:   logger,
-		Usage:    proxy.NoopUsageRecorder{},
-		Metrics:  proxy.NoopMetricsRecorder{},
+		Usage:    usage.NewAdapter(usageC),
+		Metrics:  metrics.NewAdapter(metricsC),
 		Breaker:  reporter,
 		MaxRetry: cfg.Retry.MaxAttempts,
 	})
 	return &Server{
-		cfg:     cfg,
-		logger:  logger,
-		db:      db,
-		manager: manager,
-		router:  r,
-		engine:  eng,
-		pools:   pools,
-		cm:      cm,
-		auth:    authn,
+		cfg:      cfg,
+		logger:   logger,
+		db:       db,
+		manager:  manager,
+		router:   r,
+		engine:   eng,
+		pools:    pools,
+		cm:       cm,
+		auth:     authn,
+		usageC:   usageC,
+		metricsC: metricsC,
 	}
 }
 
@@ -164,6 +173,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.registerRoutes(r)
 
+	// P8: 启动 Usage Collector 后台落库协程
+	s.usageC.Start(ctx)
+
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
 	s.http = &http.Server{
 		Addr:         addr,
@@ -185,6 +197,7 @@ func (s *Server) Run(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		s.logger.Info("shutdown signal received")
+		s.usageC.Stop() // flush 剩余记录
 		return s.shutdown()
 	case err := <-errCh:
 		if err != nil {
@@ -250,6 +263,9 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 			"providers": out,
 		})
 	})
+
+	// P8: /metrics(Prometheus 格式)
+	r.GET("/metrics", gin.WrapH(s.metricsC.Handler()))
 
 	// P5: 真代理接入
 	// 注册具体协议路径 + NoRoute 兜底(覆盖其他 /v1/* 子路径)
