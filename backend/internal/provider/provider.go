@@ -62,11 +62,18 @@ type StreamChunk struct {
 }
 
 // Usage 从 Provider 响应中提取的用量
+// P40: 新增 cache 字段 — 支持 prefix caching 精细计费
+//   - PromptTokens:        不计 cache 的输入 token(DeepSeek 的 prompt_cache_miss_tokens)
+//   - CacheCreationTokens: 创建新 cache 单元的 token(Anthropic 才有,DeepSeek = 0)
+//   - CacheReadTokens:     命中已有 cache 的 token(DeepSeek prompt_cache_hit_tokens,Anthropic cache_read_input_tokens)
+//   - CompletionTokens:    输出 token
 type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	RawUsage         map[string]interface{}
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	RawUsage            map[string]interface{}
 }
 
 // Provider 所有 LLM Provider 必须实现的接口

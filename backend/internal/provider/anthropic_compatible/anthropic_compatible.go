@@ -287,26 +287,39 @@ func (b *Base) newError(status int, errType provider.ErrorType, msg string, rawE
 }
 
 // parseAnthropicUsage 从 Anthropic 响应抽取 usage
-// 格式: {"usage": {"input_tokens": N, "output_tokens": M}}
+// 格式: {"usage": {"input_tokens": N, "output_tokens": M, "cache_creation_input_tokens": ?, "cache_read_input_tokens": ?}}
+//
+// 注意:Anthropic 的 input_tokens 不含 cache 部分(cache 是另外计的)
+//   - PromptTokens        = input_tokens
+//   - CacheCreationTokens = cache_creation_input_tokens
+//   - CacheReadTokens     = cache_read_input_tokens
 func parseAnthropicUsage(body []byte) *provider.Usage {
 	var resp struct {
 		Usage *struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil || resp.Usage == nil {
 		return nil
 	}
-	return &provider.Usage{
+	u := &provider.Usage{
 		PromptTokens:     resp.Usage.InputTokens,
 		CompletionTokens: resp.Usage.OutputTokens,
-		TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens +
+			resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
+		CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
+		CacheReadTokens:     resp.Usage.CacheReadInputTokens,
 		RawUsage: map[string]interface{}{
-			"input_tokens":  resp.Usage.InputTokens,
-			"output_tokens": resp.Usage.OutputTokens,
+			"input_tokens":                resp.Usage.InputTokens,
+			"output_tokens":               resp.Usage.OutputTokens,
+			"cache_creation_input_tokens": resp.Usage.CacheCreationInputTokens,
+			"cache_read_input_tokens":     resp.Usage.CacheReadInputTokens,
 		},
 	}
+	return u
 }
 
 func parseRetryAfter(v string) time.Duration {

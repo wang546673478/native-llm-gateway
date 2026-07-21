@@ -23,12 +23,15 @@ func (Provider) TableName() string { return "providers" }
 
 // ProviderModel Provider 的模型声明
 type ProviderModel struct {
-	ID              uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	ProviderName    string    `gorm:"column:provider_name;uniqueIndex:idx_provider_model;not null" json:"provider_name"`
-	ModelID         string    `gorm:"column:model_id;uniqueIndex:idx_provider_model;not null" json:"model_id"`
-	CostPer1kInput  float64   `gorm:"column:cost_per_1k_input;not null;default:0" json:"cost_per_1k_input"`
-	CostPer1kOutput float64   `gorm:"column:cost_per_1k_output;not null;default:0" json:"cost_per_1k_output"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID                     uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	ProviderName           string    `gorm:"column:provider_name;uniqueIndex:idx_provider_model;not null" json:"provider_name"`
+	ModelID                string    `gorm:"column:model_id;uniqueIndex:idx_provider_model;not null" json:"model_id"`
+	CostPer1kInput         float64   `gorm:"column:cost_per_1k_input;not null;default:0" json:"cost_per_1k_input"`
+	CostPer1kOutput        float64   `gorm:"column:cost_per_1k_output;not null;default:0" json:"cost_per_1k_output"`
+	// P40: cache pricing 字段 — GORM AutoMigrate 会自动加列
+	CostPer1kCacheRead     float64   `gorm:"column:cost_per_1k_cache_read;not null;default:0" json:"cost_per_1k_cache_read"`
+	CostPer1kCacheCreation float64   `gorm:"column:cost_per_1k_cache_creation;not null;default:0" json:"cost_per_1k_cache_creation"`
+	CreatedAt              time.Time `json:"created_at"`
 }
 
 // TableName

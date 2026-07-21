@@ -157,10 +157,12 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 		modelCosts := make(map[string]provider.ModelCost, len(p.Models))
 		for _, m := range p.Models {
 			models = append(models, m.ID)
-			// P37: 把 cost 定价转给 Manager
+			// P37 + P40: 把 cost + cache pricing 转给 Manager
 			modelCosts[m.ID] = provider.ModelCost{
-				CostPer1kInput:  m.CostPer1kInput,
-				CostPer1kOutput: m.CostPer1kOutput,
+				CostPer1kInput:         m.CostPer1kInput,
+				CostPer1kOutput:        m.CostPer1kOutput,
+				CostPer1kCacheRead:     m.CostPer1kCacheRead,
+				CostPer1kCacheCreation: m.CostPer1kCacheCreation,
 			}
 		}
 		mcfg.Providers[name] = provider.ManagerProviderConfig{

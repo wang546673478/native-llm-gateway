@@ -86,11 +86,16 @@ type Provider struct {
 }
 
 // ProviderModel Provider 模型声明
+// P40: 加 cache pricing 字段,支持 prefix caching 精细计费
+//   - CostPer1kCacheRead:     cache 命中(读)— DeepSeek ¥0.02-0.025/M 级别
+//   - CostPer1kCacheCreation: cache 写入(创建)— 比 input 略贵,Anthropic 1.25x input
 type ProviderModel struct {
-	ID               string   `mapstructure:"id"`
-	Aliases          []string `mapstructure:"aliases"`
-	CostPer1kInput   float64  `mapstructure:"cost_per_1k_input"`
-	CostPer1kOutput  float64  `mapstructure:"cost_per_1k_output"`
+	ID                      string   `mapstructure:"id"`
+	Aliases                 []string `mapstructure:"aliases"`
+	CostPer1kInput          float64  `mapstructure:"cost_per_1k_input"`
+	CostPer1kOutput         float64  `mapstructure:"cost_per_1k_output"`
+	CostPer1kCacheRead      float64  `mapstructure:"cost_per_1k_cache_read"`
+	CostPer1kCacheCreation  float64  `mapstructure:"cost_per_1k_cache_creation"`
 }
 
 // ProviderKey Provider 的 API Key

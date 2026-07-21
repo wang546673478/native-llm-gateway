@@ -207,6 +207,39 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 	return keypool.NewPool(name, keys, sched, poolCfg)
 }
 
+// toManagerConfigForReload 把 config 投影成 ManagerConfig(只用于 ReloadPricing,不需要 Pools)
+func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool) *provider.ManagerConfig {
+	mcfg := &provider.ManagerConfig{
+		Providers: make(map[string]provider.ManagerProviderConfig, len(cfg.Providers)),
+		Pools:     make(map[string]any, len(pools)),
+	}
+	for name, pool := range pools {
+		mcfg.Pools[name] = pool
+	}
+	for name, p := range cfg.Providers {
+		proto, _ := provider.ParseProtocol(p.Protocol)
+		modelCosts := make(map[string]provider.ModelCost, len(p.Models))
+		for _, m := range p.Models {
+			modelCosts[m.ID] = provider.ModelCost{
+				CostPer1kInput:         m.CostPer1kInput,
+				CostPer1kOutput:        m.CostPer1kOutput,
+				CostPer1kCacheRead:     m.CostPer1kCacheRead,
+				CostPer1kCacheCreation: m.CostPer1kCacheCreation,
+			}
+		}
+		mcfg.Providers[name] = provider.ManagerProviderConfig{
+			Enabled:    p.Enabled,
+			Endpoint:   p.Endpoint,
+			Protocol:   proto,
+			Timeout:    p.Timeout,
+			Models:     nil, // ReloadPricing 不需要 models 列表
+			ModelCosts: modelCosts,
+			APIKeys:    nil,
+		}
+	}
+	return mcfg
+}
+
 // toRouterAliases 把 config 风格别名表转 router 风格
 // P39: 如果 alias 配置了 chain_ref,从 chains map 里展开成 providers
 func toRouterAliases(in map[string]config.AliasRule, chains map[string][]config.AliasRoute) map[string]router.AliasConfig {
@@ -436,8 +469,8 @@ func (r *authTokenRecorder) RecordUsage(keyID string, tokens int64) {
 	r.a.RecordTokens(keyID, tokens)
 }
 
-// Reload 热重载 — 替换 Aliases 和 Auth Keys
-// 注意:Provider Manager / KeyPool / Circuit Breaker 不在此函数内重载
+// Reload 热重载 — 替换 Aliases / Auth Keys / Pricing
+// 注意:Provider 实例 / KeyPool / Circuit Breaker 不在此函数内重载
 // (它们的 Reload 已在 Manager 上,但涉及 HTTP 客户端重建,留给后续阶段)
 func (s *Server) Reload(newCfg *config.Config) {
 	if newCfg == nil {
@@ -445,6 +478,9 @@ func (s *Server) Reload(newCfg *config.Config) {
 	}
 	// Router aliases
 	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases, newCfg.Routing.Chains))
+
+	// Manager 定价表(cost) — 不需要重建 Provider 实例,只刷 pricing map
+	s.manager.ReloadPricing(toManagerConfigForReload(newCfg, s.pools))
 
 	// Authenticator
 	if s.auth != nil && newCfg.Auth.Enabled {

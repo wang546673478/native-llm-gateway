@@ -412,12 +412,24 @@ func (e *Engine) recordUsageWithTokens(
 		r.InputTokens = u.PromptTokens
 		r.OutputTokens = u.CompletionTokens
 		r.TotalTokens = u.TotalTokens
-		// P37: 算 cost(从 Manager 拿定价)
+		// P37 + P40: 算 cost(支持 cache pricing,单位 CNY ¥)
+		//   cost = prompt * input_cost
+		//        + cache_creation * cache_create_cost(0 则 fallback 到 input_cost)
+		//        + cache_read * cache_read_cost(0 则跳过)
+		//        + completion * output_cost
 		if mgr := e.router.Manager(); mgr != nil {
-			cost := mgr.CostFor(result.ProviderName, result.ModelID)
-			if cost.CostPer1kInput > 0 || cost.CostPer1kOutput > 0 {
-				r.Cost = (float64(u.PromptTokens)/1000.0)*cost.CostPer1kInput +
-					(float64(u.CompletionTokens)/1000.0)*cost.CostPer1kOutput
+			c := mgr.CostFor(result.ProviderName, result.ModelID)
+			hasAnyCost := c.CostPer1kInput > 0 || c.CostPer1kOutput > 0 ||
+				c.CostPer1kCacheRead > 0 || c.CostPer1kCacheCreation > 0
+			if hasAnyCost {
+				cacheCreateCost := c.CostPer1kCacheCreation
+				if cacheCreateCost == 0 {
+					cacheCreateCost = c.CostPer1kInput // fallback
+				}
+				r.Cost = (float64(u.PromptTokens)/1000.0)*c.CostPer1kInput +
+					(float64(u.CacheCreationTokens)/1000.0)*cacheCreateCost +
+					(float64(u.CacheReadTokens)/1000.0)*c.CostPer1kCacheRead +
+					(float64(u.CompletionTokens)/1000.0)*c.CostPer1kOutput
 			}
 		}
 		// 同时记入 metrics

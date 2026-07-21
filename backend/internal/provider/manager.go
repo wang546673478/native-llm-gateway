@@ -33,9 +33,16 @@ type ManagerProviderConfig struct {
 }
 
 // ModelCost 单个 model 的定价
+// P40: 新增 cache pricing 字段 — 单位 CNY (¥) / 1k tokens
+//   - CostPer1kInput:         普通输入(没命中 cache)
+//   - CostPer1kOutput:        输出
+//   - CostPer1kCacheRead:     cache 命中(读)— 最便宜,DeepSeek v4-flash ¥0.02/M
+//   - CostPer1kCacheCreation: 写入 cache(创建新单元)— 中等,通常 = input * 1.25(Anthropic)
 type ModelCost struct {
-	CostPer1kInput  float64
-	CostPer1kOutput float64
+	CostPer1kInput         float64
+	CostPer1kOutput        float64
+	CostPer1kCacheRead     float64
+	CostPer1kCacheCreation float64
 }
 
 // ManagerCircuitConfig Circuit Breaker 配置
@@ -203,6 +210,20 @@ func (m *Manager) Reload(ctx context.Context, cfg *ManagerConfig) error {
 	m.mu.Unlock()
 
 	return m.LoadFromConfig(ctx, cfg)
+}
+
+// ReloadPricing 只更新定价表,不动 Provider 实例
+// 用于热重载 config.yaml 时同步 cost 改动
+func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pricing = make(map[string]ModelCost)
+	for name, pcfg := range cfg.Providers {
+		for modelID, cost := range pcfg.ModelCosts {
+			m.pricing[pricingKey(name, modelID)] = cost
+		}
+	}
+	m.logger.Info("pricing reloaded", zap.Int("entries", len(m.pricing)))
 }
 
 // Close 关闭所有 Provider

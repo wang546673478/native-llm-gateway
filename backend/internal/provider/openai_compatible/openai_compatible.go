@@ -377,7 +377,12 @@ func parseOpenAIUsage(body []byte) *provider.Usage {
 		PromptTokens:     resp.Usage.PromptTokens,
 		CompletionTokens: resp.Usage.CompletionTokens,
 		TotalTokens:      resp.Usage.TotalTokens,
-		RawUsage:         raw,
+		// P40: DeepSeek 的 cache 模型 — prompt_cache_hit_tokens 视为 cache read,
+		// prompt_cache_miss_tokens 已经包含在 PromptTokens 里(完整输入)
+		// DeepSeek 不区分 cache_creation 和 cache_miss,所以这里 CacheCreationTokens = 0
+		CacheReadTokens:     resp.Usage.PromptCacheHitTokens,
+		CacheCreationTokens: 0,
+		RawUsage:            raw,
 	}
 	return u
 }

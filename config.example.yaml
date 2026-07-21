@@ -40,23 +40,39 @@ auth:
 providers:
   # --- DeepSeek (OpenAI 兼容,端点 /chat/completions 不带 /v1) ---
   # 文档:https://api-docs.deepseek.com/zh-cn/
+  # 价格文档:https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+  # 上下文:1M tokens,最大输出 384K tokens
+  # 注意:deepseek-chat / deepseek-reasoner 将于 2026-07-24 23:59(北京时间)弃用,
+  # 分别映射到 v4-flash 的非 thinking / thinking 模式
   deepseek:
     enabled: true
     endpoint: "https://api.deepseek.com"
     protocol: "openai"
     timeout: 60s
     models:
+      # v4-flash:¥1/M 输入、¥0.02/M cache 命中、¥2/M 输出
       - id: "deepseek-v4-flash"
         aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.0001
-        cost_per_1k_output: 0.0004
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.002
+        cost_per_1k_cache_read: 0.00002
+        cost_per_1k_cache_creation: 0.0
+      # v4-pro:¥3/M 输入、¥0.025/M cache 命中、¥6/M 输出,支持 thinking 模式
       - id: "deepseek-v4-pro"
         aliases: ["pro-model"]
-        cost_per_1k_input: 0.002
-        cost_per_1k_output: 0.008
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.006
+        cost_per_1k_cache_read: 0.000025
+        cost_per_1k_cache_creation: 0.0
     keys:
       - name: "deepseek-key-1"
         key: "sk-REPLACE-ME"
+    # P41 DeepSeek 支持的 API 特性(都通过 body 透传,Gateway 不需特殊处理):
+    #   - Thinking 模式:extra_body={"thinking":{"type":"enabled"}}(v4-pro)
+    #   - Tool use / function calling:OpenAI 标准 tools 数组
+    #   - JSON mode:response_format={"type":"json_object"}
+    #   - Prefix caching:默认开启,响应 prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    #   - Streaming:stream=true,SSE 格式
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -75,8 +91,16 @@ providers:
     models:
       - id: "deepseek-v4-flash"
         aliases: []
-        cost_per_1k_input: 0.0001
-        cost_per_1k_output: 0.0004
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.002
+        cost_per_1k_cache_read: 0.00002
+        cost_per_1k_cache_creation: 0.0
+      - id: "deepseek-v4-pro"
+        aliases: []
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.006
+        cost_per_1k_cache_read: 0.000025
+        cost_per_1k_cache_creation: 0.0
     keys:
       - name: "deepseek-anthropic-key-1"
         key: "sk-REPLACE-ME"
@@ -106,16 +130,16 @@ providers:
         cost_per_1k_output: 0.0
       - id: "glm-4-air"            # 轻量
         aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.001
+        cost_per_1k_input: 0.0072
+        cost_per_1k_output: 0.0072
       - id: "glm-4-long"           # 长上下文
         aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.001
+        cost_per_1k_input: 0.0072
+        cost_per_1k_output: 0.0072
       - id: "glm-4-plus"           # 高级
         aliases: []
-        cost_per_1k_input: 0.05
-        cost_per_1k_output: 0.05
+        cost_per_1k_input: 0.36
+        cost_per_1k_output: 0.36
     keys:
       - name: "glm-key-1"
         key: "REPLACE-ME.glm-key"
@@ -138,32 +162,32 @@ providers:
     models:
       - id: "qwen-plus"             # 商用主力
         aliases: []
-        cost_per_1k_input: 0.0008
-        cost_per_1k_output: 0.002
+        cost_per_1k_input: 0.0058
+        cost_per_1k_output: 0.0144
       - id: "qwen-turbo"            # 更快更便宜
         aliases: []
-        cost_per_1k_input: 0.0003
-        cost_per_1k_output: 0.0006
+        cost_per_1k_input: 0.00216
+        cost_per_1k_output: 0.0043
       - id: "qwen-max"              # 旗舰
         aliases: []
-        cost_per_1k_input: 0.02
-        cost_per_1k_output: 0.06
+        cost_per_1k_input: 0.144
+        cost_per_1k_output: 0.432
       - id: "qwen-coder-plus"       # 代码
         aliases: ["qwen-coder"]
-        cost_per_1k_input: 0.0035
-        cost_per_1k_output: 0.007
+        cost_per_1k_input: 0.0252
+        cost_per_1k_output: 0.0504
       - id: "qwen-long"             # 长上下文(1M tokens)
         aliases: []
-        cost_per_1k_input: 0.0005
-        cost_per_1k_output: 0.002
+        cost_per_1k_input: 0.0036
+        cost_per_1k_output: 0.0144
       - id: "qwen-vl-max"           # 多模态视觉
         aliases: []
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.009
+        cost_per_1k_input: 0.0216
+        cost_per_1k_output: 0.0648
       - id: "qwen3-235b-a22b"       # Qwen3 旗舰 MoE
         aliases: []
-        cost_per_1k_input: 0.004
-        cost_per_1k_output: 0.012
+        cost_per_1k_input: 0.0288
+        cost_per_1k_output: 0.0864
     keys:
       - name: "qwen-key-1"
         key: "sk-REPLACE-ME"
@@ -187,24 +211,24 @@ providers:
     models:
       - id: "kimi-k3"               # 当前最新
         aliases: []
-        cost_per_1k_input: 0.012
-        cost_per_1k_output: 0.012
+        cost_per_1k_input: 0.0864
+        cost_per_1k_output: 0.0864
       - id: "kimi-k2.7-code"        # 代码专用
         aliases: []
-        cost_per_1k_input: 0.015
-        cost_per_1k_output: 0.015
+        cost_per_1k_input: 0.108
+        cost_per_1k_output: 0.108
       - id: "kimi-k2.7-code-highspeed"  # 代码高速
         aliases: []
-        cost_per_1k_input: 0.005
-        cost_per_1k_output: 0.005
+        cost_per_1k_input: 0.036
+        cost_per_1k_output: 0.036
       - id: "kimi-k2.6"
         aliases: []
-        cost_per_1k_input: 0.012
-        cost_per_1k_output: 0.012
+        cost_per_1k_input: 0.0864
+        cost_per_1k_output: 0.0864
       - id: "kimi-k2.5"
         aliases: []
-        cost_per_1k_input: 0.012
-        cost_per_1k_output: 0.012
+        cost_per_1k_input: 0.0864
+        cost_per_1k_output: 0.0864
     keys:
       - name: "kimi-key-1"
         key: "sk-REPLACE-ME"
@@ -230,36 +254,36 @@ providers:
     models:
       - id: "MiniMax-M3"              # 1M tokens,旗舰
         aliases: ["MiniMax"]
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.008
+        cost_per_1k_input: 0.0072
+        cost_per_1k_output: 0.0576
       - id: "MiniMax-M2.7"            # 204,800
         aliases: []
-        cost_per_1k_input: 0.0007
-        cost_per_1k_output: 0.0055
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.04
       - id: "MiniMax-M2.7-highspeed"  # 204,800,更快
         aliases: []
-        cost_per_1k_input: 0.0003
-        cost_per_1k_output: 0.0023
+        cost_per_1k_input: 0.00216
+        cost_per_1k_output: 0.0166
       - id: "MiniMax-M2.5"            # 204,800
         aliases: []
-        cost_per_1k_input: 0.0007
-        cost_per_1k_output: 0.0055
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.04
       - id: "MiniMax-M2.5-highspeed"
         aliases: []
-        cost_per_1k_input: 0.0003
-        cost_per_1k_output: 0.0023
+        cost_per_1k_input: 0.00216
+        cost_per_1k_output: 0.0166
       - id: "MiniMax-M2.1"            # 204,800 早期稳定
         aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.008
+        cost_per_1k_input: 0.0072
+        cost_per_1k_output: 0.0576
       - id: "MiniMax-M2.1-highspeed"
         aliases: []
-        cost_per_1k_input: 0.0004
-        cost_per_1k_output: 0.003
+        cost_per_1k_input: 0.00288
+        cost_per_1k_output: 0.0216
       - id: "MiniMax-M2"              # 204,800 基础
         aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.008
+        cost_per_1k_input: 0.0072
+        cost_per_1k_output: 0.0576
     keys:
       - name: "minimax-key-1"
         key: "REPLACE-ME.minimax-key"
@@ -286,24 +310,24 @@ providers:
     models:
       - id: "gemini-2.5-flash"           # stable 推荐
         aliases: ["gemini-flash"]
-        cost_per_1k_input: 0.000075
-        cost_per_1k_output: 0.0003
+        cost_per_1k_input: 0.00054
+        cost_per_1k_output: 0.00216
       - id: "gemini-2.5-flash-lite"      # stable 便宜
         aliases: []
-        cost_per_1k_input: 0.0000375
-        cost_per_1k_output: 0.00015
+        cost_per_1k_input: 0.00027
+        cost_per_1k_output: 0.00108
       - id: "gemini-2.5-pro"             # stable 强
         aliases: ["gemini-pro"]
-        cost_per_1k_input: 0.00125
-        cost_per_1k_output: 0.005
+        cost_per_1k_input: 0.009
+        cost_per_1k_output: 0.036
       - id: "gemini-3.5-flash"           # stable 新
         aliases: []
-        cost_per_1k_input: 0.0001
-        cost_per_1k_output: 0.0004
+        cost_per_1k_input: 0.00072
+        cost_per_1k_output: 0.00288
       - id: "gemini-3.1-flash-lite"      # stable
         aliases: []
-        cost_per_1k_input: 0.000025
-        cost_per_1k_output: 0.0001
+        cost_per_1k_input: 0.00018
+        cost_per_1k_output: 0.00072
     keys:
       - name: "gemini-key-1"
         key: "REPLACE-ME.gemini-key"
