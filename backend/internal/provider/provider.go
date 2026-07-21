@@ -110,6 +110,10 @@ const (
 	ErrorTypeTimeout        ErrorType = "timeout"
 	ErrorTypeConnection     ErrorType = "connection"
 	ErrorTypeModelNotFound  ErrorType = "model_not_found"
+	// P49: 配额/额度耗尽错误(MiniMax token plan 5h 用完等场景)
+	// 与 auth 不同:quota 用完应该 failover 到下一个 provider(api 计费),
+	// 而 auth 错误说明 key 本身有问题,不该 failover
+	ErrorTypeQuotaExceeded  ErrorType = "quota_exceeded"
 )
 
 // ProviderError 是 Provider 返回的结构化错误
@@ -133,6 +137,7 @@ func (e *ProviderError) Error() string {
 // 规格书:invalid_request / auth 不重试
 func (e *ProviderError) IsRetryable() bool {
 	switch e.ErrorType {
+	// 不可重试(说明 key 本身或请求本身有问题)
 	case ErrorTypeInvalidRequest, ErrorTypeAuth, ErrorTypeModelNotFound:
 		return false
 	default:
@@ -140,12 +145,38 @@ func (e *ProviderError) IsRetryable() bool {
 	}
 }
 
-// ClassifyError 根据 HTTP 状态码分类错误
+// ClassifyError 根据 HTTP 状态码 + body 分类错误
+// P49: 识别 quota exceeded 错误(从 body 关键字判断)
+//  - 402 Payment Required → 明确是 quota/账单问题
+//  - 429 Too Many Requests → 优先按 rate limit,但 body 含 quota 关键字时升级为 quota_exceeded
+//  - 403 Forbidden + body 含 quota/usage_limit/insufficient/balance 关键字 → quota_exceeded(不是 auth)
+//  - 其他 403 → auth(说明 key 本身有问题)
 func ClassifyError(statusCode int) ErrorType {
+	return ClassifyErrorWithBody(statusCode, nil)
+}
+
+// ClassifyErrorWithBody P49: 带 body 的错误分类(检测 quota 关键字)
+// body 是上游响应的原始字节,可能为 nil(未知)
+func ClassifyErrorWithBody(statusCode int, body []byte) ErrorType {
+	isQuotaBody := looksLikeQuotaError(body)
+
 	switch {
+	case statusCode == http.StatusPaymentRequired: // 402
+		return ErrorTypeQuotaExceeded
 	case statusCode == http.StatusTooManyRequests:
+		// 429 大多数是 rate limit,但也可能是 quota
+		// 如果 body 含 quota 关键字,升级为 quota_exceeded
+		if isQuotaBody {
+			return ErrorTypeQuotaExceeded
+		}
 		return ErrorTypeRateLimit
-	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
+	case statusCode == http.StatusForbidden:
+		// 403 可能是 auth,也可能 quota
+		if isQuotaBody {
+			return ErrorTypeQuotaExceeded
+		}
+		return ErrorTypeAuth
+	case statusCode == http.StatusUnauthorized:
 		return ErrorTypeAuth
 	case statusCode == http.StatusBadRequest:
 		return ErrorTypeInvalidRequest
@@ -156,6 +187,63 @@ func ClassifyError(statusCode int) ErrorType {
 	default:
 		return ErrorTypeServerError
 	}
+}
+
+// looksLikeQuotaError 检测 body 是否含 quota/usage limit 相关关键字
+// 兼容各 provider 的英文/中文错误信息
+func looksLikeQuotaError(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	// 转小写匹配,避免大小写差异
+	lower := toLowerASCII(body)
+	keywords := []string{
+		"quota",
+		"usage limit",
+		"insufficient",
+		"余额", "额度", "配额",
+		"balance",
+		"exceeded",
+		"out of quota",
+		"rate limit", // 部分 provider 混用 — 慎用,容易被 rate limit 命中
+	}
+	for _, kw := range keywords {
+		if contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// 简单的 ASCII 小写转换(避免引入 strings.ToLower 的 unicode 复杂度)
+func toLowerASCII(b []byte) []byte {
+	out := make([]byte, len(b))
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		out[i] = c
+	}
+	return out
+}
+
+func contains(haystack []byte, needle string) bool {
+	if len(needle) == 0 || len(haystack) < len(needle) {
+		return false
+	}
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // AsProviderError 尝试把 error 转成 *ProviderError

@@ -134,7 +134,8 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 
 	if httpResp.StatusCode >= 400 {
 		retryAfter := parseRetryAfter(httpResp.Header.Get("Retry-After"))
-		errType := provider.ClassifyError(httpResp.StatusCode)
+		// P49: 带 body 检测 quota exceeded(401/403 + body 含 quota 关键字 → 升级为 quota_exceeded,触发 failover)
+		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 
 		if errType == provider.ErrorTypeRateLimit {
 			b.cfg.Pool.ReportRateLimit(key, retryAfter)
@@ -233,7 +234,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if httpResp.StatusCode >= 400 {
 		body, _ := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
-		errType := provider.ClassifyError(httpResp.StatusCode)
+		// P49: 带 body 检测 quota
+		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 		if errType == provider.ErrorTypeRateLimit {
 			b.cfg.Pool.ReportRateLimit(key, 0)
 		} else {
