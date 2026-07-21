@@ -317,6 +317,19 @@ providers:
 
 # 路由规则(P4 阶段真正生效)
 routing:
+  # P39: 共享 provider chain — 定义一次,多个 alias 用 chain_ref 复用
+  # 加新 fallback 时只改这里,引用它的 alias 自动生效
+  chains:
+    claude:
+      - name: "minimax"
+        model: "MiniMax-M3"
+        priority: 1
+      - name: "deepseek"
+        model: "deepseek-v4-flash"
+        priority: 2
+      - name: "glm"
+        model: "glm-4-flash"
+        priority: 3
   aliases:
     coding-model:
       strategy: "priority"
@@ -360,6 +373,17 @@ routing:
         - name: "gemini"
           model: "gemini-2.0-flash"
           weight: 10
+    # P38 + P39: Claude Code 模型 — Anthropic SDK 默认会发这些 model id
+    # chain_ref 引用上面的 chains.claude,实现 minimax→deepseek→glm 自动 failover
+    claude-sonnet-4-5:
+      strategy: "priority"
+      chain_ref: "claude"
+    claude-sonnet-5:
+      strategy: "priority"
+      chain_ref: "claude"
+    claude-opus-4-8:
+      strategy: "priority"
+      chain_ref: "claude"
   default_strategy: "priority"
 
 # Key Pool 配置(P3 阶段真正生效)

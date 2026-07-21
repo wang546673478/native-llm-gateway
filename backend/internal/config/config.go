@@ -111,8 +111,12 @@ type CircuitBreakerCfg struct {
 
 // RoutingConfig 路由配置
 type RoutingConfig struct {
-	Aliases         map[string]AliasRule `mapstructure:"aliases"`
-	DefaultStrategy string               `mapstructure:"default_strategy"`
+	Aliases         map[string]AliasRule  `mapstructure:"aliases"`
+	// P39: 共享 provider chain 定义。一个 chain 是一个有序的 (provider, model) 列表,
+	// alias 可以用 chain_ref 引用它,这样多个 alias 共享同一条 fallback 链,
+	// 加新 fallback 时只需要改 chains 里的一处。
+	Chains           map[string][]AliasRoute `mapstructure:"chains"`
+	DefaultStrategy  string                   `mapstructure:"default_strategy"`
 }
 
 // AliasRoute 单条路由目标
@@ -127,6 +131,9 @@ type AliasRoute struct {
 type AliasRule struct {
 	Strategy  string       `mapstructure:"strategy"`
 	Providers []AliasRoute `mapstructure:"providers"`
+	// P39: ChainRef 引用 routing.chains.<name> 里的 provider 列表。
+	// 非空时,加载时会用 chains[chain_ref] 的内容替换 Providers(Providers 会被忽略)。
+	ChainRef string `mapstructure:"chain_ref"`
 }
 
 // KeyPoolConfig Key 池配置

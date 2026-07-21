@@ -49,7 +49,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	// P30:从 DB (provider_api_keys 表) 读 key 而不是 config.yaml
 	pools := buildKeyPools(cfg, db, logger)
 	r := router.NewRouter(logger, manager, pools, router.Config{
-		Aliases:         toRouterAliases(cfg.Routing.Aliases),
+		Aliases:         toRouterAliases(cfg.Routing.Aliases, cfg.Routing.Chains),
 		DefaultStrategy: cfg.Routing.DefaultStrategy,
 		MaxAttempts:     cfg.Retry.MaxAttempts,
 	})
@@ -208,11 +208,26 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 }
 
 // toRouterAliases 把 config 风格别名表转 router 风格
-func toRouterAliases(in map[string]config.AliasRule) map[string]router.AliasConfig {
+// P39: 如果 alias 配置了 chain_ref,从 chains map 里展开成 providers
+func toRouterAliases(in map[string]config.AliasRule, chains map[string][]config.AliasRoute) map[string]router.AliasConfig {
 	out := make(map[string]router.AliasConfig, len(in))
 	for alias, rule := range in {
-		ps := make([]router.ProviderRoute, 0, len(rule.Providers))
-		for _, p := range rule.Providers {
+		// 决定实际使用的 provider 列表
+		var src []config.AliasRoute
+		if rule.ChainRef != "" {
+			if chain, ok := chains[rule.ChainRef]; ok {
+				src = chain
+			} else {
+				// 引用了不存在的 chain:用空列表,Route 时会返回 ErrNoRoute
+				// 这里不 panic / 不 fail,让路由错误自然浮出
+				src = nil
+			}
+		} else {
+			src = rule.Providers
+		}
+
+		ps := make([]router.ProviderRoute, 0, len(src))
+		for _, p := range src {
 			ps = append(ps, router.ProviderRoute{
 				Name: p.Name, Model: p.Model, Priority: p.Priority, Weight: p.Weight,
 			})
@@ -345,7 +360,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		Router:   s.router,
 		Breakers: s.cm,
 		Usage:    s.usageR,
-		Aliases:  toRouterAliases(s.cfg.Routing.Aliases),
+		Aliases:  toRouterAliases(s.cfg.Routing.Aliases, s.cfg.Routing.Chains),
 		Keys:     gkInfos,
 	}
 	admin.Register(r.Group("/api/v1"))
@@ -429,7 +444,7 @@ func (s *Server) Reload(newCfg *config.Config) {
 		return
 	}
 	// Router aliases
-	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases))
+	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases, newCfg.Routing.Chains))
 
 	// Authenticator
 	if s.auth != nil && newCfg.Auth.Enabled {
