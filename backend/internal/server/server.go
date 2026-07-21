@@ -190,14 +190,19 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 		if !row.Enabled {
 			continue
 		}
+		bs := row.BillingSource
+		if bs == "" {
+			bs = "api" // 兜底
+		}
 		keys = append(keys, &keypool.Key{
-			ID:           fmt.Sprintf("%d", row.ID),
-			ProviderName: name,
-			Name:         row.Name,
-			Key:          row.KeyHash,
-			Status:       keypool.KeyStatusActive,
-			CreatedAt:    row.CreatedAt,
-			UpdatedAt:    row.UpdatedAt,
+			ID:            fmt.Sprintf("%d", row.ID),
+			ProviderName:  name,
+			Name:          row.Name,
+			Key:           row.KeyHash,
+			Status:        keypool.KeyStatusActive,
+			BillingSource: bs, // P48: 单 key 计费 tier,Pool.Acquire 按此排序
+			CreatedAt:     row.CreatedAt,
+			UpdatedAt:     row.UpdatedAt,
 		})
 	}
 	logger.Info("keypool built from DB",

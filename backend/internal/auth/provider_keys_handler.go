@@ -70,25 +70,28 @@ func (s *gormProviderKeyStore) GetPlainKeys(ctx context.Context, providerName st
 }
 
 // ProviderKeyView 返回给前端(不含明文 key)
+// P48: 加 BillingSource — 路由时按这个字段选 tier(token_plan 优先)
 type ProviderKeyView struct {
-	ID           uint      `json:"id"`
-	ProviderName string    `json:"provider_name"`
-	Name         string    `json:"name"`
+	ID            uint      `json:"id"`
+	ProviderName  string    `json:"provider_name"`
+	Name          string    `json:"name"`
 	// KeyMasked 是脱敏后的 key(只显示前 8 + 后 4 字符)
-	KeyMasked    string    `json:"key_masked"`
-	Enabled      bool      `json:"enabled"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	KeyMasked     string    `json:"key_masked"`
+	Enabled       bool      `json:"enabled"`
+	BillingSource string    `json:"billing_source"` // P48: token_plan / api / free
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func toProviderKeyView(k dbpkg.ProviderAPIKey) ProviderKeyView {
 	return ProviderKeyView{
-		ID:           k.ID,
-		ProviderName: k.ProviderName,
-		Name:         k.Name,
-		KeyMasked:    maskKey(k.KeyHash),
-		Enabled:      k.Enabled,
-		CreatedAt:    k.CreatedAt,
+		ID:            k.ID,
+		ProviderName:  k.ProviderName,
+		Name:          k.Name,
+		KeyMasked:     maskKey(k.KeyHash),
+		Enabled:       k.Enabled,
+		BillingSource: k.BillingSource,
+		CreatedAt:     k.CreatedAt,
 		UpdatedAt:    k.UpdatedAt,
 	}
 }
@@ -152,9 +155,12 @@ func (h *ProviderKeysHandler) list(c *gin.Context) {
 }
 
 type createProviderKeyReq struct {
-	Name    string `json:"name"`
-	Key     string `json:"key" binding:"required"`
-	Enabled *bool  `json:"enabled"`
+	Name          string `json:"name"`
+	Key           string `json:"key" binding:"required"`
+	Enabled       *bool  `json:"enabled"`
+	// P48: 创建 key 时指定计费来源(token_plan / api / free)
+	// 默认 "api"(向后兼容);为空时也用 "api"
+	BillingSource string `json:"billing_source"`
 }
 
 func (h *ProviderKeysHandler) create(c *gin.Context) {
@@ -182,11 +188,28 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	billingSource := strings.TrimSpace(req.BillingSource)
+	if billingSource == "" {
+		billingSource = "api" // 默认
+	}
+	// 简单校验,避免脏数据
+	switch billingSource {
+	case "token_plan", "api", "free":
+		// ok
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_billing_source",
+			"detail":  "billing_source must be one of: token_plan, api, free",
+			"got":     billingSource,
+		})
+		return
+	}
 	k := &dbpkg.ProviderAPIKey{
-		ProviderName: providerName,
-		Name:         name,
-		KeyHash:      req.Key,
-		Enabled:      enabled,
+		ProviderName:  providerName,
+		Name:          name,
+		KeyHash:       req.Key,
+		Enabled:       enabled,
+		BillingSource: billingSource,
 	}
 	if err := h.store.Create(c.Request.Context(), k); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "create_failed", "detail": err.Error()})

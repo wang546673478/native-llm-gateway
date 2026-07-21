@@ -56,6 +56,7 @@ func (ModelAlias) TableName() string { return "model_aliases" }
 // ProviderAPIKey(P30)每个 Provider 的上游 LLM API key
 // 替代之前 config.yaml 里的 providers.x.keys[] 段
 // Gateway 调上游时由 Authenticator 从这里构建 KeyPool 取 key
+// P48: 每把 key 独立标注 billing_source — 支持同 provider 同时有 token_plan + api key
 type ProviderAPIKey struct {
 	ID            uint       `gorm:"primaryKey;autoIncrement" json:"id"`
 	ProviderName  string     `gorm:"column:provider_name;index;not null" json:"provider_name"`
@@ -63,6 +64,9 @@ type ProviderAPIKey struct {
 	// KeyHash 存明文(P30 暂不上加密,跟 GatewayKey 一样,生产可加)
 	KeyHash       string     `gorm:"column:key_hash;not null" json:"-"`
 	Enabled       bool       `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	// P48: 单 key 的计费来源(token_plan / api / free)
+	// 默认 api(向后兼容);创建时如果不指定,可用 provider 的 billing_source 作默认值
+	BillingSource string     `gorm:"column:billing_source;default:'api'" json:"billing_source"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }

@@ -413,13 +413,16 @@ func (e *Engine) recordUsageWithTokens(
 		StatusCode:   statusCode,
 		ErrorType:    errorType,
 		IsStream:     isStream,
-		// P47: 计费来源(token_plan / api / free)— 冗余存,方便按维度聚合
-		BillingSource: "api",
 	}
-	if e.router != nil {
+	// P48: 计费来源 — 优先用这把 key 自己的 billing_source(provider 上的是默认值)
+	if result.Key != nil && result.Key.BillingSource != "" {
+		r.BillingSource = result.Key.BillingSource
+	} else if e.router != nil {
 		if mgr := e.router.Manager(); mgr != nil {
 			r.BillingSource = mgr.BillingSourceFor(result.ProviderName)
 		}
+	} else {
+		r.BillingSource = "api"
 	}
 	if u != nil {
 		r.InputTokens = u.PromptTokens

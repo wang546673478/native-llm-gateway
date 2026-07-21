@@ -25,41 +25,32 @@
       </n-gi>
     </n-grid>
 
-    <!-- P47: 按计费来源分组 -->
-    <n-card title="按计费来源 (24h)" style="margin-top: 16px">
+    <!-- P48: 按 Model 卡片(替换之前的按计费来源)— 每张卡显示一个 Model 的用量 -->
+    <n-card title="按 Model 用量 (24h)" style="margin-top: 16px">
       <n-grid :cols="3" :x-gap="16" :y-gap="16">
-        <n-gi v-for="bs in data?.by_billing_source ?? []" :key="bs.billing_source">
-          <div class="bs-card" :class="`bs-${bs.billing_source}`">
+        <n-gi v-for="row in data?.by_provider_model ?? []" :key="`${row.provider_name}-${row.model_id}`">
+          <div class="bs-card">
             <div class="bs-label">
-              <span class="bs-tag">{{ bsLabel(bs.billing_source) }}</span>
-              <span class="bs-desc">{{ bsDesc(bs.billing_source) }}</span>
+              <span class="bs-tag">{{ row.provider_name }}</span>
+              <span class="bs-desc">{{ row.model_id }}</span>
             </div>
             <div class="bs-stats">
               <div class="bs-row">
                 <span class="bs-key">请求</span>
-                <span class="bs-val">{{ fmtNum(bs.total_requests) }}</span>
+                <span class="bs-val">{{ fmtNum(row.total_requests) }}</span>
               </div>
               <div class="bs-row">
                 <span class="bs-key">Token</span>
-                <span class="bs-val">{{ fmtNum(bs.total_tokens) }}</span>
+                <span class="bs-val">{{ fmtNum(row.total_tokens) }}</span>
               </div>
               <div class="bs-row big">
                 <span class="bs-key">费用</span>
-                <span class="bs-val">¥{{ bs.total_cost.toFixed(4) }}</span>
+                <span class="bs-val">¥{{ row.total_cost.toFixed(4) }}</span>
               </div>
             </div>
           </div>
         </n-gi>
       </n-grid>
-    </n-card>
-
-    <n-card title="Provider / Model 用量明细" style="margin-top: 16px">
-      <n-data-table
-        :columns="columns"
-        :data="data?.by_provider_model ?? []"
-        :bordered="false"
-        :pagination="false"
-      />
     </n-card>
 
     <n-card title="Key Pool 状态" style="margin-top: 16px">
@@ -112,23 +103,8 @@ function fmtNum(n: number | undefined): string {
   return n.toLocaleString()
 }
 
-// P47: 计费来源标签和说明
-function bsLabel(s: string): string {
-  switch (s) {
-    case 'token_plan': return '📦 Token Plan'
-    case 'api':        return '💰 按量计费'
-    case 'free':       return '🎁 免费层'
-    default:           return s
-  }
-}
-function bsDesc(s: string): string {
-  switch (s) {
-    case 'token_plan': return '包月套餐,quota 优先用'
-    case 'api':        return '按 token 收费(deepseek/openai 等)'
-    case 'free':       return '永久免费(GLM-4-flash 等)'
-    default:           return ''
-  }
-}
+// P47 helper removed in P48 — billing_source 已不在 dashboard 顶层展示
+// billing_source 现在是 key 级别的,可以在 Provider Keys 页面看每把 key 的 tier
 
 async function load() {
   loading.value = true
@@ -158,16 +134,14 @@ onUnmounted(() => {
 }
 .danger { color: #d03050; }
 
-/* P47: 计费来源卡片 */
+/* P48: 按 Model 卡片(替代 P47 按计费来源卡片) */
 .bs-card {
   border: 1px solid #e0e0e6;
   border-radius: 6px;
   padding: 16px;
   background: #fafafa;
+  border-left: 4px solid #2080f0;
 }
-.bs-token_plan { border-left: 4px solid #2080f0; }
-.bs-api        { border-left: 4px solid #f0a020; }
-.bs-free       { border-left: 4px solid #18a058; }
 .bs-label {
   display: flex;
   flex-direction: column;

@@ -39,6 +39,14 @@
             :placeholder="editing ? '留空表示不修改' : 'sk-...'"
           />
         </n-form-item>
+        <!-- P48: 计费来源 — 决定 Pool.Acquire 优先级 -->
+        <n-form-item label="计费来源" path="billing_source">
+          <n-select
+            v-model:value="form.billing_source"
+            :options="billingSourceOptions"
+            placeholder="选择计费方式"
+          />
+        </n-form-item>
         <n-form-item label="启用" path="enabled">
           <n-switch v-model:value="form.enabled" />
         </n-form-item>
@@ -73,6 +81,8 @@ interface ProviderKeyView {
   name: string
   key_masked: string
   enabled: boolean
+  // P48: 计费来源 — token_plan / api / free
+  billing_source: string
   created_at: string
   updated_at: string
 }
@@ -95,6 +105,8 @@ const form = ref({
   name: '',
   key: '',
   enabled: true,
+  // P48: 计费来源 — token_plan / api / free,默认 api
+  billing_source: 'api',
 })
 
 const rules = {
@@ -106,11 +118,31 @@ const providerOptions = computed(() =>
   providers.value.map(p => ({ label: `${p.name} (${p.protocol})`, value: p.name }))
 )
 
+const billingSourceOptions = [
+  { label: '💰 按量计费 (api)', value: 'api' },
+  { label: '📦 Token Plan (token_plan)', value: 'token_plan' },
+  { label: '🎁 免费层 (free)', value: 'free' },
+]
+
 const columns: DataTableColumns<ProviderKeyView> = [
   { title: 'ID', key: 'id', width: 60 },
   { title: 'Provider', key: 'provider_name', width: 160 },
   { title: '名称', key: 'name', width: 160 },
   { title: 'Key(脱敏)', key: 'key_masked' },
+  {
+    title: '计费来源',
+    key: 'billing_source',
+    width: 160,
+    render: (row) => {
+      const map: Record<string, { color: string; label: string }> = {
+        token_plan: { color: '#2080f0', label: '📦 token_plan' },
+        api:        { color: '#f0a020', label: '💰 api' },
+        free:       { color: '#18a058', label: '🎁 free' },
+      }
+      const m = map[row.billing_source] ?? { color: '#999', label: row.billing_source }
+      return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)
+    },
+  },
   {
     title: '状态',
     key: 'enabled',
@@ -172,6 +204,7 @@ function openCreate() {
     name: '',
     key: '',
     enabled: true,
+    billing_source: 'api',
   }
   modalVisible.value = true
 }
@@ -193,6 +226,7 @@ async function save() {
         name: form.value.name,
         key: form.value.key,
         enabled: form.value.enabled,
+        billing_source: form.value.billing_source,
       },
     )
     message.success('已添加')

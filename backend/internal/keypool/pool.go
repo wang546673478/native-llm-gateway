@@ -85,6 +85,8 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
 }
 
 // acquireFiltered 内部实现,allowedIDSet 为 nil 表示用所有 keys
+// P48: 按 BillingSource 分桶,优先返回 token_plan key,没有再 api,最后 free
+// 同 tier 内用 Scheduler(round-robin)
 func (p *Pool) acquireFiltered(allowedIDSet map[uint]struct{}) (*Key, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -118,7 +120,25 @@ func (p *Pool) acquireFiltered(allowedIDSet map[uint]struct{}) (*Key, error) {
 		return nil, ErrNoAvailableKey
 	}
 
-	// 3. Scheduler 选一个
+	// 3. P48: 按 billing_source 分桶,优先 token_plan > api > free
+	tierOrder := []string{"token_plan", "api", "free"}
+	for _, tier := range tierOrder {
+		bucket := make([]*Key, 0, len(usable))
+		for _, k := range usable {
+			tierOfKey := k.BillingSource
+			if tierOfKey == "" {
+				tierOfKey = "api" // 兜底
+			}
+			if tierOfKey == tier {
+				bucket = append(bucket, k)
+			}
+		}
+		if len(bucket) > 0 {
+			return p.scheduler.Select(bucket)
+		}
+	}
+
+	// 所有 bucket 都没有(理论上不会到这)— 兜底用全量
 	return p.scheduler.Select(usable)
 }
 

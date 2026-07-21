@@ -18,6 +18,7 @@ const (
 
 // Key 是 Provider 的单个 API Key
 // Key 字段在运行时是明文,落库时由 Encryptor 加密
+// P48: 加 BillingSource — Pool.Acquire 按 token_plan > api > free 优先级返回 key
 type Key struct {
 	ID            string
 	ProviderName  string
@@ -29,6 +30,8 @@ type Key struct {
 	TotalRequests int64
 	TotalTokens   int64
 	ErrorCount    int
+	// P48: 计费来源 tier(token_plan / api / free),影响 Pool.Acquire 优先级
+	BillingSource string
 	LastUsedAt    time.Time
 	LastErrorAt   time.Time
 	CreatedAt     time.Time
