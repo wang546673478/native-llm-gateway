@@ -62,6 +62,7 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Timeout:    cfg.Timeout,
 			ChatPath:   ChatPath, // DeepSeek 关键差异:无 /v1 前缀
 			StreamUsage: true,    // 让流式末尾带 usage,便于 Gateway 端记账
+			Pool:       toPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil
@@ -100,4 +101,15 @@ func (p *Provider) Close() error { return p.base.Close() }
 // init 自动注册到 Registry
 func init() {
 	provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolOpenAI)
+}
+
+// toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
+func toPool(p interface{}) *keypool.Pool {
+	if p == nil {
+		return nil
+	}
+	if pp, ok := p.(*keypool.Pool); ok {
+		return pp
+	}
+	return nil
 }

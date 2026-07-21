@@ -3,15 +3,29 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 )
+
+// generateGatewayKey 生成一个形如 gw-XXXXXX... 的随机密钥(48 hex 字符 = 24 字节熵)
+// 用于前端新建 gateway key 时系统自动分配,不需要用户手填
+func generateGatewayKey() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		// 极端情况,降级到时间戳派生(不应该发生)
+		return "gw-err-" + strings.ReplaceAll(time.Now().UTC().Format("20060102T150405.000000"), ".", "")
+	}
+	return "gw-" + hex.EncodeToString(b)
+}
 
 // KeysHandler 处理 /api/v1/keys 的 CRUD
 // 改动通过 Reload() 推到 Authenticator,Auth 中间件下一次请求就生效
@@ -96,6 +110,14 @@ type KeyView struct {
 	Enabled       bool     `json:"enabled"`
 }
 
+// KeyCreateResp POST 返回值:除了 KeyView 字段,还多一个 IssuedKey(明文密钥,一次性)
+// IssuedKey 只在创建那一刻返回给前端,前端必须立刻展示并提示用户保存
+// 之后无法再次查询(后端不存明文,只存 hash)
+type KeyCreateResp struct {
+	KeyView
+	IssuedKey string `json:"issued_key"`
+}
+
 func toView(k dbpkg.GatewayKey) KeyView {
 	return KeyView{
 		Name:          k.Name,
@@ -107,10 +129,9 @@ func toView(k dbpkg.GatewayKey) KeyView {
 	}
 }
 
-// KeyCreateReq POST body
+// KeyCreateReq POST body(P31: 不再需要 Key 字段,系统自动生成)
 type KeyCreateReq struct {
 	Name          string   `json:"name" binding:"required"`
-	Key           string   `json:"key" binding:"required"`
 	Providers     []string `json:"providers"`     // 多 Provider 绑定,空 = 不限制
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
@@ -119,8 +140,8 @@ type KeyCreateReq struct {
 }
 
 // KeyUpdateReq PUT body(name 在 URL 里,body 不需要)
+// 也不允许通过 update 改 key — key 一旦签发就不能再读出来,只能禁用后重建
 type KeyUpdateReq struct {
-	Key           string   `json:"key"`
 	Providers     []string `json:"providers"`
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
@@ -147,8 +168,8 @@ func (h *KeysHandler) create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "detail": err.Error()})
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Key) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name_and_key_required"})
+	if strings.TrimSpace(req.Name) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name_required"})
 		return
 	}
 
@@ -161,9 +182,11 @@ func (h *KeysHandler) create(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 
+	// P31: 系统自动生成密钥,前端不接收 key 字段
+	issuedKey := generateGatewayKey()
 	k := &dbpkg.GatewayKey{
 		Name:          req.Name,
-		KeyHash:       req.Key,
+		KeyHash:       issuedKey, // DB 存原值(hash 化留给中间件;这里只是命名沿用)
 		Providers:     serializeProviders(req.Providers),
 		AllowedModels: serializeAllowedModels(models),
 		RPM:           req.RPM,
@@ -175,7 +198,11 @@ func (h *KeysHandler) create(c *gin.Context) {
 		return
 	}
 	h.reloadAll(c.Request.Context())
-	c.JSON(http.StatusCreated, toView(*k))
+	// 一次性返回明文密钥给前端 — 仅创建这一刻能看到,之后只能从列表里看到 name
+	c.JSON(http.StatusCreated, KeyCreateResp{
+		KeyView:   toView(*k),
+		IssuedKey: issuedKey,
+	})
 }
 
 func (h *KeysHandler) update(c *gin.Context) {
@@ -195,10 +222,8 @@ func (h *KeysHandler) update(c *gin.Context) {
 		return
 	}
 
-	if strings.TrimSpace(req.Key) != "" {
-		existing.KeyHash = req.Key
-	}
-	// Providers 字段允许随时改(包括清空)
+	// Key 一旦签发就不再允许通过 update 改(只能删了重建)
+	// Providers / AllowedModels / RPM / TPM / Enabled 仍然可调
 	existing.Providers = serializeProviders(req.Providers)
 	if req.AllowedModels != nil {
 		existing.AllowedModels = serializeAllowedModels(req.AllowedModels)

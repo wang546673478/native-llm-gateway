@@ -24,14 +24,11 @@
         <n-form-item label="名称" path="name">
           <n-input v-model:value="form.name" :disabled="editing" placeholder="例如 prod-team-a" />
         </n-form-item>
-        <n-form-item label="密钥" path="key">
-          <n-input
-            v-model:value="form.key"
-            type="password"
-            show-password-on="click"
-            :placeholder="editing ? '留空表示不修改' : 'gw-...'"
-          />
-        </n-form-item>
+
+        <!-- P31-A:密钥由系统自动生成,新建时不显示输入框 -->
+        <n-alert v-if="!editing" type="info" :show-icon="false" style="margin-bottom: 12px">
+          密钥将由系统自动生成,创建后会一次性展示。密钥仅在创建时刻返回,之后无法再查询,请妥善保存。
+        </n-alert>
 
         <!-- P27: 多 Provider 绑定 -->
         <n-form-item label="绑定 Provider(可多选)" path="providers">
@@ -83,13 +80,44 @@
         </n-space>
       </template>
     </n-modal>
+
+    <!-- P31-A: 一次性展示自动生成的密钥 + 复制按钮 -->
+    <n-modal
+      v-model:show="issuedKeyVisible"
+      preset="card"
+      title="✅ Gateway Key 创建成功"
+      style="width: 600px"
+      :mask-closable="false"
+      :closable="false"
+    >
+      <n-alert type="warning" :show-icon="true" style="margin-bottom: 16px">
+        <strong>请立即复制保存</strong> — 此密钥仅展示一次,关闭后无法再查询。
+      </n-alert>
+      <n-form-item label="密钥">
+        <n-input
+          v-model:value="issuedKey"
+          readonly
+          ref="issuedKeyInput"
+        />
+      </n-form-item>
+      <n-text code style="font-size: 13px; display: block; word-break: break-all; padding: 8px; background: rgba(24,160,88,0.05); border-radius: 4px">
+        {{ issuedKey }}
+      </n-text>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="copyIssuedKey" type="primary">📋 复制密钥</n-button>
+          <n-button @click="issuedKeyVisible = false">我已保存,关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-spin>
 </template>
 
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import {
-  NButton, NCard, NDataTable, NForm, NFormItem,
+  NAlert, NButton, NCard, NDataTable, NForm, NFormItem,
   NInput, NInputNumber, NModal, NSpace, NSpin, NSwitch, NSelect,
   NH3, NText, useMessage,
 } from 'naive-ui'
@@ -120,9 +148,12 @@ const modalVisible = ref(false)
 const editing = ref(false)
 const message = useMessage()
 
+// P31-A: 一次性展示生成的密钥
+const issuedKey = ref('')
+const issuedKeyVisible = ref(false)
+
 const form = ref({
   name: '',
-  key: '',
   providers: [] as string[],
   allowed_models: ['*'] as string[],
   rpm: 100,
@@ -132,7 +163,6 @@ const form = ref({
 
 const rules = {
   name: { required: true, message: '名称必填', trigger: 'blur' },
-  key: { required: true, message: '密钥必填', trigger: 'blur' },
 }
 
 // Provider 下拉选项(NSelect)
@@ -144,10 +174,8 @@ const providerOptions = computed<SelectOption[]>(() =>
 )
 
 // P27: 允许的模型 = 已选 Provider 的模型去重合并
-// 不包含"*" 因为它是通配符,用户手动加
 const providerModelsUnion = computed<string[]>(() => {
   if (form.value.providers.length === 0) {
-    // 没选 Provider,显示所有已加载 Provider 的模型供参考
     return Array.from(new Set(providers.value.flatMap(p => p.models)))
   }
   return Array.from(new Set(
@@ -158,7 +186,6 @@ const providerModelsUnion = computed<string[]>(() => {
   ))
 })
 
-// 模型的 NSelect 选项,自动加 "*" 通配项
 const availableModelOptions = computed<SelectOption[]>(() => {
   const opts: SelectOption[] = [
     { label: '* (通配,所有模型)', value: '*' },
@@ -170,9 +197,7 @@ const availableModelOptions = computed<SelectOption[]>(() => {
   return opts
 })
 
-// 自定义 tag 渲染,显示模型名 + 所属 provider(辅助)
 function renderModelTag({ option, handleClose }: any) {
-  // 找这个 model 属于哪些 provider
   const matched = providers.value
     .filter(p => form.value.providers.includes(p.name) || form.value.providers.length === 0)
     .filter(p => p.models.includes(String(option.value)))
@@ -212,7 +237,6 @@ function openCreate() {
   editing.value = false
   form.value = {
     name: '',
-    key: '',
     providers: [],
     allowed_models: ['*'],
     rpm: 100,
@@ -226,7 +250,6 @@ function openEdit(row: KeyView) {
   editing.value = true
   form.value = {
     name: row.name,
-    key: '', // 编辑时不填,留空表示不改
     providers: [...row.providers],
     allowed_models: row.allowed_models.length > 0 ? [...row.allowed_models] : ['*'],
     rpm: row.rpm,
@@ -241,10 +264,6 @@ async function save() {
     message.error('名称必填')
     return
   }
-  if (!editing.value && !form.value.key) {
-    message.error('密钥必填')
-    return
-  }
   saving.value = true
   try {
     const body: any = {
@@ -255,21 +274,45 @@ async function save() {
       enabled: form.value.enabled,
     }
     if (editing.value) {
-      if (form.value.key) body.key = form.value.key
+      // 编辑模式:不允许改 key
       await axios.put(`/api/v1/keys/${encodeURIComponent(form.value.name)}`, body)
       message.success('已更新')
+      modalVisible.value = false
     } else {
+      // 新建模式:不传 key,后端自动生成
       body.name = form.value.name
-      body.key = form.value.key
-      await axios.post('/api/v1/keys', body)
-      message.success('已创建')
+      const resp = await axios.post('/api/v1/keys', body)
+      modalVisible.value = false
+      // P31-A: 弹出一次性密钥展示窗
+      const k = resp.data?.issued_key
+      if (k) {
+        issuedKey.value = k
+        issuedKeyVisible.value = true
+      } else {
+        message.success('已创建')
+      }
     }
-    modalVisible.value = false
     await load()
   } catch (e: any) {
     message.error('保存失败: ' + (e.response?.data?.error ?? e.message))
   } finally {
     saving.value = false
+  }
+}
+
+async function copyIssuedKey() {
+  try {
+    await navigator.clipboard.writeText(issuedKey.value)
+    message.success('已复制到剪贴板')
+  } catch (e: any) {
+    // fallback
+    const ta = document.createElement('textarea')
+    ta.value = issuedKey.value
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    message.success('已复制')
   }
 }
 
@@ -331,8 +374,7 @@ const columns: DataTableColumns<KeyView> = [
       h(NSpace, {}, () => [
         h(NButton, { size: 'small', onClick: () => openEdit(row) }, () => '编辑'),
         h(
-          NButton,
-          { size: 'small', type: 'error', onClick: () => confirmDelete(row) },
+          NButton, { size: 'small', type: 'error', onClick: () => confirmDelete(row) },
           () => '删除',
         ),
       ]),
