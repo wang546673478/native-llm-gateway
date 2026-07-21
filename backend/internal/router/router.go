@@ -37,6 +37,20 @@ type RouteResult struct {
 	Protocol     provider.Protocol
 }
 
+// RouteOption P34: 给 Route() 传可选参数(ProviderKeyIDs 限定)
+type RouteOption func(*routeOpts)
+
+type routeOpts struct {
+	ProviderKeyIDs []uint
+}
+
+// WithProviderKeyIDs 让路由从指定 ProviderKeyIDs 子集里挑凭证
+func WithProviderKeyIDs(ids []uint) RouteOption {
+	return func(o *routeOpts) {
+		o.ProviderKeyIDs = ids
+	}
+}
+
 // Router 持有所有路由决策所需的状态
 type Router struct {
 	mu          sync.RWMutex
@@ -84,10 +98,15 @@ func (r *Router) SetHealthStatus(providerName string, open bool) {
 var ErrNoRoute = errors.New("router: no route matches the request")
 
 // Route 把请求解析成一个 RouteIterator(支持 failover)
-func (r *Router) Route(ctx context.Context, req *provider.Request) (*RouteIterator, error) {
+func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...RouteOption) (*RouteIterator, error) {
+	o := &routeOpts{}
+	for _, opt := range opts {
+		opt(o)
+	}
 	rule, ok := r.aliases[req.Model]
 	if !ok {
-		return r.routeDirectModel(ctx, req.Model, req)
+		// routeDirectModel 也需要传 opts(支持 ProviderKeyIDs)
+		return r.routeDirectModelWithOpts(ctx, req.Model, req, o)
 	}
 
 	strategy := rule.Strategy
@@ -113,15 +132,20 @@ func (r *Router) Route(ctx context.Context, req *provider.Request) (*RouteIterat
 	}
 
 	return &RouteIterator{
-		alias:      req.Model,
-		candidates: ordered,
-		pools:      r.pools,
-		manager:    r.manager,
+		alias:           req.Model,
+		candidates:      ordered,
+		pools:           r.pools,
+		manager:         r.manager,
+		providerKeyIDs:  o.ProviderKeyIDs,
 	}, nil
 }
 
 // routeDirectModel 没有别名规则时,按真实 model id 直接查找 Provider
 func (r *Router) routeDirectModel(ctx context.Context, modelID string, req *provider.Request) (*RouteIterator, error) {
+	return r.routeDirectModelWithOpts(ctx, modelID, req, &routeOpts{})
+}
+
+func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
 	candidates := make([]ProviderRoute, 0)
 	for name, p := range r.manager.GetAll() {
 		for _, m := range p.Models() {
@@ -134,10 +158,11 @@ func (r *Router) routeDirectModel(ctx context.Context, modelID string, req *prov
 		return nil, ErrNoRoute
 	}
 	return &RouteIterator{
-		alias:      modelID,
-		candidates: candidates,
-		pools:      r.pools,
-		manager:    r.manager,
+		alias:          modelID,
+		candidates:     candidates,
+		pools:          r.pools,
+		manager:        r.manager,
+		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
 }
 
@@ -178,11 +203,12 @@ func detectProtocol(path string) provider.Protocol {
 
 // RouteIterator 持有排序好的候选,Next() 取下一个可用
 type RouteIterator struct {
-	alias      string
-	candidates []ProviderRoute
-	pools      map[string]*keypool.Pool
-	manager    *provider.Manager
-	current    int
+	alias          string
+	candidates     []ProviderRoute
+	pools          map[string]*keypool.Pool
+	manager        *provider.Manager
+	providerKeyIDs []uint // P34: 限定的 ProviderKey ID 子集(空 = 不限)
+	current        int
 }
 
 // Next 返回下一个可用的 RouteResult
@@ -198,7 +224,16 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 
 		var k *keypool.Key
 		if pool, ok := it.pools[c.Name]; ok && pool != nil {
-			kk, err := pool.Acquire()
+			var (
+				kk  *keypool.Key
+				err error
+			)
+			if len(it.providerKeyIDs) > 0 {
+				// P34: 限定 ProviderKey ID 子集
+				kk, err = pool.AcquireFromIDs(it.providerKeyIDs)
+			} else {
+				kk, err = pool.Acquire()
+			}
 			if err != nil {
 				continue
 			}

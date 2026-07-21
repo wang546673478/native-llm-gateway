@@ -110,6 +110,11 @@ type GatewayKey struct {
 	// 例:"[\"deepseek\",\"deepseek-anthropic\"]" 表示 deepseek 的 OpenAI 和
 	// Anthropic 兼容端点都能用(用同一个 API key)
 	Providers     string    `gorm:"column:providers;default:'[]'" json:"providers"`
+	// P34: ProviderKeyIDs 绑定:JSON 数组存 ProviderAPIKey.ID(uint)
+	// 空 = 不限制(用该 provider 的所有 key 池)
+	// 非空 = 只能用这些 ID 对应的 provider key 调上游
+	// 例:"[5,7]" 表示只能从 minimax provider_api_keys 表 ID=5 和 ID=7 的 key 池里挑
+	ProviderKeyIDs string    `gorm:"column:provider_key_ids;default:'[]'" json:"provider_key_ids"`
 	AllowedModels string    `gorm:"column:allowed_models;not null;default:'[\"*\"]'" json:"allowed_models"`
 	RPM           int       `gorm:"column:rpm;not null;default:100" json:"rpm"`
 	TPM           int       `gorm:"column:tpm;not null;default:500000" json:"tpm"`

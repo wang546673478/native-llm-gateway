@@ -21,8 +21,13 @@ type GatewayKey struct {
 	// 例:["deepseek", "deepseek-anthropic"] 表示 deepseek 的 OpenAI 和
 	// Anthropic 兼容端点都能用(共享同一个 API key)
 	Providers     []string
-	AllowedModels []string
-	RateLimit     RateLimitConfig
+	// P34: ProviderKeyIDs 绑定具体凭证(ProviderAPIKey.ID)
+	// 空 = 不限制(用该 provider 的所有 key 池里挑)
+	// 非空 = 只用 ID 在这个集合里的 Provider Key(精准锁定凭证)
+	// 例:[5, 7] 表示只能用 ProviderAPIKey 表里 ID=5 和 ID=7 的上游 key
+	ProviderKeyIDs []uint
+	AllowedModels  []string
+	RateLimit      RateLimitConfig
 }
 
 // RateLimitConfig RPM/TPM 限制

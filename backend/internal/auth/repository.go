@@ -62,13 +62,14 @@ func (s *gormKeyStore) Update(ctx context.Context, name string, k *dbpkg.Gateway
 	return s.db.WithContext(ctx).Model(&dbpkg.GatewayKey{}).
 		Where("name = ?", name).
 		Updates(map[string]interface{}{
-			"key_hash":       k.KeyHash,
-			"providers":      k.Providers,
-			"allowed_models": k.AllowedModels,
-			"rpm":            k.RPM,
-			"tpm":            k.TPM,
-			"enabled":        k.Enabled,
-			"updated_at":     k.UpdatedAt,
+			"key_hash":         k.KeyHash,
+			"providers":        k.Providers,
+			"provider_key_ids": k.ProviderKeyIDs, // P34
+			"allowed_models":   k.AllowedModels,
+			"rpm":              k.RPM,
+			"tpm":              k.TPM,
+			"enabled":          k.Enabled,
+			"updated_at":       k.UpdatedAt,
 		}).Error
 }
 

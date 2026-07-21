@@ -167,38 +167,41 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 			continue
 		}
 		store := auth.NewProviderKeyStore(db)
-		plainKeys, err := store.GetPlainKeys(ctx, name)
+		// P34: 直接从 DB 读 ProviderAPIKey 行,Key.ID 用 DB uint ID
+		// (这样 GatewayKey.ProviderKeyIDs 能精准定位到具体凭证)
+		rows, err := store.List(ctx, name)
 		if err != nil {
 			logger.Warn("read provider keys from DB failed",
 				zap.String("provider", name),
 				zap.Error(err))
 			continue
 		}
-		if len(plainKeys) == 0 {
+		if len(rows) == 0 {
 			// 没 key 也不报错,让 provider 还是 loaded;调它会返回 'no available key'
 			out[name] = keypool.NewPool(name, nil, sched, poolCfg)
 			logger.Warn("provider has no API keys in DB",
 				zap.String("provider", name))
 			continue
 		}
-		out[name] = keypool.BuildPoolFromStrings(name, plainKeys, poolCfg)
-		// BuildPoolFromStrings 用了 nil scheduler,改用带 scheduler 的 NewPool
-		keys := make([]*keypool.Key, 0, len(plainKeys))
-		for i, pk := range plainKeys {
+		keys := make([]*keypool.Key, 0, len(rows))
+		for _, row := range rows {
+			if !row.Enabled {
+				continue
+			}
 			keys = append(keys, &keypool.Key{
-				ID:           fmt.Sprintf("%s-key-%d", name, i+1),
+				ID:           fmt.Sprintf("%d", row.ID), // P34: 用 DB ID 作为 Key.ID
 				ProviderName: name,
-				Name:         fmt.Sprintf("key-%d", i+1),
-				Key:          pk,
+				Name:         row.Name,
+				Key:          row.KeyHash,
 				Status:       keypool.KeyStatusActive,
-				CreatedAt:    time.Now().UTC(),
-				UpdatedAt:    time.Now().UTC(),
+				CreatedAt:    row.CreatedAt,
+				UpdatedAt:    row.UpdatedAt,
 			})
 		}
 		out[name] = keypool.NewPool(name, keys, sched, poolCfg)
 		logger.Info("keypool built from DB",
 			zap.String("provider", name),
-			zap.Int("keys", len(plainKeys)),
+			zap.Int("keys", len(keys)),
 			zap.String("rotation", cfg.KeyPool.KeyRotation),
 		)
 	}

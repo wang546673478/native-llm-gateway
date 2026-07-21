@@ -66,6 +66,26 @@ func BuildPoolFromStrings(providerName string, plainKeys []string, cfg Config) *
 //   2. Scheduler 从可用 keys 中选一个
 //   3. 若没有可用,返回 ErrNoAvailableKey
 func (p *Pool) Acquire() (*Key, error) {
+	return p.acquireFiltered(nil)
+}
+
+// AcquireFromIDs P34: 从指定 ID 子集里挑 Key(Gateway Key 绑定了 ProviderKeyIDs 时用)
+// allowedIDs 为 nil/空 → 等价 Acquire(用全部 keys)
+// 非空 → 只从 ID 在这个集合里的 key 里挑
+func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
+	if len(allowedIDs) == 0 {
+		return p.Acquire()
+	}
+	// 转成 map 加速 lookup
+	set := make(map[uint]struct{}, len(allowedIDs))
+	for _, id := range allowedIDs {
+		set[id] = struct{}{}
+	}
+	return p.acquireFiltered(set)
+}
+
+// acquireFiltered 内部实现,allowedIDSet 为 nil 表示用所有 keys
+func (p *Pool) acquireFiltered(allowedIDSet map[uint]struct{}) (*Key, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -82,9 +102,17 @@ func (p *Pool) Acquire() (*Key, error) {
 	// 2. 收集可用 Key(过滤)
 	usable := make([]*Key, 0, len(p.keys))
 	for _, k := range p.keys {
-		if k.IsUsable(now) {
-			usable = append(usable, k)
+		if !k.IsUsable(now) {
+			continue
 		}
+		// P34: 如果 allowedIDSet 不为空,只收 ID 在集合里的 key
+		if allowedIDSet != nil {
+			id := parseKeyIDUint(k.ID)
+			if _, ok := allowedIDSet[id]; !ok {
+				continue
+			}
+		}
+		usable = append(usable, k)
 	}
 	if len(usable) == 0 {
 		return nil, ErrNoAvailableKey
@@ -92,6 +120,21 @@ func (p *Pool) Acquire() (*Key, error) {
 
 	// 3. Scheduler 选一个
 	return p.scheduler.Select(usable)
+}
+
+// parseKeyIDUint 把 Key.ID (格式 "<provider>-key-<N>" 或纯数字字符串) 转 uint
+// P34: Pool 里的 Key.ID 现在是 DB ProviderAPIKey.ID 的字符串形式(数字)
+// 为了向前兼容保留旧的 "<provider>-key-N" 形式(返回 0 表示不在 ID 集合里匹配)
+func parseKeyIDUint(id string) uint {
+	var n uint
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + uint(c-'0')
+	}
+	return n
 }
 
 // ReportSuccess 上报成功

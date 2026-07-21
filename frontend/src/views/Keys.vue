@@ -17,7 +17,7 @@
       v-model:show="modalVisible"
       preset="card"
       :title="editing ? '编辑 Gateway Key' : '新建 Gateway Key'"
-      style="width: 700px"
+      style="width: 800px"
       :mask-closable="false"
     >
       <n-form ref="formRef" :model="form" :rules="rules" label-placement="top">
@@ -25,13 +25,12 @@
           <n-input v-model:value="form.name" :disabled="editing" placeholder="例如 prod-team-a" />
         </n-form-item>
 
-        <!-- P32-B:密钥由系统自动生成 -->
         <n-alert v-if="!editing" type="info" :show-icon="false" style="margin-bottom: 12px">
           密钥将由系统自动生成,创建后会展示在列表里,可随时复制。
         </n-alert>
 
-        <!-- 多 Provider 绑定 -->
-        <n-form-item label="绑定 Provider(可多选)" path="providers">
+        <!-- P34: 多 Provider 绑定(限制 provider 类型) -->
+        <n-form-item label="绑定 Provider(可多选,限制可用的 provider 类型)" path="providers">
           <n-select
             v-model:value="form.providers"
             multiple
@@ -39,8 +38,27 @@
             placeholder="不选 = 不限制,可用于任意 Provider"
             clearable
           />
+        </n-form-item>
+
+        <!-- P34: 第二级 — 绑定具体 Provider Key 凭证(多租户隔离) -->
+        <n-form-item label="绑定的 Provider Key(可多选,精准锁定上游凭证)" path="provider_key_ids">
+          <n-select
+            v-model:value="form.provider_key_ids"
+            multiple
+            :options="filteredProviderKeyOptions"
+            :disabled="availableProviderKeys.length === 0"
+            placeholder="不选 = 用该 provider 的所有 key 池"
+            clearable
+            filterable
+          />
           <n-text depth="3" style="font-size: 12px; display: block; margin-top: 4px">
-            同一把 API key 可同时用于多个 Provider(例如 DeepSeek 的 OpenAI 和 Anthropic 兼容端点)
+            已绑定 {{ form.provider_key_ids.length }} 个 Provider Key ·
+            <span v-if="form.providers.length === 0">
+              (所有 provider 的 keys 都可选,共 {{ availableProviderKeys.length }} 个)
+            </span>
+            <span v-else>
+              (从已绑 Provider 中选,共 {{ availableProviderKeys.length }} 个)
+            </span>
           </n-text>
         </n-form-item>
 
@@ -99,11 +117,21 @@ interface ProviderInfo {
   models: string[]
 }
 
-// P32-B: KeyView 含明文 key(列表直接展示,可复制)
+// P34: ProviderKey(后端返回的脱敏 view)
+interface ProviderKeyView {
+  id: number
+  provider_name: string
+  name: string
+  key_masked: string
+  enabled: boolean
+}
+
+// P34: KeyView 含 provider_key_ids + 明文 key
 interface KeyView {
   name: string
   key: string
   providers: string[]
+  provider_key_ids: number[]
   allowed_models: string[]
   rpm: number
   tpm: number
@@ -113,6 +141,7 @@ interface KeyView {
 
 const keys = ref<KeyView[]>([])
 const providers = ref<ProviderInfo[]>([])
+const providerKeysMap = ref<Record<string, ProviderKeyView[]>>({}) // P34: provider_name → ProviderKey[]
 const loading = ref(false)
 const saving = ref(false)
 const modalVisible = ref(false)
@@ -122,6 +151,7 @@ const message = useMessage()
 const form = ref({
   name: '',
   providers: [] as string[],
+  provider_key_ids: [] as number[], // P34: 绑定的 ProviderKey ID
   allowed_models: ['*'] as string[],
   rpm: 100,
   tpm: 500000,
@@ -133,9 +163,27 @@ const rules = {
 }
 
 const providerOptions = computed<SelectOption[]>(() =>
-  providers.value.map(p => ({
-    label: p.name,
-    value: p.name,
+  providers.value.map(p => ({ label: p.name, value: p.name })),
+)
+
+// P34: 当前可选的 ProviderKey(根据已绑定的 providers 过滤)
+// form.providers 为空时显示所有;否则只显示绑定 provider 的 keys
+const availableProviderKeys = computed<ProviderKeyView[]>(() => {
+  if (form.value.providers.length === 0) {
+    return Object.values(providerKeysMap.value).flat()
+  }
+  const out: ProviderKeyView[] = []
+  for (const p of form.value.providers) {
+    out.push(...(providerKeysMap.value[p] ?? []))
+  }
+  return out
+})
+
+const filteredProviderKeyOptions = computed<SelectOption[]>(() =>
+  availableProviderKeys.value.map(k => ({
+    label: `${k.provider_name} → ${k.name} (${k.key_masked})${k.enabled ? '' : ' [已禁用]'}`,
+    value: k.id,
+    disabled: !k.enabled,
   })),
 )
 
@@ -180,6 +228,7 @@ function renderModelTag({ option, handleClose }: any) {
 async function load() {
   loading.value = true
   try {
+    // 1. 拿 keys + providers
     const [keysResp, regResp] = await Promise.all([
       axios.get('/api/v1/keys'),
       axios.get('/api/v1/providers/registered'),
@@ -188,9 +237,23 @@ async function load() {
     providers.value = (regResp.data.providers ?? []).map((p: any) => ({
       name: p.name,
       protocol: p.protocol,
-      loaded: true, // /registered 返回的都是已注册(即可用)的 provider
+      loaded: true,
       models: p.models ?? [],
     }))
+
+    // 2. 拿所有 provider 的 keys(P34: 用于 ProviderKey 下拉)
+    const map: Record<string, ProviderKeyView[]> = {}
+    await Promise.all(
+      providers.value.map(async p => {
+        try {
+          const r = await axios.get<{ keys: ProviderKeyView[] }>(`/api/v1/providers/${encodeURIComponent(p.name)}/api-keys`)
+          map[p.name] = r.data.keys ?? []
+        } catch {
+          map[p.name] = []
+        }
+      })
+    )
+    providerKeysMap.value = map
   } catch (e: any) {
     message.error('加载失败: ' + (e.message ?? e))
   } finally {
@@ -203,6 +266,7 @@ function openCreate() {
   form.value = {
     name: '',
     providers: [],
+    provider_key_ids: [],
     allowed_models: ['*'],
     rpm: 100,
     tpm: 500000,
@@ -216,12 +280,23 @@ function openEdit(row: KeyView) {
   form.value = {
     name: row.name,
     providers: [...row.providers],
+    provider_key_ids: [...(row.provider_key_ids ?? [])],
     allowed_models: row.allowed_models.length > 0 ? [...row.allowed_models] : ['*'],
     rpm: row.rpm,
     tpm: row.tpm,
     enabled: row.enabled,
   }
   modalVisible.value = true
+}
+
+// P34: 把绑定的 ID 翻译成可读的 "minimax → key-1 (sk-...)"
+function describeProviderKeys(ids: number[]): string {
+  if (!ids || ids.length === 0) return h('span', { style: 'color: #999' }, '全部')
+  // 从 providerKeysMap 找
+  const all = Object.values(providerKeysMap.value).flat()
+  const items = ids.map(id => all.find(k => k.id === id)).filter(Boolean) as ProviderKeyView[]
+  if (items.length === 0) return `${ids.length} 个 (失效)`
+  return items.map(k => `${k.provider_name}→${k.name}`).join(', ')
 }
 
 async function save() {
@@ -233,6 +308,7 @@ async function save() {
   try {
     const body: any = {
       providers: form.value.providers,
+      provider_key_ids: form.value.provider_key_ids,
       allowed_models: form.value.allowed_models,
       rpm: form.value.rpm,
       tpm: form.value.tpm,
@@ -243,7 +319,6 @@ async function save() {
       message.success('已更新')
     } else {
       body.name = form.value.name
-      // P32-B: 后端直接返回 key 在响应里;列表加载后会自动展示
       await axios.post('/api/v1/keys', body)
       message.success('已创建,密钥已展示在列表中')
     }
@@ -260,8 +335,7 @@ async function copyKey(row: KeyView) {
   try {
     await navigator.clipboard.writeText(row.key)
     message.success(`已复制 ${row.name} 的密钥`)
-  } catch (e) {
-    // fallback
+  } catch {
     const ta = document.createElement('textarea')
     ta.value = row.key
     document.body.appendChild(ta)
@@ -284,13 +358,14 @@ async function confirmDelete(row: KeyView) {
 }
 
 const columns: DataTableColumns<KeyView> = [
-  { title: '名称', key: 'name', width: 140 },
+  { title: '名称', key: 'name', width: 130 },
   {
     title: '密钥',
     key: 'key',
+    width: 240,
     render: (row) =>
       h('code', {
-        style: 'font-size: 12px; padding: 2px 6px; background: rgba(24,160,88,0.08); border-radius: 4px; user-select: all; cursor: pointer;',
+        style: 'font-size: 11px; padding: 2px 6px; background: rgba(24,160,88,0.08); border-radius: 4px; user-select: all; cursor: pointer;',
         onClick: () => copyKey(row),
         title: '点击复制',
       }, row.key),
@@ -298,24 +373,36 @@ const columns: DataTableColumns<KeyView> = [
   {
     title: 'Provider 绑定',
     key: 'providers',
-    width: 200,
+    width: 140,
     render: (row) => {
       if (!row.providers || row.providers.length === 0) {
         return h('span', { style: 'color: #999' }, '任意')
       }
-      return h(
-        'span',
-        {},
-        row.providers.map((p, i) =>
-          h('span', { key: i, style: 'color: #2080f0; margin-right: 4px' }, `🔒 ${p}`)
-        )
-      )
+      return h('span', {}, row.providers.map((p, i) =>
+        h('span', { key: i, style: 'color: #2080f0; margin-right: 4px' }, `🔒 ${p}`)
+      ))
+    },
+  },
+  {
+    title: 'Provider Key 绑定',
+    key: 'provider_key_ids',
+    width: 220,
+    render: (row) => {
+      const desc = describeProviderKeys(row.provider_key_ids ?? [])
+      if (typeof desc === 'string') {
+        return h('span', {
+          style: row.provider_key_ids?.length
+            ? 'color: #2080f0; font-size: 12px'
+            : 'color: #999; font-size: 12px',
+        }, desc)
+      }
+      return desc
     },
   },
   {
     title: '允许模型',
     key: 'allowed_models',
-    width: 180,
+    width: 150,
     render: (row) =>
       row.allowed_models.length === 0
         ? '*'
@@ -323,23 +410,21 @@ const columns: DataTableColumns<KeyView> = [
         ? `${row.allowed_models.slice(0, 3).join(', ')} +${row.allowed_models.length - 3}`
         : row.allowed_models.join(', '),
   },
-  { title: 'RPM', key: 'rpm', width: 70 },
-  { title: 'TPM', key: 'tpm', width: 80 },
+  { title: 'RPM', key: 'rpm', width: 60 },
+  { title: 'TPM', key: 'tpm', width: 70 },
   {
     title: '状态',
     key: 'enabled',
-    width: 80,
+    width: 70,
     render: (row) =>
-      h(
-        'span',
+      h('span',
         { style: { color: row.enabled ? '#18a058' : '#999' } },
-        row.enabled ? '● 启用' : '○ 禁用',
-      ),
+        row.enabled ? '● 启用' : '○ 禁用'),
   },
   {
     title: '操作',
     key: 'actions',
-    width: 220,
+    width: 210,
     render: (row) =>
       h(NSpace, {}, () => [
         h(NButton, { size: 'small', onClick: () => copyKey(row) }, () => '📋 复制'),

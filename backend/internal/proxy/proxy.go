@@ -113,8 +113,14 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		TraceID:      traceID,
 	}
 
-	// 4. 路由(failover iterator)
-	iter, err := e.router.Route(ctx, req)
+	// 4. 路由(failover iterator) — P34: 把 GatewayKey 绑定的 ProviderKeyIDs 传给 Router
+	var routeOpts []router.RouteOption
+	if gkVal, ok := c.Get("gateway_key"); ok {
+		if gk, ok := gkVal.(*auth.GatewayKey); ok && len(gk.ProviderKeyIDs) > 0 {
+			routeOpts = append(routeOpts, router.WithProviderKeyIDs(gk.ProviderKeyIDs))
+		}
+	}
+	iter, err := e.router.Route(ctx, req, routeOpts...)
 	if err != nil {
 		e.logger.Warn("no route",
 			zap.String("model", model),

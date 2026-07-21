@@ -89,12 +89,13 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 	out := make([]GatewayKey, 0, len(rows))
 	for _, k := range rows {
 		out = append(out, GatewayKey{
-			ID:            string(rune(k.ID)),
-			Name:          k.Name,
-			KeyHash:       k.KeyHash,
-			Providers:     parseProviders(k.Providers),
-			AllowedModels: parseAllowedModels(k.AllowedModels),
-			RateLimit:     RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
+			ID:             string(rune(k.ID)),
+			Name:           k.Name,
+			KeyHash:        k.KeyHash,
+			Providers:      parseProviders(k.Providers),
+			ProviderKeyIDs: parseProviderKeyIDs(k.ProviderKeyIDs),
+			AllowedModels:  parseAllowedModels(k.AllowedModels),
+			RateLimit:      RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
 		})
 	}
 	return out, nil
@@ -104,14 +105,15 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 // 这是内部 LLM Gateway,管理员需要随时看到 key 来分发/重新部署,
 // 所以 DB 存的就是明文,list/get 直接返回(标 json:"key")
 type KeyView struct {
-	Name          string   `json:"name"`
-	Key           string   `json:"key"` // 明文,可复制
-	Providers     []string `json:"providers"`
-	AllowedModels []string `json:"allowed_models"`
-	RPM           int      `json:"rpm"`
-	TPM           int      `json:"tpm"`
-	Enabled       bool     `json:"enabled"`
-	CreatedAt     string   `json:"created_at,omitempty"`
+	Name           string   `json:"name"`
+	Key            string   `json:"key"` // 明文,可复制
+	Providers      []string `json:"providers"`
+	ProviderKeyIDs []uint   `json:"provider_key_ids"` // P34: 绑定的 ProviderKey ID
+	AllowedModels  []string `json:"allowed_models"`
+	RPM            int      `json:"rpm"`
+	TPM            int      `json:"tpm"`
+	Enabled        bool     `json:"enabled"`
+	CreatedAt      string   `json:"created_at,omitempty"`
 }
 
 // KeyCreateResp POST 返回值:等同 KeyView(创建后立刻就能看到 key)
@@ -120,35 +122,38 @@ type KeyCreateResp = KeyView
 
 func toView(k dbpkg.GatewayKey) KeyView {
 	return KeyView{
-		Name:          k.Name,
-		Key:           k.KeyHash,
-		Providers:     parseProviders(k.Providers),
-		AllowedModels: parseAllowedModels(k.AllowedModels),
-		RPM:           k.RPM,
-		TPM:           k.TPM,
-		Enabled:       k.Enabled,
-		CreatedAt:     k.CreatedAt.Format(time.RFC3339),
+		Name:           k.Name,
+		Key:            k.KeyHash,
+		Providers:      parseProviders(k.Providers),
+		ProviderKeyIDs: parseProviderKeyIDs(k.ProviderKeyIDs),
+		AllowedModels:  parseAllowedModels(k.AllowedModels),
+		RPM:            k.RPM,
+		TPM:            k.TPM,
+		Enabled:        k.Enabled,
+		CreatedAt:      k.CreatedAt.Format(time.RFC3339),
 	}
 }
 
 // KeyCreateReq POST body(P31: 不再需要 Key 字段,系统自动生成)
 type KeyCreateReq struct {
-	Name          string   `json:"name" binding:"required"`
-	Providers     []string `json:"providers"`     // 多 Provider 绑定,空 = 不限制
-	AllowedModels []string `json:"allowed_models"`
-	RPM           int      `json:"rpm"`
-	TPM           int      `json:"tpm"`
-	Enabled       *bool    `json:"enabled"`
+	Name           string   `json:"name" binding:"required"`
+	Providers      []string `json:"providers"`       // 多 Provider 绑定,空 = 不限制
+	ProviderKeyIDs []uint   `json:"provider_key_ids"` // P34: 绑定具体 Provider Key ID
+	AllowedModels  []string `json:"allowed_models"`
+	RPM            int      `json:"rpm"`
+	TPM            int      `json:"tpm"`
+	Enabled        *bool    `json:"enabled"`
 }
 
 // KeyUpdateReq PUT body(name 在 URL 里,body 不需要)
 // 也不允许通过 update 改 key — key 一旦签发就不能再读出来,只能禁用后重建
 type KeyUpdateReq struct {
-	Providers     []string `json:"providers"`
-	AllowedModels []string `json:"allowed_models"`
-	RPM           int      `json:"rpm"`
-	TPM           int      `json:"tpm"`
-	Enabled       *bool    `json:"enabled"`
+	Providers      []string `json:"providers"`
+	ProviderKeyIDs []uint   `json:"provider_key_ids"`
+	AllowedModels  []string `json:"allowed_models"`
+	RPM            int      `json:"rpm"`
+	TPM            int      `json:"tpm"`
+	Enabled        *bool    `json:"enabled"`
 }
 
 func (h *KeysHandler) list(c *gin.Context) {
@@ -187,13 +192,14 @@ func (h *KeysHandler) create(c *gin.Context) {
 	// P31: 系统自动生成密钥,前端不接收 key 字段
 	issuedKey := generateGatewayKey()
 	k := &dbpkg.GatewayKey{
-		Name:          req.Name,
-		KeyHash:       issuedKey, // DB 存原值(hash 化留给中间件;这里只是命名沿用)
-		Providers:     serializeProviders(req.Providers),
-		AllowedModels: serializeAllowedModels(models),
-		RPM:           req.RPM,
-		TPM:           req.TPM,
-		Enabled:       enabled,
+		Name:           req.Name,
+		KeyHash:        issuedKey, // DB 存原值(hash 化留给中间件;这里只是命名沿用)
+		Providers:      serializeProviders(req.Providers),
+		ProviderKeyIDs: serializeProviderKeyIDs(req.ProviderKeyIDs),
+		AllowedModels:  serializeAllowedModels(models),
+		RPM:            req.RPM,
+		TPM:            req.TPM,
+		Enabled:        enabled,
 	}
 	if err := h.store.Create(c.Request.Context(), k); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "create_failed", "detail": err.Error()})
@@ -222,8 +228,10 @@ func (h *KeysHandler) update(c *gin.Context) {
 	}
 
 	// Key 一旦签发就不再允许通过 update 改(只能删了重建)
-	// Providers / AllowedModels / RPM / TPM / Enabled 仍然可调
+	// Providers / ProviderKeyIDs / AllowedModels / RPM / TPM / Enabled 仍然可调
 	existing.Providers = serializeProviders(req.Providers)
+	// ProviderKeyIDs 可显式置空(传 nil 或 [] → "[]")
+	existing.ProviderKeyIDs = serializeProviderKeyIDs(req.ProviderKeyIDs)
 	if req.AllowedModels != nil {
 		existing.AllowedModels = serializeAllowedModels(req.AllowedModels)
 	}
@@ -262,12 +270,13 @@ func (h *KeysHandler) reloadAll(ctx context.Context) {
 	keys := make([]GatewayKey, 0, len(rows))
 	for _, k := range rows {
 		keys = append(keys, GatewayKey{
-			ID:            string(rune(k.ID)),
-			Name:          k.Name,
-			KeyHash:       k.KeyHash,
-			Providers:     parseProviders(k.Providers),
-			AllowedModels: parseAllowedModels(k.AllowedModels),
-			RateLimit:     RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
+			ID:             string(rune(k.ID)),
+			Name:           k.Name,
+			KeyHash:        k.KeyHash,
+			Providers:      parseProviders(k.Providers),
+			ProviderKeyIDs: parseProviderKeyIDs(k.ProviderKeyIDs),
+			AllowedModels:  parseAllowedModels(k.AllowedModels),
+			RateLimit:      RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
 		})
 	}
 	h.reload(keys)
@@ -311,6 +320,26 @@ func parseProviders(s string) []string {
 		return nil
 	}
 	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// P34: serializeProviderKeyIDs / parseProviderKeyIDs — ProviderAPIKey.ID 列表
+func serializeProviderKeyIDs(in []uint) string {
+	if in == nil {
+		return `[]`
+	}
+	b, _ := json.Marshal(in)
+	return string(b)
+}
+
+func parseProviderKeyIDs(s string) []uint {
+	if s == "" {
+		return nil
+	}
+	var out []uint
 	if err := json.Unmarshal([]byte(s), &out); err != nil {
 		return nil
 	}
