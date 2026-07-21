@@ -175,9 +175,16 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 
 		result, err := iter.Next()
 		if err != nil {
+			e.logger.Info("P54 DEBUG: no more candidates", zap.Error(err))
 			// 没更多候选
 			break
 		}
+		e.logger.Info("P54 DEBUG: trying",
+			zap.String("provider", result.ProviderName),
+			zap.String("key_id", result.Key.ID),
+			zap.String("key_status", string(result.Key.Status)),
+			zap.String("model", result.ModelID),
+			zap.Int("attempt", attempts))
 
 		// 用候选的 provider + key 调 Provider
 		req.Headers.Set("X-Request-Id", traceID)

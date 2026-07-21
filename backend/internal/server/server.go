@@ -541,6 +541,11 @@ func (s *Server) ReloadProviderPool(providerName string) {
 				s.logger.Info("provider pool reloaded", zap.String("provider", providerName), zap.Int("keys", pool.Size()))
 			}
 		}
+		// P54: 同时更新 Router 持有的 pool 引用 — 不然 router 用旧 pool
+		// (含已 disable 的 key),新加的 key 永远用不上
+		if s.router != nil {
+			s.router.SetPool(providerName, pool)
+		}
 		return
 	}
 	// 全量重建
