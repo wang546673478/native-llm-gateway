@@ -138,3 +138,67 @@ type AggregateRow struct {
 	ModelID      string `json:"model_id"`
 	AggregateResult
 }
+
+// BillingSourceRow P47: 按计费来源聚合
+type BillingSourceRow struct {
+	BillingSource string `json:"billing_source"`
+	AggregateResult
+}
+
+// AggregateByBillingSource P47: 按 billing_source 聚合
+// 返回每种计费来源的请求数 / token / cost,用于 dashboard
+func (r *Repository) AggregateByBillingSource(ctx context.Context, f QueryFilter) ([]BillingSourceRow, error) {
+	type row struct {
+		BillingSource string
+		Count         int64
+		InputTokens   int64
+		OutputTokens  int64
+		TotalTokens   int64
+		Cost          float64
+		AvgLatency    float64
+		ErrorCount    int64
+	}
+
+	q := r.db.WithContext(ctx).Model(&dbpkg.UsageRecord{})
+	if !f.StartTime.IsZero() {
+		q = q.Where("created_at >= ?", f.StartTime)
+	}
+	if !f.EndTime.IsZero() {
+		q = q.Where("created_at <= ?", f.EndTime)
+	}
+	if f.GatewayKeyID != "" {
+		q = q.Where("gateway_key_id = ?", f.GatewayKeyID)
+	}
+
+	var rows []row
+	err := q.Select(`
+		billing_source,
+		COUNT(*) as count,
+		COALESCE(SUM(input_tokens),0) as input_tokens,
+		COALESCE(SUM(output_tokens),0) as output_tokens,
+		COALESCE(SUM(total_tokens),0) as total_tokens,
+		COALESCE(SUM(cost),0) as cost,
+		COALESCE(AVG(latency_ms),0) as avg_latency,
+		COALESCE(SUM(CASE WHEN status_code >= 400 OR error_type != '' THEN 1 ELSE 0 END),0) as error_count
+	`).Group("billing_source").Order("count DESC").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]BillingSourceRow, len(rows))
+	for i, r := range rows {
+		out[i] = BillingSourceRow{
+			BillingSource: r.BillingSource,
+			AggregateResult: AggregateResult{
+				TotalRequests: r.Count,
+				TotalInput:    r.InputTokens,
+				TotalOutput:   r.OutputTokens,
+				TotalTokens:   r.TotalTokens,
+				TotalCost:     r.Cost,
+				AvgLatencyMs:  r.AvgLatency,
+				ErrorCount:    r.ErrorCount,
+			},
+		}
+	}
+	return out, nil
+}

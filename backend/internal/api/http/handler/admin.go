@@ -244,10 +244,14 @@ func (a *Admin) dashboard(c *gin.Context) {
 		total.ErrorCount += r.ErrorCount
 	}
 
+	// P47: 按 billing_source 聚合 — dashboard 显示 token_plan / api / free 三组
+	byBilling, _ := a.Usage.AggregateByBillingSource(c.Request.Context(), f)
+
 	c.JSON(http.StatusOK, gin.H{
 		"window":             "24h",
 		"total":              total,
 		"by_provider_model":  rows,
+		"by_billing_source":  byBilling, // P47
 		"providers_count":    len(a.Manager.GetAll()),
 		"keypools":           poolStatuses(a.Pools),
 	})

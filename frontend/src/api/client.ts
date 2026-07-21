@@ -69,6 +69,17 @@ export interface DashboardResp {
   window: string
   total: AggregateRow
   by_provider_model: AggregateRow[]
+  // P47: 按 billing_source 聚合(token_plan / api / free)
+  by_billing_source: Array<{
+    billing_source: string
+    total_requests: number
+    total_input_tokens: number
+    total_output_tokens: number
+    total_tokens: number
+    total_cost: number
+    avg_latency_ms: number
+    error_count: number
+  }>
   providers_count: number
   keypools: Array<{
     provider_name: string
