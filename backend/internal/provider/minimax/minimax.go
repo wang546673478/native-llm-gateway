@@ -1,13 +1,27 @@
-// Package minimax 实现 Anthropic 兼容的 Provider
+// Package minimax 实现 MiniMax(MiniMax 稀宇科技)Provider
 //
-// 规格书里叫 "MiniMax" 是占位符名,实际可指向任何 Anthropic Messages 兼容的端点:
-// - Anthropic Claude API:https://api.anthropic.com
-// - 其他走 Anthropic 兼容协议的 vendor(比如部分国内厂商)
-// 鉴权:x-api-key header + anthropic-version: 2023-06-01
-// 端点:POST /v1/messages
+// 官方文档:https://platform.minimaxi.com/docs/api-reference/api-overview
 //
-// 包名沿用 minimax 是因为规格书定义如此,代码里把它当作"通用 Anthropic 兼容 Provider"
-// 真实部署时把 config.endpoint 改成目标 vendor 的 base URL 即可
+// MiniMax 提供两种 API 端点:
+//   1. Anthropic 兼容(推荐):POST https://api.minimaxi.com/anthropic/v1/messages
+//   2. OpenAI 兼容:POST https://api.minimaxi.com/v1/chat/completions
+//
+// 鉴权:Authorization: Bearer <API_KEY>
+// Anthropic 兼容时还需要 anthropic-version header(anthropic_compatible.Base 已加)
+//
+// 当前可用模型(2026-07):
+//   - MiniMax-M3           (1M tokens,旗舰)
+//   - MiniMax-M2.7 / M2.7-highspeed
+//   - MiniMax-M2.5 / M2.5-highspeed
+//   - MiniMax-M2.1 / M2.1-highspeed
+//   - MiniMax-M2
+//
+// M3 专属参数(通过 extra_body 传):
+//   - thinking: {"type": "adaptive"|"disabled"}  (M2.x 不可关闭)
+//   - reasoning_split: true 把思考内容分到 reasoning_details 字段
+//   - service_tier: "standard"|"priority"       (priority 1.5x 价格,优先准入)
+//
+// 这里采用 Anthropic 兼容协议(官方推荐);若需 OpenAI 兼容可新建 minimax-openai 包。
 package minimax
 
 import (
@@ -21,29 +35,21 @@ import (
 
 const (
 	name           = "minimax"
-	DefaultEndpoint = "https://api.anthropic.com"
+	DefaultEndpoint = "https://api.minimaxi.com/anthropic"
 	ChatPath       = "/v1/messages"
 )
 
-// DefaultModels Anthropic Claude 当前在用模型(2026-07)
-// 来源:https://platform.claude.com/docs/en/docs/about-claude/models
-// 注意:
-//   - "claude-sonnet-4-5" / "claude-opus-4-5" 这种"无日期后缀"不存在!
-//     真实 ID 是 dated snapshot,如 "claude-sonnet-4-5-20250929"
-//   - Claude 4.6+ 开始用 dateless ID 如 "claude-opus-4-7"
-//   - Claude 3.x 已不在当前主推列表
+// DefaultModels MiniMax 当前可用模型(2026-07)
+// 完整列表见 https://platform.minimaxi.com/docs/api-reference/api-overview
 var DefaultModels = []string{
-	"claude-fable-5",                  // 2026-06 GA,最新旗舰
-	"claude-opus-4-8",                 // 复杂任务
-	"claude-sonnet-5",                 // 速度+智能平衡
-	"claude-haiku-4-5",                // 最快
-	"claude-haiku-4-5-20251001",       // dated alias
-	// Legacy(仍然可用,但官方推荐迁到上面)
-	"claude-opus-4-7",
-	"claude-opus-4-6",
-	"claude-sonnet-4-6",
-	"claude-sonnet-4-5-20250929",
-	"claude-opus-4-5-20251101",
+	"MiniMax-M3",             // 1M tokens,旗舰
+	"MiniMax-M2.7",           // 204,800
+	"MiniMax-M2.7-highspeed", // 204,800,更便宜更快
+	"MiniMax-M2.5",           // 204,800
+	"MiniMax-M2.5-highspeed", // 204,800
+	"MiniMax-M2.1",           // 204,800(早期稳定版)
+	"MiniMax-M2.1-highspeed",
+	"MiniMax-M2",             // 204,800(基础)
 }
 
 type Provider struct {

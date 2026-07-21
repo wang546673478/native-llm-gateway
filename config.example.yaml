@@ -216,43 +216,53 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-  # --- MiniMax / Anthropic 兼容 ---
-  # 规格书里的占位名,实际指向任何 Anthropic Messages 兼容端点:
-  #   - Anthropic Claude API (https://api.anthropic.com)
-  #   - 其他走 Anthropic 协议的 vendor
-  # 鉴权:x-api-key header + anthropic-version: 2023-06-01
-  # 端点:POST /v1/messages
-  # 文档:https://platform.claude.com/docs/en/docs/about-claude/models
-  # 注意:Claude 4.5+ 之后,模型 ID 分为 dated snapshot(20251001 之类)和 dateless alias
+  # --- MiniMax (稀宇科技,Anthropic 兼容) ---
+  # 文档:https://platform.minimaxi.com/docs/api-reference/api-overview
+  # Anthropic 兼容端点(推荐):POST https://api.minimaxi.com/anthropic/v1/messages
+  # 鉴权:Authorization: Bearer <API_KEY>
+  # 额外 header:anthropic-version(由 anthropic_compatible.Base 自动加)
+  # M3 专属参数:thinking / reasoning_split / service_tier 通过 extra_body 传
   minimax:
     enabled: true
-    endpoint: "https://api.anthropic.com"
+    endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
     models:
-      - id: "claude-fable-5"             # 2026-06 最新 GA
-        aliases: ["fable"]
-        cost_per_1k_input: 0.01
-        cost_per_1k_output: 0.05
-      - id: "claude-opus-4-8"            # 复杂任务
-        aliases: ["opus"]
-        cost_per_1k_input: 0.005
-        cost_per_1k_output: 0.025
-      - id: "claude-sonnet-5"            # 速度+智能
-        aliases: ["sonnet"]
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.015
-      - id: "claude-haiku-4-5"           # 最快
-        aliases: ["haiku"]
+      - id: "MiniMax-M3"              # 1M tokens,旗舰
+        aliases: ["MiniMax"]
         cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.005
-      - id: "claude-haiku-4-5-20251001"  # dated alias
+        cost_per_1k_output: 0.008
+      - id: "MiniMax-M2.7"            # 204,800
+        aliases: []
+        cost_per_1k_input: 0.0007
+        cost_per_1k_output: 0.0055
+      - id: "MiniMax-M2.7-highspeed"  # 204,800,更快
+        aliases: []
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0023
+      - id: "MiniMax-M2.5"            # 204,800
+        aliases: []
+        cost_per_1k_input: 0.0007
+        cost_per_1k_output: 0.0055
+      - id: "MiniMax-M2.5-highspeed"
+        aliases: []
+        cost_per_1k_input: 0.0003
+        cost_per_1k_output: 0.0023
+      - id: "MiniMax-M2.1"            # 204,800 早期稳定
         aliases: []
         cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.005
+        cost_per_1k_output: 0.008
+      - id: "MiniMax-M2.1-highspeed"
+        aliases: []
+        cost_per_1k_input: 0.0004
+        cost_per_1k_output: 0.003
+      - id: "MiniMax-M2"              # 204,800 基础
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.008
     keys:
       - name: "minimax-key-1"
-        key: "sk-ant-REPLACE-ME"
+        key: "REPLACE-ME.minimax-key"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
