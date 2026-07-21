@@ -135,10 +135,14 @@ func (e *ProviderError) Error() string {
 
 // IsRetryable 判断错误是否触发 failover
 // 规格书:invalid_request / auth 不重试
+// P49 调整:auth 错误**可重试**
+//   理由:chain failover 场景下,provider A 的 key 错误 → failover 到 provider B 的 key
+//   pool 已经把 A 的坏 key 标记为 DISABLED(ReportError),
+//   下次 iter.Next() 会跳过 A 选 B,B 有独立 key 可以成功
+//   invalid_request 和 model_not_found 仍然不重试(请求/模型本身有问题,换 provider 也没用)
 func (e *ProviderError) IsRetryable() bool {
 	switch e.ErrorType {
-	// 不可重试(说明 key 本身或请求本身有问题)
-	case ErrorTypeInvalidRequest, ErrorTypeAuth, ErrorTypeModelNotFound:
+	case ErrorTypeInvalidRequest, ErrorTypeModelNotFound:
 		return false
 	default:
 		return true

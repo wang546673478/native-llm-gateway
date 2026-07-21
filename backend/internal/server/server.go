@@ -497,18 +497,15 @@ func (s *Server) Reload(newCfg *config.Config) {
 	// Manager 定价表(cost) — 不需要重建 Provider 实例,只刷 pricing map
 	s.manager.ReloadPricing(toManagerConfigForReload(newCfg, s.pools))
 
-	// Authenticator
+	// Authenticator — P51: 重载时必须从 DB 重新加载,不能只用 config keys
+	// 否则通过 API 添加的 key 会在 config 热重载后失效
 	if s.auth != nil && newCfg.Auth.Enabled {
-		gkKeys := make([]auth.GatewayKey, 0, len(newCfg.Auth.Keys))
-		for _, k := range newCfg.Auth.Keys {
-			gkKeys = append(gkKeys, auth.GatewayKey{
-				Name:          k.Name,
-				KeyHash:       k.Key,
-				AllowedModels: k.AllowedModels,
-				RateLimit:     auth.RateLimitConfig{RPM: k.RateLimit.RPM, TPM: k.RateLimit.TPM},
-			})
+		dbKeys, err := auth.LoadFromDB(context.Background(), s.db)
+		if err != nil {
+			s.logger.Warn("reload keys from DB failed", zap.Error(err))
+		} else {
+			s.auth.Reload(dbKeys)
 		}
-		s.auth.Reload(gkKeys)
 	}
 
 	s.logger.Info("config reloaded",

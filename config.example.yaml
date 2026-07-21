@@ -35,8 +35,12 @@ auth:
         tpm: 500000
 
 # Provider 配置
-# 7 个 Provider 都启用,key 用占位符 sk-REPLACE-ME / xxx.REPLACE-ME,部署前替换
 # 每个 Provider 默认 endpoint 和模型列表参考各 vendor 官方文档(2026-07)
+# Provider 的 API key 不在这里配置(全部由 DB 管理,见下)
+
+# Provider API Key 全部由 DB(provider_api_keys 表)管理
+# 通过前端 Provider Keys 页面 / REST API 添加/删除
+# 这里不再保留 keys: 字段(避免误导和重复)
 providers:
   # --- DeepSeek (OpenAI 兼容,端点 /chat/completions 不带 /v1) ---
   # 文档:https://api-docs.deepseek.com/zh-cn/
@@ -64,9 +68,6 @@ providers:
         cost_per_1k_output: 0.006
         cost_per_1k_cache_read: 0.000025
         cost_per_1k_cache_creation: 0.0
-    keys:
-      - name: "deepseek-key-1"
-        key: "sk-REPLACE-ME"
     # P41 DeepSeek 支持的 API 特性(都通过 body 透传,Gateway 不需特殊处理):
     #   - Thinking 模式:extra_body={"thinking":{"type":"enabled"}}(v4-pro)
     #   - Tool use / function calling:OpenAI 标准 tools 数组
@@ -101,9 +102,6 @@ providers:
         cost_per_1k_output: 0.006
         cost_per_1k_cache_read: 0.000025
         cost_per_1k_cache_creation: 0.0
-    keys:
-      - name: "deepseek-anthropic-key-1"
-        key: "sk-REPLACE-ME"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -140,9 +138,6 @@ providers:
         aliases: []
         cost_per_1k_input: 0.36
         cost_per_1k_output: 0.36
-    keys:
-      - name: "glm-key-1"
-        key: "REPLACE-ME.glm-key"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -188,9 +183,6 @@ providers:
         aliases: []
         cost_per_1k_input: 0.0288
         cost_per_1k_output: 0.0864
-    keys:
-      - name: "qwen-key-1"
-        key: "sk-REPLACE-ME"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -229,9 +221,6 @@ providers:
         aliases: []
         cost_per_1k_input: 0.0864
         cost_per_1k_output: 0.0864
-    keys:
-      - name: "kimi-key-1"
-        key: "sk-REPLACE-ME"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -284,9 +273,6 @@ providers:
         aliases: []
         cost_per_1k_input: 0.0072
         cost_per_1k_output: 0.0576
-    keys:
-      - name: "minimax-key-1"
-        key: "REPLACE-ME.minimax-key"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -328,9 +314,6 @@ providers:
         aliases: []
         cost_per_1k_input: 0.00018
         cost_per_1k_output: 0.00072
-    keys:
-      - name: "gemini-key-1"
-        key: "REPLACE-ME.gemini-key"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -348,7 +331,7 @@ routing:
       - name: "minimax"
         model: "MiniMax-M3"
         priority: 1
-      - name: "deepseek"
+      - name: "deepseek-anthropic"   # P50: 用 Anthropic 协议的 deepseek,匹配 Claude Code 的 /v1/messages
         model: "deepseek-v4-flash"
         priority: 2
       - name: "glm"
