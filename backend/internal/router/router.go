@@ -126,6 +126,10 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 		return nil, ErrNoRoute
 	}
 
+	// P52: 全局 tier 排序 — 先穷尽所有 token_plan,再 api,最后 free
+	// (同 tier 内保留 chain priority 顺序)
+	candidates = sortCandidatesByTier(candidates, r.pools)
+
 	ordered, err := pol.Order(candidates)
 	if err != nil {
 		return nil, err
@@ -169,6 +173,10 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 	if len(candidates) == 0 {
 		return nil, ErrNoRoute
 	}
+
+	// P52: 全局 tier 排序 — 同上,先 token_plan 再 api 再 free
+	candidates = sortCandidatesByTier(candidates, r.pools)
+
 	return &RouteIterator{
 		alias:          modelID,
 		candidates:     candidates,
@@ -176,6 +184,43 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
+}
+
+// sortCandidatesByTier P52: 按 best tier 排序(token_plan > api > free)
+// 同 tier 内保留原顺序(由 policy.Order 处理 chain priority)
+// 注意:这是 stable sort,所以同 tier 内的相对顺序不变
+func sortCandidatesByTier(in []ProviderRoute, pools map[string]*keypool.Pool) []ProviderRoute {
+	tierRank := map[string]int{"token_plan": 0, "api": 1, "free": 2}
+	items := make([]struct {
+		cand ProviderRoute
+		rank int
+	}, len(in))
+	for i, c := range in {
+		rank := 3 // unknown tier 排最后
+		if pool, ok := pools[c.Name]; ok && pool != nil {
+			best := pool.BestTier()
+			if best != "" {
+				if r, ok := tierRank[best]; ok {
+					rank = r
+				}
+			}
+		}
+		items[i] = struct {
+			cand ProviderRoute
+			rank int
+		}{cand: c, rank: rank}
+	}
+	// stable sort by rank
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && items[j].rank < items[j-1].rank; j-- {
+			items[j], items[j-1] = items[j-1], items[j]
+		}
+	}
+	out := make([]ProviderRoute, len(items))
+	for i, it := range items {
+		out[i] = it.cand
+	}
+	return out
 }
 
 // filterCandidates 协议匹配 + 健康 + 已注册

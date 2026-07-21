@@ -258,3 +258,37 @@ func (p *Pool) Size() int {
 	defer p.mu.RUnlock()
 	return len(p.keys)
 }
+
+// Tiers 返回 Pool 中可用 key 的 tier 列表(去重,按优先级排序)
+// P52: token_plan > api > free
+// Router 用这个来排序 chain 候选 — 先穷尽所有 token_plan,再 api
+func (p *Pool) Tiers() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	tierOrder := []string{"token_plan", "api", "free"}
+	seen := map[string]bool{}
+	var out []string
+	for _, want := range tierOrder {
+		for _, k := range p.keys {
+			bs := k.BillingSource
+			if bs == "" {
+				bs = "api" // 兜底
+			}
+			if bs == want && !seen[want] {
+				seen[want] = true
+				out = append(out, want)
+			}
+		}
+	}
+	return out
+}
+
+// BestTier 返回 Pool 中最高优先级 tier(token_plan > api > free),没有 key 返回 ""
+func (p *Pool) BestTier() string {
+	tiers := p.Tiers()
+	if len(tiers) == 0 {
+		return ""
+	}
+	return tiers[0]
+}
