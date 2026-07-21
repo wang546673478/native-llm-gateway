@@ -146,12 +146,24 @@ func (r *Router) routeDirectModel(ctx context.Context, modelID string, req *prov
 }
 
 func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
+	// P36: 当一个 model 在多个 provider 都有声明时(例如 minimax 和 minimax-openai 都声明 MiniMax-M3)
+	// 根据客户端请求的 URL 路径推断协议,优先选协议匹配的 provider:
+	//   - /v1/chat/completions → OpenAI provider (例如 minimax-openai)
+	//   - /v1/messages          → Anthropic provider (例如 minimax)
+	//   - generatecontent 路径  → Google provider
+	// 这样用户用 OpenAI 客户端发 /v1/chat/completions 时会自动走 OpenAI 兼容端点
+	reqProto := detectProtocol(req.Path)
 	candidates := make([]ProviderRoute, 0)
 	for name, p := range r.manager.GetAll() {
 		for _, m := range p.Models() {
-			if m == modelID {
-				candidates = append(candidates, ProviderRoute{Name: name, Model: modelID})
+			if m != modelID {
+				continue
 			}
+			// 如果请求有明确协议,过滤掉不匹配的
+			if reqProto != "" && p.Protocol() != reqProto {
+				continue
+			}
+			candidates = append(candidates, ProviderRoute{Name: name, Model: modelID})
 		}
 	}
 	if len(candidates) == 0 {

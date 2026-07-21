@@ -28,6 +28,7 @@ import (
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/qwen"                  // 通义千问
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/kimi"                  // 月之暗面
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"               // Anthropic 兼容
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax_openai"        // OpenAI 兼容
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/gemini"                // Google 协议
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
