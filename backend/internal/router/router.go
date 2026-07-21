@@ -105,8 +105,20 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 	}
 	rule, ok := r.aliases[req.Model]
 	if !ok {
-		// routeDirectModel 也需要传 opts(支持 ProviderKeyIDs)
+		// alias 没注册 → 自动发现:从所有 enabled provider 中找声明该 model 的
 		return r.routeDirectModelWithOpts(ctx, req.Model, req, o)
+	}
+
+	// P53: alias 注册了但没有显式 providers(chain_ref 解析后为空也算)— 自动发现
+	if len(rule.Providers) == 0 {
+		r.logger.Debug("alias has no explicit providers, auto-discover",
+			zap.String("alias", req.Model))
+		// 短格式 TargetModel 优先,否则用 alias 名字本身作为 target model id
+		target := rule.TargetModel
+		if target == "" {
+			target = req.Model
+		}
+		return r.routeDirectModelWithOpts(ctx, target, req, o)
 	}
 
 	strategy := rule.Strategy

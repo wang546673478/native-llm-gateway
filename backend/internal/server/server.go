@@ -256,21 +256,24 @@ func defaultBillingSource(s string) string {
 }
 
 // toRouterAliases 把 config 风格别名表转 router 风格
-// P39: 如果 alias 配置了 chain_ref,从 chains map 里展开成 providers
+// P39: chain_ref → 从 chains map 展开成 providers
+// P53: TargetModel → 短格式(留空 Providers,Router 走 auto-discovery)
 func toRouterAliases(in map[string]config.AliasRule, chains map[string][]config.AliasRoute) map[string]router.AliasConfig {
 	out := make(map[string]router.AliasConfig, len(in))
 	for alias, rule := range in {
 		// 决定实际使用的 provider 列表
 		var src []config.AliasRoute
-		if rule.ChainRef != "" {
+		switch {
+		case rule.ChainRef != "":
 			if chain, ok := chains[rule.ChainRef]; ok {
 				src = chain
-			} else {
-				// 引用了不存在的 chain:用空列表,Route 时会返回 ErrNoRoute
-				// 这里不 panic / 不 fail,让路由错误自然浮出
-				src = nil
 			}
-		} else {
+			// chain_ref 找不到 → src 留空,Router 走 auto-discovery
+		case rule.TargetModel != "":
+			// P53: 短格式 — TargetModel 模式下,src 留空,Router 会从所有
+			// 声明该 model 的 provider 中自动发现
+			_ = rule.TargetModel // intentionally not expanded here
+		default:
 			src = rule.Providers
 		}
 
@@ -281,9 +284,10 @@ func toRouterAliases(in map[string]config.AliasRule, chains map[string][]config.
 			})
 		}
 		out[alias] = router.AliasConfig{
-			Alias:     alias,
-			Strategy:  rule.Strategy,
-			Providers: ps,
+			Alias:       alias,
+			Strategy:    rule.Strategy,
+			Providers:   ps,
+			TargetModel: rule.TargetModel, // P53: 短格式标记
 		}
 	}
 	return out

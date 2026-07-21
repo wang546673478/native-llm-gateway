@@ -16,10 +16,13 @@ type ProviderRoute struct {
 }
 
 // AliasConfig 单个别名的路由规则
+// P53: 加 TargetModel — 短格式 auto-discovery 时,Router 自动找
+// 所有声明该 model 的 provider
 type AliasConfig struct {
-	Alias     string
-	Strategy  string
-	Providers []ProviderRoute
+	Alias       string
+	Strategy    string
+	Providers   []ProviderRoute
+	TargetModel string // P53: 短格式标记;非空时 Router 走 auto-discovery
 }
 
 // ErrNoCandidate 没有候选

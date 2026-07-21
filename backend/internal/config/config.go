@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -140,12 +141,17 @@ type AliasRoute struct {
 }
 
 // AliasRule 别名路由规则
+// P53: 加 TargetModel 字段,支持短格式 auto-discovery
+// 长格式仍然支持(显式 providers 或 chain_ref)
 type AliasRule struct {
 	Strategy  string       `mapstructure:"strategy"`
 	Providers []AliasRoute `mapstructure:"providers"`
 	// P39: ChainRef 引用 routing.chains.<name> 里的 provider 列表。
-	// 非空时,加载时会用 chains[chain_ref] 的内容替换 Providers(Providers 会被忽略)。
 	ChainRef string `mapstructure:"chain_ref"`
+	// P53: TargetModel 短格式 — alias 直接指向一个目标 model id,
+	// gateway 自动找所有声明该 model 的 provider(按 tier 排序)
+	// 与 Providers/ChainRef 互斥,优先使用 TargetModel
+	TargetModel string `mapstructure:"target_model"`
 }
 
 // KeyPoolConfig Key 池配置
@@ -197,12 +203,18 @@ type UsageConfig struct {
 
 // Load 从指定路径加载配置文件
 func Load(path string) (*Config, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	v.SetConfigType("yaml")
-
-	if err := v.ReadInConfig(); err != nil {
+	// P53: 读文件 → 短格式 alias 转长格式 → 喂给 viper
+	// 因为 viper 的 yaml 解码不支持自定义 UnmarshalYAML
+	raw, err := os.ReadFile(path)
+	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	normalized := normalizeShortAliasesInYAML(string(raw))
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(normalized)); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
 	cfg := &Config{}
@@ -215,6 +227,81 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// normalizeShortAliasesInYAML P53: 把 "alias: model_id" 短格式转成
+// "alias:\n  target_model: model_id" 长格式
+//
+// 只处理 aliases: 块的第一层直接子项,嵌套结构(strategy/providers)保持原样
+// 注释和空行也保持原样
+func normalizeShortAliasesInYAML(content string) string {
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		if strings.TrimSpace(line) != "aliases:" {
+			out = append(out, line)
+			i++
+			continue
+		}
+		aliasesIndent := len(line) - len(strings.TrimLeft(line, " "))
+		out = append(out, line)
+		i++
+		childIndent := aliasesIndent + 2
+		for i < len(lines) {
+			sub := lines[i]
+			trimmed := strings.TrimSpace(sub)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				out = append(out, sub)
+				i++
+				continue
+			}
+			leading := len(sub) - len(strings.TrimLeft(sub, " "))
+			if leading <= aliasesIndent {
+				break
+			}
+			if leading > childIndent {
+				out = append(out, sub)
+				i++
+				continue
+			}
+			colonIdx := strings.Index(sub, ":")
+			if colonIdx < 0 {
+				out = append(out, sub)
+				i++
+				continue
+			}
+			rest := strings.TrimSpace(sub[colonIdx+1:])
+			if rest == "" {
+				out = append(out, sub)
+				i++
+				for i < len(lines) {
+					inner := lines[i]
+					innerTrimmed := strings.TrimSpace(inner)
+					innerLeading := len(inner) - len(strings.TrimLeft(inner, " "))
+					if innerTrimmed != "" && innerLeading <= childIndent {
+						break
+					}
+					out = append(out, inner)
+					i++
+				}
+				continue
+			}
+			firstChar := rest[0]
+			if firstChar == '{' || firstChar == '[' {
+				out = append(out, sub)
+				i++
+				continue
+			}
+			value := strings.Trim(rest, `"'`)
+			prefixSpaces := strings.Repeat(" ", leading)
+			out = append(out, prefixSpaces+sub[:])
+			out = append(out, prefixSpaces+"  target_model: "+fmt.Sprintf("%q", value))
+			i++
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // validate 校验配置完整性,失败立即报错
