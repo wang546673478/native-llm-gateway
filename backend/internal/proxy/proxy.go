@@ -412,6 +412,14 @@ func (e *Engine) recordUsageWithTokens(
 		r.InputTokens = u.PromptTokens
 		r.OutputTokens = u.CompletionTokens
 		r.TotalTokens = u.TotalTokens
+		// P37: 算 cost(从 Manager 拿定价)
+		if mgr := e.router.Manager(); mgr != nil {
+			cost := mgr.CostFor(result.ProviderName, result.ModelID)
+			if cost.CostPer1kInput > 0 || cost.CostPer1kOutput > 0 {
+				r.Cost = (float64(u.PromptTokens)/1000.0)*cost.CostPer1kInput +
+					(float64(u.CompletionTokens)/1000.0)*cost.CostPer1kOutput
+			}
+		}
 		// 同时记入 metrics
 		if mr, ok := e.metrics.(interface {
 			RecordTokens(string, int, int)

@@ -27,6 +27,15 @@ type ManagerProviderConfig struct {
 	Models   []string
 	APIKeys  []string
 	Circuit  ManagerCircuitConfig
+	// P37: 模型定价表(对应 config.yaml 中 providers.<name>.models[].cost_per_1k_input/output)
+	// 索引:model id → (cost_per_1k_input, cost_per_1k_output),单位 USD
+	ModelCosts map[string]ModelCost
+}
+
+// ModelCost 单个 model 的定价
+type ModelCost struct {
+	CostPer1kInput  float64
+	CostPer1kOutput float64
 }
 
 // ManagerCircuitConfig Circuit Breaker 配置
@@ -44,6 +53,9 @@ type Manager struct {
 
 	mu        sync.RWMutex
 	providers map[string]Provider
+	// P37: 定价表 key = "<provider>:<model_id>",value = ModelCost
+	// 在 LoadFromConfig / Reload 时填充
+	pricing map[string]ModelCost
 }
 
 // NewManager 构造 Manager
@@ -52,6 +64,7 @@ func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 		registry:  registry,
 		logger:    logger,
 		providers: make(map[string]Provider),
+		pricing:   make(map[string]ModelCost),
 	}
 }
 
@@ -59,6 +72,7 @@ func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pricing = make(map[string]ModelCost)
 
 	loaded := 0
 	for name, pcfg := range cfg.Providers {
@@ -78,6 +92,11 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			FailureThreshold: pcfg.Circuit.FailureThreshold,
 			FailureWindow:    pcfg.Circuit.FailureWindow,
 			OpenTimeout:      pcfg.Circuit.OpenTimeout,
+		}
+
+		// P37: 填充定价表
+		for modelID, cost := range pcfg.ModelCosts {
+			m.pricing[pricingKey(name, modelID)] = cost
 		}
 
 		p, err := m.registry.Create(name, factoryCfg)
@@ -154,6 +173,22 @@ func (m *Manager) Names() []string {
 		out = append(out, n)
 	}
 	return out
+}
+
+// CostFor P37: 查 (provider, model) 的定价
+// 未找到返回 zero value(cost=0)— Proxy 会用 0 兜底
+func (m *Manager) CostFor(provider, model string) ModelCost {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if c, ok := m.pricing[pricingKey(provider, model)]; ok {
+		return c
+	}
+	return ModelCost{}
+}
+
+// pricingKey 内部 hash key
+func pricingKey(provider, model string) string {
+	return provider + ":" + model
 }
 
 // Reload 重新加载(简化:关掉旧的再 Load,后续可加 diff)

@@ -154,16 +154,23 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 			keys = append(keys, k.Key)
 		}
 		models := make([]string, 0, len(p.Models))
+		modelCosts := make(map[string]provider.ModelCost, len(p.Models))
 		for _, m := range p.Models {
 			models = append(models, m.ID)
+			// P37: 把 cost 定价转给 Manager
+			modelCosts[m.ID] = provider.ModelCost{
+				CostPer1kInput:  m.CostPer1kInput,
+				CostPer1kOutput: m.CostPer1kOutput,
+			}
 		}
 		mcfg.Providers[name] = provider.ManagerProviderConfig{
-			Enabled:  p.Enabled,
-			Endpoint: p.Endpoint,
-			Protocol: proto,
-			Timeout:  p.Timeout,
-			Models:   models,
-			APIKeys:  keys,
+			Enabled:    p.Enabled,
+			Endpoint:   p.Endpoint,
+			Protocol:   proto,
+			Timeout:    p.Timeout,
+			Models:     models,
+			ModelCosts: modelCosts, // P37
+			APIKeys:    keys,
 			Circuit: provider.ManagerCircuitConfig{
 				FailureThreshold: p.CircuitBreaker.FailureThreshold,
 				FailureWindow:    p.CircuitBreaker.FailureWindow,
