@@ -83,6 +83,13 @@ type Provider struct {
 	Models         []ProviderModel   `mapstructure:"models"`
 	Keys           []ProviderKey     `mapstructure:"keys"`
 	CircuitBreaker CircuitBreakerCfg `mapstructure:"circuit_breaker"`
+	// BillingSource 计费来源(P47)
+	//   - "token_plan": 包月套餐(如 minimax token plan),优先路由,quota 用完自动 failover
+	//   - "api":        按 token 计费(deepseek/openai/anthropic 等)— 默认
+	//   - "free":       免费层(GLM-4-flash 等)
+	// Gateway 不做 quota 跟踪,quota 由上游平台 UI 管理;这里只是标记
+	// 用于 dashboard 区分"这个月 token_plan 用了多少 vs api 用了多少"
+	BillingSource string `mapstructure:"billing_source"`
 }
 
 // ProviderModel Provider 模型声明

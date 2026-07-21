@@ -413,6 +413,13 @@ func (e *Engine) recordUsageWithTokens(
 		StatusCode:   statusCode,
 		ErrorType:    errorType,
 		IsStream:     isStream,
+		// P47: 计费来源(token_plan / api / free)— 冗余存,方便按维度聚合
+		BillingSource: "api",
+	}
+	if e.router != nil {
+		if mgr := e.router.Manager(); mgr != nil {
+			r.BillingSource = mgr.BillingSourceFor(result.ProviderName)
+		}
 	}
 	if u != nil {
 		r.InputTokens = u.PromptTokens

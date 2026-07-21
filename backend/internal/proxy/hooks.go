@@ -15,6 +15,8 @@ type UsageRecord struct {
 	ProviderName  string
 	ModelID       string
 	Protocol      string
+	// P47: 计费来源(token_plan / api / free)— 冗余存方便按维度聚合统计
+	BillingSource string
 	InputTokens   int
 	OutputTokens  int
 	TotalTokens   int

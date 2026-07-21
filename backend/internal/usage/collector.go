@@ -15,19 +15,21 @@ import (
 
 // Record 单条用量记录(来自 Proxy.UsageRecorder)
 type Record struct {
-	TraceID      string
-	GatewayKeyID string
-	ProviderName string
-	ModelID      string
-	Protocol     string
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
-	Cost         float64
-	LatencyMs    int64
-	IsStream     bool
-	StatusCode   int
-	ErrorType    string
+	TraceID       string
+	GatewayKeyID  string
+	ProviderName  string
+	ModelID       string
+	Protocol      string
+	// P47: 计费来源(token_plan / api / free)
+	BillingSource string
+	InputTokens   int
+	OutputTokens  int
+	TotalTokens   int
+	Cost          float64
+	LatencyMs     int64
+	IsStream      bool
+	StatusCode    int
+	ErrorType     string
 }
 
 // Collector 异步收集器
@@ -126,20 +128,21 @@ func (c *Collector) flush(batch []*Record) {
 	now := time.Now().UTC()
 	for i, r := range batch {
 		models[i] = dbpkg.UsageRecord{
-			TraceID:      r.TraceID,
-			GatewayKeyID: r.GatewayKeyID,
-			ProviderName: r.ProviderName,
-			ModelID:      r.ModelID,
-			Protocol:     r.Protocol,
-			InputTokens:  r.InputTokens,
-			OutputTokens: r.OutputTokens,
-			TotalTokens:  r.TotalTokens,
-			Cost:         r.Cost,
-			LatencyMs:    int(r.LatencyMs),
-			IsStream:     r.IsStream,
-			StatusCode:   r.StatusCode,
-			ErrorType:    r.ErrorType,
-			CreatedAt:    now,
+			TraceID:       r.TraceID,
+			GatewayKeyID:  r.GatewayKeyID,
+			ProviderName:  r.ProviderName,
+			ModelID:       r.ModelID,
+			Protocol:      r.Protocol,
+			BillingSource: r.BillingSource,
+			InputTokens:   r.InputTokens,
+			OutputTokens:  r.OutputTokens,
+			TotalTokens:   r.TotalTokens,
+			Cost:          r.Cost,
+			LatencyMs:     int(r.LatencyMs),
+			IsStream:      r.IsStream,
+			StatusCode:    r.StatusCode,
+			ErrorType:     r.ErrorType,
+			CreatedAt:     now,
 		}
 	}
 	if err := c.db.CreateInBatches(models, c.batchSize).Error; err != nil {

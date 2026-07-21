@@ -235,9 +235,19 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 			Models:     nil, // ReloadPricing 不需要 models 列表
 			ModelCosts: modelCosts,
 			APIKeys:    nil,
+			// P47: 计费来源 — 热重载时也带上
+			BillingSource: defaultBillingSource(p.BillingSource),
 		}
 	}
 	return mcfg
+}
+
+// defaultBillingSource 同 defaultStr,但专门给 BillingSource 用(语义清晰)
+func defaultBillingSource(s string) string {
+	if s == "" {
+		return "api"
+	}
+	return s
 }
 
 // toRouterAliases 把 config 风格别名表转 router 风格

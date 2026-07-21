@@ -173,6 +173,8 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 			Models:     models,
 			ModelCosts: modelCosts, // P37
 			APIKeys:    keys,
+			// P47: 计费来源,默认 api(没标就当 api)
+			BillingSource: defaultStr(p.BillingSource, "api"),
 			Circuit: provider.ManagerCircuitConfig{
 				FailureThreshold: p.CircuitBreaker.FailureThreshold,
 				FailureWindow:    p.CircuitBreaker.FailureWindow,
@@ -229,3 +231,11 @@ func newLogger(level string, json bool) (*zap.Logger, error) {
 
 // silence unused warning when gorm import isn't used in early phases
 var _ = gorm.ErrRecordNotFound
+
+// defaultStr 返回 s,如果 s 为空则返回 fallback
+func defaultStr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}

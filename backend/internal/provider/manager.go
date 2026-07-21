@@ -30,6 +30,8 @@ type ManagerProviderConfig struct {
 	// P37: 模型定价表(对应 config.yaml 中 providers.<name>.models[].cost_per_1k_input/output)
 	// 索引:model id → (cost_per_1k_input, cost_per_1k_output),单位 USD
 	ModelCosts map[string]ModelCost
+	// P47: 计费来源 — token_plan / api / free
+	BillingSource string
 }
 
 // ModelCost 单个 model 的定价
@@ -63,15 +65,19 @@ type Manager struct {
 	// P37: 定价表 key = "<provider>:<model_id>",value = ModelCost
 	// 在 LoadFromConfig / Reload 时填充
 	pricing map[string]ModelCost
+	// P47: billingSource 映射 provider name → "token_plan" / "api" / "free"
+	// LoadFromConfig / Reload 时填充
+	billingSources map[string]string
 }
 
 // NewManager 构造 Manager
 func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 	return &Manager{
-		registry:  registry,
-		logger:    logger,
-		providers: make(map[string]Provider),
-		pricing:   make(map[string]ModelCost),
+		registry:        registry,
+		logger:          logger,
+		providers:       make(map[string]Provider),
+		pricing:         make(map[string]ModelCost),
+		billingSources:  make(map[string]string),
 	}
 }
 
@@ -105,6 +111,12 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 		for modelID, cost := range pcfg.ModelCosts {
 			m.pricing[pricingKey(name, modelID)] = cost
 		}
+		// P47: 填充 billing_source
+		bs := pcfg.BillingSource
+		if bs == "" {
+			bs = "api"
+		}
+		m.billingSources[name] = bs
 
 		p, err := m.registry.Create(name, factoryCfg)
 		if err != nil {
@@ -193,6 +205,17 @@ func (m *Manager) CostFor(provider, model string) ModelCost {
 	return ModelCost{}
 }
 
+// BillingSourceFor P47: 查 provider 的计费来源("token_plan" / "api" / "free")
+// 未找到返回 "api"(最常见的兜底值)
+func (m *Manager) BillingSourceFor(provider string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if bs, ok := m.billingSources[provider]; ok {
+		return bs
+	}
+	return "api"
+}
+
 // pricingKey 内部 hash key
 func pricingKey(provider, model string) string {
 	return provider + ":" + model
@@ -218,10 +241,16 @@ func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pricing = make(map[string]ModelCost)
+	m.billingSources = make(map[string]string)
 	for name, pcfg := range cfg.Providers {
 		for modelID, cost := range pcfg.ModelCosts {
 			m.pricing[pricingKey(name, modelID)] = cost
 		}
+		bs := pcfg.BillingSource
+		if bs == "" {
+			bs = "api"
+		}
+		m.billingSources[name] = bs
 	}
 	m.logger.Info("pricing reloaded", zap.Int("entries", len(m.pricing)))
 }

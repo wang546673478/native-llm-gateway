@@ -12,8 +12,10 @@ type Provider struct {
 	Endpoint  string    `gorm:"column:endpoint;not null" json:"endpoint"`
 	Enabled   bool      `gorm:"column:enabled;not null;default:true" json:"enabled"`
 	Timeout   int       `gorm:"column:timeout_seconds;not null;default:60" json:"timeout_seconds"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	// P47: 计费来源 — token_plan / api / free
+	BillingSource string    `gorm:"column:billing_source;not null;default:'api'" json:"billing_source"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 
 	Models []ProviderModel `gorm:"foreignKey:ProviderName;references:Name" json:"models,omitempty"`
 }
@@ -76,6 +78,9 @@ type UsageRecord struct {
 	ProviderName  string    `gorm:"column:provider_name;index;not null" json:"provider_name"`
 	ModelID       string    `gorm:"column:model_id;index;not null" json:"model_id"`
 	Protocol      string    `gorm:"column:protocol;not null" json:"protocol"`
+	// P47: 冗余存 billing_source — 方便按 token_plan / api / free 聚合统计
+	// 取自请求时刻该 provider 的 billing_source,改 config 不会影响历史记录
+	BillingSource string    `gorm:"column:billing_source;index;default:'api'" json:"billing_source"`
 	InputTokens   int       `gorm:"column:input_tokens;not null;default:0" json:"input_tokens"`
 	OutputTokens  int       `gorm:"column:output_tokens;not null;default:0" json:"output_tokens"`
 	TotalTokens   int       `gorm:"column:total_tokens;not null;default:0" json:"total_tokens"`

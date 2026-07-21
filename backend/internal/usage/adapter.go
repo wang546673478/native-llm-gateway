@@ -16,15 +16,16 @@ func NewAdapter(c *Collector) *Adapter { return &Adapter{c: c} }
 // Record 实现 proxy.UsageRecorder
 func (a *Adapter) Record(r *proxy.UsageRecord) {
 	a.c.Record(&Record{
-		TraceID:      r.TraceID,
-		GatewayKeyID: r.GatewayKeyID,
-		ProviderName: r.ProviderName,
-		ModelID:      r.ModelID,
-		Protocol:     r.Protocol,
-		LatencyMs:    r.LatencyMs,
-		StatusCode:   r.StatusCode,
-		ErrorType:    r.ErrorType,
-		IsStream:     r.IsStream,
+		TraceID:       r.TraceID,
+		GatewayKeyID:  r.GatewayKeyID,
+		ProviderName:  r.ProviderName,
+		ModelID:       r.ModelID,
+		Protocol:      r.Protocol,
+		BillingSource: r.BillingSource,
+		LatencyMs:     r.LatencyMs,
+		StatusCode:    r.StatusCode,
+		ErrorType:     r.ErrorType,
+		IsStream:      r.IsStream,
 		// InputTokens / OutputTokens / Cost 由 Proxy 在拿到 resp.Usage 后补
 		InputTokens:  r.InputTokens,
 		OutputTokens: r.OutputTokens,
