@@ -220,9 +220,9 @@ func (c *Config) validate() error {
 		if proto != "openai" && proto != "anthropic" && proto != "google" {
 			return fmt.Errorf("provider %s: protocol must be openai/anthropic/google, got %q", name, p.Protocol)
 		}
-		if len(p.Keys) == 0 {
-			return fmt.Errorf("provider %s: at least one key is required", name)
-		}
+		// P30: keys 段可选 — Provider Key 从 DB (provider_api_keys) 读
+		// 保留 len(p.Keys) == 0 作为允许(没填 keys 段不报错)
+		_ = p.Keys // 显式忽略未用
 	}
 	return nil
 }

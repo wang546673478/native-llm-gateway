@@ -112,6 +112,9 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		Authenticator: authn,                        // P19: Provider 绑定检查
 		MaxRetry:      cfg.Retry.MaxAttempts,
 	})
+	// P30:把 DB Pool 注入到每个 Provider(Manager.LoadFromConfig 时 Pool 还是 nil)
+	injectPools(manager, pools, logger)
+
 	return &Server{
 		cfg:      cfg,
 		logger:   logger,
@@ -125,6 +128,26 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		usageC:   usageC,
 		usageR:   usageRepo,
 		metricsC: metricsC,
+	}
+}
+
+// P30:把 buildKeyPools 读出来的 Pool 注入到每个 Provider
+// Manager.LoadFromConfig 时 Pool 还是 nil(那时 DB 还没读),
+// 启动后 Server.New 再注入
+func injectPools(manager *provider.Manager, pools map[string]*keypool.Pool, logger *zap.Logger) {
+	for name, p := range manager.GetAll() {
+		pool, ok := pools[name]
+		if !ok {
+			continue
+		}
+		// Provider interface 加 SetPool(*keypool.Pool) 方法
+		// 各 base 实现透传
+		if setter, ok := p.(interface {
+			SetPool(*keypool.Pool)
+		}); ok {
+			setter.SetPool(pool)
+			logger.Info("pool injected", zap.String("provider", name))
+		}
 	}
 }
 

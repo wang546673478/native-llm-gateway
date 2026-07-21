@@ -9,11 +9,11 @@
 package gemini
 
 import (
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"context"
 	"fmt"
 
-	"github.com/wang546673478/native-llm-gateway/internal/keypool"
-	"github.com/wang546673478/native-llm-gateway/internal/provider"
+		"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/provider/google"
 )
 
@@ -49,19 +49,11 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("gemini endpoint is required")
 	}
-	if len(cfg.APIKeys) == 0 {
-		return nil, fmt.Errorf("gemini requires at least one API key")
-	}
-	pool, ok := cfg.Pool.(*keypool.Pool)
-	if !ok || pool == nil {
-		return nil, fmt.Errorf("gemini requires a non-nil keypool.Pool (got %T)", cfg.Pool)
-	}
 	return &Provider{
 		base: google.NewBase(google.Config{
 			Name:     name,
 			Endpoint: cfg.Endpoint,
 			Timeout:  cfg.Timeout,
-			Pool:     pool,
 		}),
 		cfg: cfg,
 	}, nil
@@ -77,6 +69,11 @@ func (p *Provider) SendStreamRequest(ctx context.Context, req *provider.Request)
 	return p.base.SendStreamRequest(ctx, req)
 }
 func (p *Provider) HealthCheck(ctx context.Context) error { return p.base.HealthCheck(ctx) }
+// SetPool P30:注入 KeyPool(从 DB 读)
+func (p *Provider) SetPool(pool *keypool.Pool) {
+	p.base.SetPool(pool)
+}
+
 func (p *Provider) Close() error                          { return p.base.Close() }
 
 func init() { provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolGoogle) }

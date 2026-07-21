@@ -236,6 +236,11 @@ func (b *Base) Close() error {
 	return nil
 }
 
+// SetPool P30:让 Server 把从 DB 读出来的 Pool 注入到 Base
+func (b *Base) SetPool(p *keypool.Pool) {
+	b.cfg.Pool = p
+}
+
 // buildEndpoint 拼接 URL: {endpoint}/models/{model}:generateContent?key={apiKey}
 // 注意:stream=true 时用 :streamGenerateContent
 // 这里简化为:调用方自己选择 stream vs 非 stream,通过 stream 参数

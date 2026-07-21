@@ -327,6 +327,13 @@ func (b *Base) Close() error {
 	return nil
 }
 
+// SetPool P30: 让 Server 把从 DB 读出来的 Pool 注入到 Base
+// 因为 Manager.LoadFromConfig 时 Pool 还是 nil(那时 DB 还没读),
+// 启动后 Server.New 再注入
+func (b *Base) SetPool(p *keypool.Pool) {
+	b.cfg.Pool = p
+}
+
 // parseOpenAIUsage 从 OpenAI Chat Completions 响应中抽取 usage
 // 基础格式: {"usage": {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T}}
 //

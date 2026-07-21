@@ -267,6 +267,11 @@ func (b *Base) Close() error {
 	return nil
 }
 
+// SetPool P30:让 Server 把从 DB 读出来的 Pool 注入到 Base
+func (b *Base) SetPool(p *keypool.Pool) {
+	b.cfg.Pool = p
+}
+
 // newError helper
 func (b *Base) newError(status int, errType provider.ErrorType, msg string, rawErr ...[]byte) *provider.ProviderError {
 	pe := &provider.ProviderError{
