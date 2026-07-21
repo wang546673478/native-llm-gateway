@@ -25,12 +25,12 @@
           <n-input v-model:value="form.name" :disabled="editing" placeholder="例如 prod-team-a" />
         </n-form-item>
 
-        <!-- P31-A:密钥由系统自动生成,新建时不显示输入框 -->
+        <!-- P32-B:密钥由系统自动生成 -->
         <n-alert v-if="!editing" type="info" :show-icon="false" style="margin-bottom: 12px">
-          密钥将由系统自动生成,创建后会一次性展示。密钥仅在创建时刻返回,之后无法再查询,请妥善保存。
+          密钥将由系统自动生成,创建后会展示在列表里,可随时复制。
         </n-alert>
 
-        <!-- P27: 多 Provider 绑定 -->
+        <!-- 多 Provider 绑定 -->
         <n-form-item label="绑定 Provider(可多选)" path="providers">
           <n-select
             v-model:value="form.providers"
@@ -44,7 +44,6 @@
           </n-text>
         </n-form-item>
 
-        <!-- P27: 模型从已绑定的 Provider 自动拉取 -->
         <n-form-item label="允许的模型" path="allowed_models">
           <n-select
             v-model:value="form.allowed_models"
@@ -56,7 +55,7 @@
             clearable
           />
           <n-text depth="3" style="font-size: 12px; display: block; margin-top: 4px">
-            用 <code>*</code> 表示允许所有模型(已选 Provider 的)。当前可选 {{ availableModelOptions.length }} 个
+            用 <code>*</code> 表示允许所有模型。当前可选 {{ availableModelOptions.length }} 个
           </n-text>
         </n-form-item>
 
@@ -80,37 +79,6 @@
         </n-space>
       </template>
     </n-modal>
-
-    <!-- P31-A: 一次性展示自动生成的密钥 + 复制按钮 -->
-    <n-modal
-      v-model:show="issuedKeyVisible"
-      preset="card"
-      title="✅ Gateway Key 创建成功"
-      style="width: 600px"
-      :mask-closable="false"
-      :closable="false"
-    >
-      <n-alert type="warning" :show-icon="true" style="margin-bottom: 16px">
-        <strong>请立即复制保存</strong> — 此密钥仅展示一次,关闭后无法再查询。
-      </n-alert>
-      <n-form-item label="密钥">
-        <n-input
-          v-model:value="issuedKey"
-          readonly
-          ref="issuedKeyInput"
-        />
-      </n-form-item>
-      <n-text code style="font-size: 13px; display: block; word-break: break-all; padding: 8px; background: rgba(24,160,88,0.05); border-radius: 4px">
-        {{ issuedKey }}
-      </n-text>
-
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="copyIssuedKey" type="primary">📋 复制密钥</n-button>
-          <n-button @click="issuedKeyVisible = false">我已保存,关闭</n-button>
-        </n-space>
-      </template>
-    </n-modal>
   </n-spin>
 </template>
 
@@ -131,13 +99,16 @@ interface ProviderInfo {
   models: string[]
 }
 
+// P32-B: KeyView 含明文 key(列表直接展示,可复制)
 interface KeyView {
   name: string
+  key: string
   providers: string[]
   allowed_models: string[]
   rpm: number
   tpm: number
   enabled: boolean
+  created_at?: string
 }
 
 const keys = ref<KeyView[]>([])
@@ -147,10 +118,6 @@ const saving = ref(false)
 const modalVisible = ref(false)
 const editing = ref(false)
 const message = useMessage()
-
-// P31-A: 一次性展示生成的密钥
-const issuedKey = ref('')
-const issuedKeyVisible = ref(false)
 
 const form = ref({
   name: '',
@@ -165,7 +132,6 @@ const rules = {
   name: { required: true, message: '名称必填', trigger: 'blur' },
 }
 
-// Provider 下拉选项(NSelect)
 const providerOptions = computed<SelectOption[]>(() =>
   providers.value.map(p => ({
     label: p.name,
@@ -173,7 +139,6 @@ const providerOptions = computed<SelectOption[]>(() =>
   })),
 )
 
-// P27: 允许的模型 = 已选 Provider 的模型去重合并
 const providerModelsUnion = computed<string[]>(() => {
   if (form.value.providers.length === 0) {
     return Array.from(new Set(providers.value.flatMap(p => p.models)))
@@ -223,7 +188,7 @@ async function load() {
     providers.value = (regResp.data.providers ?? []).map((p: any) => ({
       name: p.name,
       protocol: p.protocol,
-      loaded: p.loaded,
+      loaded: true, // /registered 返回的都是已注册(即可用)的 provider
       models: p.models ?? [],
     }))
   } catch (e: any) {
@@ -274,24 +239,15 @@ async function save() {
       enabled: form.value.enabled,
     }
     if (editing.value) {
-      // 编辑模式:不允许改 key
       await axios.put(`/api/v1/keys/${encodeURIComponent(form.value.name)}`, body)
       message.success('已更新')
-      modalVisible.value = false
     } else {
-      // 新建模式:不传 key,后端自动生成
       body.name = form.value.name
-      const resp = await axios.post('/api/v1/keys', body)
-      modalVisible.value = false
-      // P31-A: 弹出一次性密钥展示窗
-      const k = resp.data?.issued_key
-      if (k) {
-        issuedKey.value = k
-        issuedKeyVisible.value = true
-      } else {
-        message.success('已创建')
-      }
+      // P32-B: 后端直接返回 key 在响应里;列表加载后会自动展示
+      await axios.post('/api/v1/keys', body)
+      message.success('已创建,密钥已展示在列表中')
     }
+    modalVisible.value = false
     await load()
   } catch (e: any) {
     message.error('保存失败: ' + (e.response?.data?.error ?? e.message))
@@ -300,14 +256,14 @@ async function save() {
   }
 }
 
-async function copyIssuedKey() {
+async function copyKey(row: KeyView) {
   try {
-    await navigator.clipboard.writeText(issuedKey.value)
-    message.success('已复制到剪贴板')
-  } catch (e: any) {
+    await navigator.clipboard.writeText(row.key)
+    message.success(`已复制 ${row.name} 的密钥`)
+  } catch (e) {
     // fallback
     const ta = document.createElement('textarea')
-    ta.value = issuedKey.value
+    ta.value = row.key
     document.body.appendChild(ta)
     ta.select()
     document.execCommand('copy')
@@ -328,10 +284,21 @@ async function confirmDelete(row: KeyView) {
 }
 
 const columns: DataTableColumns<KeyView> = [
-  { title: '名称', key: 'name' },
+  { title: '名称', key: 'name', width: 140 },
+  {
+    title: '密钥',
+    key: 'key',
+    render: (row) =>
+      h('code', {
+        style: 'font-size: 12px; padding: 2px 6px; background: rgba(24,160,88,0.08); border-radius: 4px; user-select: all; cursor: pointer;',
+        onClick: () => copyKey(row),
+        title: '点击复制',
+      }, row.key),
+  },
   {
     title: 'Provider 绑定',
     key: 'providers',
+    width: 200,
     render: (row) => {
       if (!row.providers || row.providers.length === 0) {
         return h('span', { style: 'color: #999' }, '任意')
@@ -348,6 +315,7 @@ const columns: DataTableColumns<KeyView> = [
   {
     title: '允许模型',
     key: 'allowed_models',
+    width: 180,
     render: (row) =>
       row.allowed_models.length === 0
         ? '*'
@@ -355,11 +323,12 @@ const columns: DataTableColumns<KeyView> = [
         ? `${row.allowed_models.slice(0, 3).join(', ')} +${row.allowed_models.length - 3}`
         : row.allowed_models.join(', '),
   },
-  { title: 'RPM', key: 'rpm' },
-  { title: 'TPM', key: 'tpm' },
+  { title: 'RPM', key: 'rpm', width: 70 },
+  { title: 'TPM', key: 'tpm', width: 80 },
   {
     title: '状态',
     key: 'enabled',
+    width: 80,
     render: (row) =>
       h(
         'span',
@@ -370,13 +339,12 @@ const columns: DataTableColumns<KeyView> = [
   {
     title: '操作',
     key: 'actions',
+    width: 220,
     render: (row) =>
       h(NSpace, {}, () => [
+        h(NButton, { size: 'small', onClick: () => copyKey(row) }, () => '📋 复制'),
         h(NButton, { size: 'small', onClick: () => openEdit(row) }, () => '编辑'),
-        h(
-          NButton, { size: 'small', type: 'error', onClick: () => confirmDelete(row) },
-          () => '删除',
-        ),
+        h(NButton, { size: 'small', type: 'error', onClick: () => confirmDelete(row) }, () => '删除'),
       ]),
   },
 ]

@@ -141,25 +141,23 @@ const columns: DataTableColumns<ProviderKeyView> = [
 async function load() {
   loading.value = true
   try {
-    // 并行加载 keys(全 provider)+ 已知 provider 列表
-    const [keysByProvider, provResp] = await Promise.all([
-      Promise.all(
-        // 列出所有已加载 provider 后逐个查 key
-        (await api.providers()).providers
-          .filter(p => p.loaded)
-          .map(async p => {
-            try {
-              const r = await axios.get<{ keys: ProviderKeyView[] }>(`/api/v1/providers/${p.name}/api-keys`)
-              return r.data.keys
-            } catch (e) {
-              return []
-            }
-          })
-      ),
-      api.providers(),
-    ])
-    keys.value = keysByProvider.flat()
+    // 一次性加载 provider 列表 + keys(对每个 provider 都拉一次 key)
+    const provResp = await api.providers()
     providers.value = provResp.providers
+    // 后端 /api/v1/providers 不返回 loaded 字段,默认所有列出来的 provider 都是 loaded 的
+    // (不列出的 provider 是没启用的)
+    const list = provResp.providers || []
+    const allKeys = await Promise.all(
+      list.map(async p => {
+        try {
+          const r = await axios.get<{ keys: ProviderKeyView[] }>(`/api/v1/providers/${encodeURIComponent(p.name)}/api-keys`)
+          return r.data.keys || []
+        } catch (e) {
+          return []
+        }
+      })
+    )
+    keys.value = allKeys.flat()
   } catch (e: any) {
     message.error('加载失败: ' + (e.message ?? e))
   } finally {

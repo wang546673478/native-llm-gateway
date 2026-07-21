@@ -100,32 +100,34 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 	return out, nil
 }
 
-// KeyView 返回给前端的形态(不含密钥 hash)
+// KeyView 返回给前端的形态(P32-B: 含明文 Key 字段)
+// 这是内部 LLM Gateway,管理员需要随时看到 key 来分发/重新部署,
+// 所以 DB 存的就是明文,list/get 直接返回(标 json:"key")
 type KeyView struct {
 	Name          string   `json:"name"`
-	Providers     []string `json:"providers"`     // 多 Provider 绑定
+	Key           string   `json:"key"` // 明文,可复制
+	Providers     []string `json:"providers"`
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
 	TPM           int      `json:"tpm"`
 	Enabled       bool     `json:"enabled"`
+	CreatedAt     string   `json:"created_at,omitempty"`
 }
 
-// KeyCreateResp POST 返回值:除了 KeyView 字段,还多一个 IssuedKey(明文密钥,一次性)
-// IssuedKey 只在创建那一刻返回给前端,前端必须立刻展示并提示用户保存
-// 之后无法再次查询(后端不存明文,只存 hash)
-type KeyCreateResp struct {
-	KeyView
-	IssuedKey string `json:"issued_key"`
-}
+// KeyCreateResp POST 返回值:等同 KeyView(创建后立刻就能看到 key)
+// P32-B 移除了 issued_key 一次性概念,key 在 list 里随时可看
+type KeyCreateResp = KeyView
 
 func toView(k dbpkg.GatewayKey) KeyView {
 	return KeyView{
 		Name:          k.Name,
+		Key:           k.KeyHash,
 		Providers:     parseProviders(k.Providers),
 		AllowedModels: parseAllowedModels(k.AllowedModels),
 		RPM:           k.RPM,
 		TPM:           k.TPM,
 		Enabled:       k.Enabled,
+		CreatedAt:     k.CreatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -198,11 +200,8 @@ func (h *KeysHandler) create(c *gin.Context) {
 		return
 	}
 	h.reloadAll(c.Request.Context())
-	// 一次性返回明文密钥给前端 — 仅创建这一刻能看到,之后只能从列表里看到 name
-	c.JSON(http.StatusCreated, KeyCreateResp{
-		KeyView:   toView(*k),
-		IssuedKey: issuedKey,
-	})
+	// P32-B: 直接返回 KeyView,key 在 list 里也能看到
+	c.JSON(http.StatusCreated, toView(*k))
 }
 
 func (h *KeysHandler) update(c *gin.Context) {
