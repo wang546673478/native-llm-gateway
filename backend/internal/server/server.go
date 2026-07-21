@@ -160,52 +160,51 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		CoolingDuration: cfg.KeyPool.CoolingDuration,
 		MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
 	}
-	ctx := context.Background()
-	// 对每个 enabled provider,从 DB 读它的明文 key,构造 Pool
+	store := auth.NewProviderKeyStore(db)
 	for name, p := range cfg.Providers {
 		if !p.Enabled {
 			continue
 		}
-		store := auth.NewProviderKeyStore(db)
-		// P34: 直接从 DB 读 ProviderAPIKey 行,Key.ID 用 DB uint ID
-		// (这样 GatewayKey.ProviderKeyIDs 能精准定位到具体凭证)
-		rows, err := store.List(ctx, name)
-		if err != nil {
-			logger.Warn("read provider keys from DB failed",
-				zap.String("provider", name),
-				zap.Error(err))
-			continue
-		}
-		if len(rows) == 0 {
-			// 没 key 也不报错,让 provider 还是 loaded;调它会返回 'no available key'
-			out[name] = keypool.NewPool(name, nil, sched, poolCfg)
-			logger.Warn("provider has no API keys in DB",
-				zap.String("provider", name))
-			continue
-		}
-		keys := make([]*keypool.Key, 0, len(rows))
-		for _, row := range rows {
-			if !row.Enabled {
-				continue
-			}
-			keys = append(keys, &keypool.Key{
-				ID:           fmt.Sprintf("%d", row.ID), // P34: 用 DB ID 作为 Key.ID
-				ProviderName: name,
-				Name:         row.Name,
-				Key:          row.KeyHash,
-				Status:       keypool.KeyStatusActive,
-				CreatedAt:    row.CreatedAt,
-				UpdatedAt:    row.UpdatedAt,
-			})
-		}
-		out[name] = keypool.NewPool(name, keys, sched, poolCfg)
-		logger.Info("keypool built from DB",
-			zap.String("provider", name),
-			zap.Int("keys", len(keys)),
-			zap.String("rotation", cfg.KeyPool.KeyRotation),
-		)
+		out[name] = buildOnePool(context.Background(), name, sched, poolCfg, store, logger)
 	}
 	return out
+}
+
+// buildOnePool P35: 给单个 provider 从 DB 构造 Pool
+// 启动时全量构造、运行时热更新都用它
+func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poolCfg keypool.Config, store auth.ProviderKeyStore, logger *zap.Logger) *keypool.Pool {
+	rows, err := store.List(ctx, name)
+	if err != nil {
+		logger.Warn("read provider keys from DB failed",
+			zap.String("provider", name),
+			zap.Error(err))
+		return keypool.NewPool(name, nil, sched, poolCfg)
+	}
+	if len(rows) == 0 {
+		logger.Warn("provider has no API keys in DB",
+			zap.String("provider", name))
+		return keypool.NewPool(name, nil, sched, poolCfg)
+	}
+	keys := make([]*keypool.Key, 0, len(rows))
+	for _, row := range rows {
+		if !row.Enabled {
+			continue
+		}
+		keys = append(keys, &keypool.Key{
+			ID:           fmt.Sprintf("%d", row.ID),
+			ProviderName: name,
+			Name:         row.Name,
+			Key:          row.KeyHash,
+			Status:       keypool.KeyStatusActive,
+			CreatedAt:    row.CreatedAt,
+			UpdatedAt:    row.UpdatedAt,
+		})
+	}
+	logger.Info("keypool built from DB",
+		zap.String("provider", name),
+		zap.Int("keys", len(keys)),
+	)
+	return keypool.NewPool(name, keys, sched, poolCfg)
 }
 
 // toRouterAliases 把 config 风格别名表转 router 风格
@@ -363,7 +362,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	keysHandler.Register(r.Group("/api/v1"))
 
 	// P30: Provider API keys 管理(给已插件化的 Provider 加上游 LLM key)
-	pkHandler := auth.NewProviderKeysHandler(s.db)
+	pkHandler := auth.NewProviderKeysHandler(s.db, s.ReloadProviderPool)
 	pkHandler.RegisterOn(r.Group("/api/v1"))
 
 	// P5: 真代理接入
@@ -450,4 +449,45 @@ func (s *Server) Reload(newCfg *config.Config) {
 		zap.Int("aliases", len(newCfg.Routing.Aliases)),
 		zap.Int("auth_keys", len(newCfg.Auth.Keys)),
 	)
+}
+
+// ReloadProviderPool P35: 从 DB 重建指定 provider 的 Pool,注入到 Provider
+// providerName 为空时全量重建
+// ProviderKeysHandler.Create/Delete 后会调这个
+func (s *Server) ReloadProviderPool(providerName string) {
+	sched := keypool.NewScheduler(s.cfg.KeyPool.KeyRotation)
+	poolCfg := keypool.Config{
+		CoolingDuration: s.cfg.KeyPool.CoolingDuration,
+		MaxCoolingCount: s.cfg.KeyPool.MaxCoolingCount,
+	}
+	store := auth.NewProviderKeyStore(s.db)
+	ctx := context.Background()
+
+	if providerName != "" {
+		// 单个 provider 热更新
+		pool := buildOnePool(ctx, providerName, sched, poolCfg, store, s.logger)
+		s.pools[providerName] = pool
+		// 注入到 Provider(让它下次请求用新 Pool)
+		if pv, ok := s.manager.Get(providerName); ok {
+			if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
+				setter.SetPool(pool)
+				s.logger.Info("provider pool reloaded", zap.String("provider", providerName), zap.Int("keys", pool.Size()))
+			}
+		}
+		return
+	}
+	// 全量重建
+	for name, p := range s.cfg.Providers {
+		if !p.Enabled {
+			continue
+		}
+		pool := buildOnePool(ctx, name, sched, poolCfg, store, s.logger)
+		s.pools[name] = pool
+		if pv, ok := s.manager.Get(name); ok {
+			if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
+				setter.SetPool(pool)
+			}
+		}
+	}
+	s.logger.Info("all provider pools reloaded", zap.Int("providers", len(s.pools)))
 }

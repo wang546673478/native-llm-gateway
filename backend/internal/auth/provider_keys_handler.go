@@ -107,11 +107,13 @@ func maskKey(k string) string {
 // ProviderKeysHandler CRUD for /api/v1/providers/:name/api-keys
 type ProviderKeysHandler struct {
 	store ProviderKeyStore
+	// P35: reload hook — Create/Delete 后调一次,让 Server 重建 Pool 并注入到 Provider
+	reload func(providerName string)
 }
 
 // NewProviderKeysHandler 构造 handler
-func NewProviderKeysHandler(db *gorm.DB) *ProviderKeysHandler {
-	return &ProviderKeysHandler{store: NewProviderKeyStore(db)}
+func NewProviderKeysHandler(db *gorm.DB, reload func(providerName string)) *ProviderKeysHandler {
+	return &ProviderKeysHandler{store: NewProviderKeyStore(db), reload: reload}
 }
 
 // Register 挂到 r.Group
@@ -190,6 +192,10 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "create_failed", "detail": err.Error()})
 		return
 	}
+	// P35: 触发 Pool reload,新 key 立刻生效
+	if h.reload != nil {
+		h.reload(providerName)
+	}
 	c.JSON(http.StatusCreated, toProviderKeyView(*k))
 }
 
@@ -200,9 +206,24 @@ func (h *ProviderKeysHandler) delete(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_id"})
 		return
 	}
+	// P35: 删除前先查这个 key 属于哪个 provider(用于 reload)
+	rows, err := h.store.List(c.Request.Context(), "")
+	var providerName string
+	if err == nil {
+		for _, r := range rows {
+			if r.ID == id {
+				providerName = r.ProviderName
+				break
+			}
+		}
+	}
 	if err := h.store.Delete(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete_failed", "detail": err.Error()})
 		return
+	}
+	// P35: 触发 Pool reload(查不到 providerName 也 reload 全量是 OK 的)
+	if h.reload != nil {
+		h.reload(providerName)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": id})
 }
