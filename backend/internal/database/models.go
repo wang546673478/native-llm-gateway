@@ -48,26 +48,22 @@ type ModelAlias struct {
 // TableName
 func (ModelAlias) TableName() string { return "model_aliases" }
 
-// APIKey Provider 的 API Key(P3 阶段 KeyPool 用)
-type APIKey struct {
+// ProviderAPIKey(P30)每个 Provider 的上游 LLM API key
+// 替代之前 config.yaml 里的 providers.x.keys[] 段
+// Gateway 调上游时由 Authenticator 从这里构建 KeyPool 取 key
+type ProviderAPIKey struct {
 	ID            uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	ProviderName  string     `gorm:"column:provider_name;uniqueIndex:idx_key_provider_name;not null" json:"provider_name"`
-	Name          string     `gorm:"column:name;uniqueIndex:idx_key_provider_name;not null" json:"name"`
-	KeyEncrypted  string     `gorm:"column:key_encrypted;not null" json:"-"`
-	Status        string     `gorm:"column:status;not null;default:'ACTIVE'" json:"status"`
-	CoolingUntil  *time.Time `gorm:"column:cooling_until" json:"cooling_until,omitempty"`
-	CoolingCount  int        `gorm:"column:cooling_count;not null;default:0" json:"cooling_count"`
-	TotalRequests int64      `gorm:"column:total_requests;not null;default:0" json:"total_requests"`
-	TotalTokens   int64      `gorm:"column:total_tokens;not null;default:0" json:"total_tokens"`
-	ErrorCount    int        `gorm:"column:error_count;not null;default:0" json:"error_count"`
-	LastUsedAt    *time.Time `gorm:"column:last_used_at" json:"last_used_at,omitempty"`
-	LastErrorAt   *time.Time `gorm:"column:last_error_at" json:"last_error_at,omitempty"`
+	ProviderName  string     `gorm:"column:provider_name;index;not null" json:"provider_name"`
+	Name          string     `gorm:"column:name;not null" json:"name"`
+	// KeyHash 存明文(P30 暂不上加密,跟 GatewayKey 一样,生产可加)
+	KeyHash       string     `gorm:"column:key_hash;not null" json:"-"`
+	Enabled       bool       `gorm:"column:enabled;not null;default:true" json:"enabled"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // TableName
-func (APIKey) TableName() string { return "api_keys" }
+func (ProviderAPIKey) TableName() string { return "provider_api_keys" }
 
 // UsageRecord 单次请求的用量记录(P8 阶段真正写入)
 type UsageRecord struct {

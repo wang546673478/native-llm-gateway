@@ -51,6 +51,7 @@ const currentTitle = computed(() => {
   const map: Record<string, string> = {
     '/overview': '总览',
     '/providers': 'Providers',
+    '/provider-keys': 'Provider Keys',
     '/keys': 'Gateway Keys',
     '/routing': '路由规则',
     '/usage': '用量',
@@ -65,6 +66,7 @@ function renderMenuLabel(to: string, label: string) {
 const menuOptions: MenuOption[] = [
   { key: '/overview', label: renderMenuLabel('/overview', '总览') },
   { key: '/providers', label: renderMenuLabel('/providers', 'Providers') },
+  { key: '/provider-keys', label: renderMenuLabel('/provider-keys', 'Provider Keys') },
   { key: '/keys', label: renderMenuLabel('/keys', 'Gateway Keys') },
   { key: '/routing', label: renderMenuLabel('/routing', '路由规则') },
   { key: '/usage', label: renderMenuLabel('/usage', '用量') },

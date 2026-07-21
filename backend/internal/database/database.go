@@ -72,13 +72,12 @@ func Open(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 }
 
 // Migrate 用 GORM AutoMigrate 创建/更新所有表
-// 与 migrations/*.up.sql 保持一致,SQL 文件保留作为规格引用
 func Migrate(db *gorm.DB) error {
 	tables := []interface{}{
 		&Provider{},
 		&ProviderModel{},
 		&ModelAlias{},
-		&APIKey{},
+		&ProviderAPIKey{}, // P30: 替换 APIKey 表
 		&UsageRecord{},
 		&RoutingConfig{},
 		&GatewayKey{},

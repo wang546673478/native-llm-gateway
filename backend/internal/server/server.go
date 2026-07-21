@@ -46,7 +46,8 @@ type Server struct {
 // New 构造 Server
 func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.Manager) *Server {
 	// P3+P4+P5: 构造 KeyPool map + Router + Proxy
-	pools := buildKeyPools(cfg, logger)
+	// P30:从 DB (provider_api_keys 表) 读 key 而不是 config.yaml
+	pools := buildKeyPools(cfg, db, logger)
 	r := router.NewRouter(logger, manager, pools, router.Config{
 		Aliases:         toRouterAliases(cfg.Routing.Aliases),
 		DefaultStrategy: cfg.Routing.DefaultStrategy,
@@ -128,34 +129,53 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 }
 
 // buildKeyPools 为每个 enabled Provider 构造一个 KeyPool
-func buildKeyPools(cfg *config.Config, logger *zap.Logger) map[string]*keypool.Pool {
+// P30:key 从 DB (provider_api_keys 表) 读,不用 config.yaml
+func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[string]*keypool.Pool {
 	out := make(map[string]*keypool.Pool)
 	sched := keypool.NewScheduler(cfg.KeyPool.KeyRotation)
+	poolCfg := keypool.Config{
+		CoolingDuration: cfg.KeyPool.CoolingDuration,
+		MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
+	}
+	ctx := context.Background()
+	// 对每个 enabled provider,从 DB 读它的明文 key,构造 Pool
 	for name, p := range cfg.Providers {
 		if !p.Enabled {
 			continue
 		}
-		keys := make([]*keypool.Key, 0, len(p.Keys))
-		for i, k := range p.Keys {
-			now := time.Now().UTC()
+		store := auth.NewProviderKeyStore(db)
+		plainKeys, err := store.GetPlainKeys(ctx, name)
+		if err != nil {
+			logger.Warn("read provider keys from DB failed",
+				zap.String("provider", name),
+				zap.Error(err))
+			continue
+		}
+		if len(plainKeys) == 0 {
+			// 没 key 也不报错,让 provider 还是 loaded;调它会返回 'no available key'
+			out[name] = keypool.NewPool(name, nil, sched, poolCfg)
+			logger.Warn("provider has no API keys in DB",
+				zap.String("provider", name))
+			continue
+		}
+		out[name] = keypool.BuildPoolFromStrings(name, plainKeys, poolCfg)
+		// BuildPoolFromStrings 用了 nil scheduler,改用带 scheduler 的 NewPool
+		keys := make([]*keypool.Key, 0, len(plainKeys))
+		for i, pk := range plainKeys {
 			keys = append(keys, &keypool.Key{
-				ID:           fmt.Sprintf("%s-%d", name, i),
+				ID:           fmt.Sprintf("%s-key-%d", name, i+1),
 				ProviderName: name,
-				Name:         k.Name,
-				Key:          k.Key,
+				Name:         fmt.Sprintf("key-%d", i+1),
+				Key:          pk,
 				Status:       keypool.KeyStatusActive,
-				CreatedAt:    now,
-				UpdatedAt:    now,
+				CreatedAt:    time.Now().UTC(),
+				UpdatedAt:    time.Now().UTC(),
 			})
 		}
-		pool := keypool.NewPool(name, keys, sched, keypool.Config{
-			CoolingDuration: cfg.KeyPool.CoolingDuration,
-			MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
-		})
-		out[name] = pool
-		logger.Info("keypool built",
+		out[name] = keypool.NewPool(name, keys, sched, poolCfg)
+		logger.Info("keypool built from DB",
 			zap.String("provider", name),
-			zap.Int("keys", len(keys)),
+			zap.Int("keys", len(plainKeys)),
 			zap.String("rotation", cfg.KeyPool.KeyRotation),
 		)
 	}
@@ -315,6 +335,10 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	}
 	keysHandler := auth.NewKeysHandler(s.db, noopReload)
 	keysHandler.Register(r.Group("/api/v1"))
+
+	// P30: Provider API keys 管理(给已插件化的 Provider 加上游 LLM key)
+	pkHandler := auth.NewProviderKeysHandler(s.db)
+	pkHandler.RegisterOn(r.Group("/api/v1"))
 
 	// P5: 真代理接入
 	// 注册具体协议路径 + NoRoute 兜底(覆盖其他 /v1/* 子路径)

@@ -10,6 +10,7 @@ export interface ProviderInfo {
   name: string
   protocol: string
   models: string[]
+  loaded?: boolean
   key_pool?: {
     provider_name: string
     total_keys: number

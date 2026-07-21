@@ -3,6 +3,7 @@
 package keypool
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -39,6 +40,25 @@ func NewPool(providerName string, keys []*Key, scheduler Scheduler, cfg Config) 
 		keys:         keys,
 		scheduler:    scheduler,
 	}
+}
+
+// BuildPoolFromStrings P30 便捷函数:从明文 key 列表直接构造 Pool
+// Authenticator 从 DB 读出明文后直接用,跳过 Key struct 包装
+func BuildPoolFromStrings(providerName string, plainKeys []string, cfg Config) *Pool {
+	now := time.Now().UTC()
+	keys := make([]*Key, len(plainKeys))
+	for i, pk := range plainKeys {
+		keys[i] = &Key{
+			ID:            fmt.Sprintf("%s-key-%d", providerName, i+1),
+			ProviderName:  providerName,
+			Name:          fmt.Sprintf("key-%d", i+1),
+			Key:           pk,
+			Status:        KeyStatusActive,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
+	}
+	return NewPool(providerName, keys, nil, cfg)
 }
 
 // Acquire 获取一个可用的 Key
