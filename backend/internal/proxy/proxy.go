@@ -94,12 +94,13 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		return
 	}
 
-	// 2. 提取 model + stream
-	model, _, err := extractModelAndStream(body)
+	// 2. 提取 model + stream(body 里的 stream 字段是最终依据 — 客户端说了算)
+	model, bodyStream, err := extractModelAndStream(body)
 	if err != nil || model == "" {
 		writeJSONError(c, http.StatusBadRequest, "invalid_request", "request body must include non-empty 'model' field")
 		return
 	}
+	isStream = bodyStream
 
 	// 3. 构造 Provider.Request(Body 透传)
 	req := &provider.Request{
@@ -192,10 +193,10 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 
 		start := time.Now()
 		if isStream {
-			ok, perr := e.doStream(ctx, c, pv, req, result)
+			ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result)
 			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 			if ok {
-				e.recordUsage(req, result, time.Since(start), http.StatusOK, "", isStream)
+				e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", isStream, streamUsage)
 				return
 			}
 			lastErr = perr
@@ -256,23 +257,24 @@ func (e *Engine) doRequest(
 }
 
 // doStream 调一次 Provider.SendStreamRequest
-// 返回 (success, lastErr)
+// 返回 (success, usage, lastErr)
 // success=true 表示流已经成功传完
+// usage 从流最后一个 chunk 抽出(可能是 nil,如果上游没发 usage 字段)
 func (e *Engine) doStream(
 	ctx context.Context,
 	c *gin.Context,
 	pv provider.Provider,
 	req *provider.Request,
 	result *router.RouteResult,
-) (bool, *provider.ProviderError) {
+) (bool, *provider.Usage, *provider.ProviderError) {
 	chunkCh, headerResp, err := pv.SendStreamRequest(ctx, req)
 	if err != nil {
 		var pe *provider.ProviderError
 		if errors.As(err, &pe) {
 			e.reportKeyError(result, pe)
-			return false, pe
+			return false, nil, pe
 		}
-		return false, &provider.ProviderError{
+		return false, nil, &provider.ProviderError{
 			ProviderName: result.ProviderName,
 			ErrorType:    provider.ErrorTypeConnection,
 			Message:      err.Error(),
@@ -325,9 +327,13 @@ func (e *Engine) doStream(
 		}
 	}
 
-	// headerResp 包含头信息和(可能的) Usage
-	_ = headerResp
-	return true, nil
+	// P42: headerResp.Usage 由各 provider 的 goroutine 在 close(ch) 前填好
+	// 我们 drain 完 channel 后安全读取
+	var streamUsage *provider.Usage
+	if headerResp != nil {
+		streamUsage = headerResp.Usage
+	}
+	return true, streamUsage, nil
 }
 
 // writeNonStreamResponse 把 Provider Response 原样写回客户端
@@ -542,10 +548,10 @@ func (e *Engine) tryOneCandidate(
 
 	start := time.Now()
 	if req.IsStream {
-		ok, perr := e.doStream(ctx, c, pv, req, result)
+		ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result)
 		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 		if ok {
-			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", true, nil)
+			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", true, streamUsage)
 			return true
 		}
 		*lastErr = perr

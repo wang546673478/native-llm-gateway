@@ -183,8 +183,32 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	b.cfg.Pool.ReportSuccess(key)
 
 	ch := make(chan *provider.StreamChunk, 16)
+	// P42: 收集流中的 usage — Anthropic 在 message_start (input+cache) 和 message_delta (output) 里发
+	var inputTokens, outputTokens, cacheCreation, cacheRead int
+	resp := &provider.Response{
+		StatusCode: httpResp.StatusCode,
+		Headers:    httpResp.Header,
+	}
 	go func() {
-		defer close(ch)
+		defer func() {
+			// 在 close(ch) 前填 usage
+			if inputTokens > 0 || outputTokens > 0 || cacheCreation > 0 || cacheRead > 0 {
+				resp.Usage = &provider.Usage{
+					PromptTokens:        inputTokens,
+					CompletionTokens:    outputTokens,
+					TotalTokens:         inputTokens + outputTokens + cacheCreation + cacheRead,
+					CacheCreationTokens: cacheCreation,
+					CacheReadTokens:     cacheRead,
+					RawUsage: map[string]interface{}{
+						"input_tokens":                inputTokens,
+						"output_tokens":               outputTokens,
+						"cache_creation_input_tokens": cacheCreation,
+						"cache_read_input_tokens":     cacheRead,
+					},
+				}
+			}
+			close(ch)
+		}()
 		defer httpResp.Body.Close()
 		reader := bufio.NewReader(httpResp.Body)
 
@@ -208,8 +232,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			// 空行 = 一个 event 结束
 			if len(line) == 0 {
 				if buf.Len() > 0 {
-					// 还原成完整 SSE 事件:每行 + \n + 空行
 					eventData := append([]byte{}, buf.Bytes()...)
+					// P42: 在转发前尝试解析 usage
+					extractAnthropicStreamUsage(eventData, &inputTokens, &outputTokens, &cacheCreation, &cacheRead)
 					eventData = append(eventData, '\n', '\n')
 					ch <- &provider.StreamChunk{Data: eventData}
 					buf.Reset()
@@ -226,10 +251,73 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		}
 	}()
 
-	return ch, &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
-	}, nil
+	return ch, resp, nil
+}
+
+// extractAnthropicStreamUsage 从单个 Anthropic SSE 事件中提取 usage
+// 关注两种事件:
+//   - message_start: data 里 {"message":{...,"usage":{input_tokens,cache_creation_input_tokens,cache_read_input_tokens}}}
+//   - message_delta:  data 里 {"usage":{output_tokens}}(output 在顶层)
+func extractAnthropicStreamUsage(event []byte, input, output, cacheCreate, cacheRead *int) {
+	// 找 event: 类型行(决定这是哪种事件)
+	var eventType string
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("event:")) {
+			eventType = string(bytes.TrimSpace(line[6:]))
+			break
+		}
+	}
+	if eventType != "message_start" && eventType != "message_delta" {
+		return
+	}
+	// 找 data: 行(JSON)
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[5:])
+		// 通用 usage 结构
+		var u struct {
+			Usage *struct {
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+			Message *struct {
+				Usage *struct {
+					InputTokens              int `json:"input_tokens"`
+					OutputTokens             int `json:"output_tokens"`
+					CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+					CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+				} `json:"usage"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(payload, &u); err != nil {
+			return
+		}
+		// message_start: usage 在 message.usage;message_delta: usage 在顶层
+		usageObj := u.Usage
+		if usageObj == nil && u.Message != nil {
+			usageObj = u.Message.Usage
+		}
+		if usageObj == nil {
+			return
+		}
+		if usageObj.InputTokens > 0 {
+			*input = usageObj.InputTokens
+		}
+		if usageObj.OutputTokens > 0 {
+			*output = usageObj.OutputTokens
+		}
+		if usageObj.CacheCreationInputTokens > 0 {
+			*cacheCreate = usageObj.CacheCreationInputTokens
+		}
+		if usageObj.CacheReadInputTokens > 0 {
+			*cacheRead = usageObj.CacheReadInputTokens
+		}
+		return
+	}
 }
 
 // HealthCheck 简单 GET 检查

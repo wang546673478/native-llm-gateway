@@ -252,8 +252,20 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	b.cfg.Pool.ReportSuccess(key)
 
 	ch := make(chan *provider.StreamChunk, 16)
+	// P42: 收集流中的 usage — 最后一个带 usage 字段的 chunk 才是 totals
+	// OpenAI 在 stream_options.include_usage=true 时才会在最后一个 chunk 发 usage
+	var lastUsage *provider.Usage
+	// resp.Usage 由 goroutine 在 close(ch) 之前填好;caller 必须先 drain channel 再读
+	resp := &provider.Response{
+		StatusCode: httpResp.StatusCode,
+		Headers:    httpResp.Header,
+	}
 	go func() {
-		defer close(ch)
+		defer func() {
+			// 在 channel 关闭前先填 usage,这样 caller drain 完就能安全读
+			resp.Usage = lastUsage
+			close(ch)
+		}()
 		defer httpResp.Body.Close()
 		reader := bufio.NewReader(httpResp.Body)
 
@@ -282,15 +294,16 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 				ch <- &provider.StreamChunk{Err: io.EOF}
 				return
 			}
+			// P42: 尝试从 chunk JSON 抽 usage
+			if u := parseOpenAIUsage(payload); u != nil {
+				lastUsage = u
+			}
 			// 把 "data: {...}\n\n" 还原成 SSE 事件
 			ch <- &provider.StreamChunk{Data: append(line, '\n', '\n')}
 		}
 	}()
 
-	return ch, &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
-	}, nil
+	return ch, resp, nil
 }
 
 // HealthCheck 简单 GET 请求(检查 endpoint 可达)
