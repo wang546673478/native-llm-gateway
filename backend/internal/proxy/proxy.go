@@ -126,16 +126,16 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	}
 
 	// 4.5 P19: 检查 Gateway Key 是否绑定了 Provider
-	// 若 key.Provider 非空,则只能路由到那个 Provider;若路由解析到别的 Provider,直接 403
+	// 若 key.Providers 非空,则只能路由到那些 Provider 之一;若路由解析到不在列表里的,直接 403
 	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok && gk.Provider != "" {
+		if gk, ok := gkVal.(*auth.GatewayKey); ok && len(gk.Providers) > 0 {
 			// 取路由结果看 ProviderName;failover iterator 第一个就是
 			probeResult, probeErr := iter.Next()
 			if probeErr == nil {
 				if e.authn != nil && e.authn.CheckProvider(gk, probeResult.ProviderName) != nil {
 					e.logger.Warn("key provider mismatch",
 						zap.String("key", gk.Name),
-						zap.String("key_provider", gk.Provider),
+						zap.Strings("key_providers", gk.Providers),
 						zap.String("routed_provider", probeResult.ProviderName),
 						zap.String("model", model),
 						zap.String("trace_id", traceID),
@@ -143,8 +143,8 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 					c.JSON(http.StatusForbidden, gin.H{
 						"error": gin.H{
 							"type":    "key_provider_mismatch",
-							"message": fmt.Sprintf("key %q is bound to provider %q but request routes to %q",
-								gk.Name, gk.Provider, probeResult.ProviderName),
+							"message": fmt.Sprintf("key %q is bound to providers %v but request routes to %q",
+								gk.Name, gk.Providers, probeResult.ProviderName),
 						},
 					})
 					return

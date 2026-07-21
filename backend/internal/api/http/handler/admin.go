@@ -81,10 +81,16 @@ func (a *Admin) listRegisteredProviders(c *gin.Context) {
 			protocol = Protocol(p.Protocol())
 			loadedOK = true
 		}
+		// P27: 也带上 models,前端可用来做"允许模型"下拉
+		models := []string{}
+		if p, ok := loaded[name]; ok {
+			models = p.Models()
+		}
 		out = append(out, gin.H{
 			"name":     name,
 			"protocol": string(protocol),
 			"loaded":   loadedOK,
+			"models":   models,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{

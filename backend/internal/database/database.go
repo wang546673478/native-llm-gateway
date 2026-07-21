@@ -86,7 +86,46 @@ func Migrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(tables...); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
+	// P27: 一次性数据迁移 — 把旧单值 provider 字段复制到新 JSON 数组字段
+	if err := migrateProviderToProviders(db); err != nil {
+		return fmt.Errorf("data migrate: %w", err)
+	}
 	return nil
+}
+
+// migrateProviderToProviders 把旧 schema 里的 provider 单值(如果有的话)
+// 迁移到新 schema 的 providers JSON 数组。
+// 用 IFNULL 处理新列(可能为 NULL 或 '[]');老列不存在则 COALESCE 返回 ''。
+// 幂等:重复跑不会出错,因为已经迁移过的行 providers != '[]'。
+func migrateProviderToProviders(db *gorm.DB) error {
+	// 检查老列是否存在
+	var hasOldColumn int64
+	rows, err := db.Raw(`
+		SELECT COUNT(*) FROM pragma_table_info('gateway_keys')
+		WHERE name = 'provider'
+	`).Rows()
+	if err != nil {
+		// 非 SQLite 或没 pragma_table_info 函数(SQLite specific)
+		// 跳过,假设无老列
+		_ = rows
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := rows.Scan(&hasOldColumn); err != nil {
+			return err
+		}
+	}
+	if hasOldColumn == 0 {
+		return nil // 无老列,不需要迁移
+	}
+	// 迁移:把老 provider 值包成 JSON 数组,赋给新 providers 列
+	return db.Exec(`
+		UPDATE gateway_keys
+		SET providers = '["' || COALESCE(provider, '') || '"]'
+		WHERE (providers IS NULL OR providers = '' OR providers = '[]')
+		  AND COALESCE(provider, '') != ''
+	`).Error
 }
 
 // ensureDir 对 sqlite 文件路径,确保父目录存在

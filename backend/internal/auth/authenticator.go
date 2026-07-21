@@ -17,8 +17,10 @@ type GatewayKey struct {
 	ID            string
 	Name          string
 	KeyHash       string
-	// Provider 绑定:空字符串 = 不限制;非空 = 只能用路由解析到这个 Provider 的请求
-	Provider      string
+	// Providers 绑定:空 = 不限制;非空 = 只能用路由解析到这些 Provider 之一的请求
+	// 例:["deepseek", "deepseek-anthropic"] 表示 deepseek 的 OpenAI 和
+	// Anthropic 兼容端点都能用(共享同一个 API key)
+	Providers     []string
 	AllowedModels []string
 	RateLimit     RateLimitConfig
 }
@@ -39,17 +41,19 @@ var (
 )
 
 // CheckProvider 验证 key 是否能用指定 provider
-// 当 key.Provider 为空时,允许任意 provider(返回 nil)
-// 否则只允许 key.Provider == providerName
+// 当 key.Providers 为空时,允许任意 provider(返回 nil)
+// 否则只允许 providerName 在 key.Providers 里
 func (a *Authenticator) CheckProvider(key *GatewayKey, providerName string) error {
 	if key == nil {
 		return ErrUnknownKey
 	}
-	if key.Provider == "" {
+	if len(key.Providers) == 0 {
 		return nil // 未绑定,任意 provider 都行
 	}
-	if key.Provider == providerName {
-		return nil
+	for _, p := range key.Providers {
+		if p == providerName {
+			return nil
+		}
 	}
 	return ErrKeyProviderMismatch
 }

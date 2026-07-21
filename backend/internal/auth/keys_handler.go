@@ -78,7 +78,7 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 			ID:            string(rune(k.ID)),
 			Name:          k.Name,
 			KeyHash:       k.KeyHash,
-			Provider:      k.Provider,
+			Providers:     parseProviders(k.Providers),
 			AllowedModels: parseAllowedModels(k.AllowedModels),
 			RateLimit:     RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
 		})
@@ -89,7 +89,7 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 // KeyView 返回给前端的形态(不含密钥 hash)
 type KeyView struct {
 	Name          string   `json:"name"`
-	Provider      string   `json:"provider"`
+	Providers     []string `json:"providers"`     // 多 Provider 绑定
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
 	TPM           int      `json:"tpm"`
@@ -99,7 +99,7 @@ type KeyView struct {
 func toView(k dbpkg.GatewayKey) KeyView {
 	return KeyView{
 		Name:          k.Name,
-		Provider:      k.Provider,
+		Providers:     parseProviders(k.Providers),
 		AllowedModels: parseAllowedModels(k.AllowedModels),
 		RPM:           k.RPM,
 		TPM:           k.TPM,
@@ -111,7 +111,7 @@ func toView(k dbpkg.GatewayKey) KeyView {
 type KeyCreateReq struct {
 	Name          string   `json:"name" binding:"required"`
 	Key           string   `json:"key" binding:"required"`
-	Provider      string   `json:"provider"` // 可选,空 = 不限制
+	Providers     []string `json:"providers"`     // 多 Provider 绑定,空 = 不限制
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
 	TPM           int      `json:"tpm"`
@@ -121,7 +121,7 @@ type KeyCreateReq struct {
 // KeyUpdateReq PUT body(name 在 URL 里,body 不需要)
 type KeyUpdateReq struct {
 	Key           string   `json:"key"`
-	Provider      string   `json:"provider"`
+	Providers     []string `json:"providers"`
 	AllowedModels []string `json:"allowed_models"`
 	RPM           int      `json:"rpm"`
 	TPM           int      `json:"tpm"`
@@ -163,8 +163,8 @@ func (h *KeysHandler) create(c *gin.Context) {
 
 	k := &dbpkg.GatewayKey{
 		Name:          req.Name,
-		KeyHash:       req.Key, // Repository 会原样存;Authenticator 内部 hash
-		Provider:      req.Provider,
+		KeyHash:       req.Key,
+		Providers:     serializeProviders(req.Providers),
 		AllowedModels: serializeAllowedModels(models),
 		RPM:           req.RPM,
 		TPM:           req.TPM,
@@ -198,8 +198,8 @@ func (h *KeysHandler) update(c *gin.Context) {
 	if strings.TrimSpace(req.Key) != "" {
 		existing.KeyHash = req.Key
 	}
-	// Provider 字段允许随时改(包括清空)
-	existing.Provider = req.Provider
+	// Providers 字段允许随时改(包括清空)
+	existing.Providers = serializeProviders(req.Providers)
 	if req.AllowedModels != nil {
 		existing.AllowedModels = serializeAllowedModels(req.AllowedModels)
 	}
@@ -241,7 +241,7 @@ func (h *KeysHandler) reloadAll(ctx context.Context) {
 			ID:            string(rune(k.ID)),
 			Name:          k.Name,
 			KeyHash:       k.KeyHash,
-			Provider:      k.Provider, // P19: 必须传,否则 binding check 失效
+			Providers:     parseProviders(k.Providers),
 			AllowedModels: parseAllowedModels(k.AllowedModels),
 			RateLimit:     RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
 		})
@@ -272,4 +272,23 @@ func parseAllowedModels(s string) []string {
 	return out
 }
 
-// (移除早期手写的 JSON helper,改用 encoding/json)
+// serializeProviders 把 []string 序列化成 JSON 字符串存 DB
+// nil/空 = "[]"
+func serializeProviders(in []string) string {
+	if in == nil {
+		return `[]`
+	}
+	b, _ := json.Marshal(in)
+	return string(b)
+}
+
+func parseProviders(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
