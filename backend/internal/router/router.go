@@ -138,18 +138,16 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 		return nil, ErrNoRoute
 	}
 
-	// P52: 全局 tier 排序 — 先穷尽所有 token_plan,再 api,最后 free
-	// (同 tier 内保留 chain priority 顺序)
-	candidates = sortCandidatesByTier(candidates, r.pools)
-
+	// P64: 先按 policy(priority/weight 等)对 provider 排序,再按 tier 跨 provider 拉平
 	ordered, err := pol.Order(candidates)
 	if err != nil {
 		return nil, err
 	}
+	keyCandidates := buildKeyCandidates(ordered, r.pools)
 
 	return &RouteIterator{
 		alias:           req.Model,
-		candidates:      ordered,
+		candidates:      keyCandidates,
 		pools:           r.pools,
 		manager:         r.manager,
 		providerKeyIDs:  o.ProviderKeyIDs,
@@ -186,53 +184,16 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 		return nil, ErrNoRoute
 	}
 
-	// P52: 全局 tier 排序 — 同上,先 token_plan 再 api 再 free
-	candidates = sortCandidatesByTier(candidates, r.pools)
+	// P64: auto-discovery 路径也按 tier 跨 provider 拉平
+	keyCandidates := buildKeyCandidates(candidates, r.pools)
 
 	return &RouteIterator{
 		alias:          modelID,
-		candidates:     candidates,
+		candidates:     keyCandidates,
 		pools:          r.pools,
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
-}
-
-// sortCandidatesByTier P52: 按 best tier 排序(token_plan > api > free)
-// 同 tier 内保留原顺序(由 policy.Order 处理 chain priority)
-// 注意:这是 stable sort,所以同 tier 内的相对顺序不变
-func sortCandidatesByTier(in []ProviderRoute, pools map[string]*keypool.Pool) []ProviderRoute {
-	tierRank := map[string]int{"token_plan": 0, "api": 1, "free": 2}
-	items := make([]struct {
-		cand ProviderRoute
-		rank int
-	}, len(in))
-	for i, c := range in {
-		rank := 3 // unknown tier 排最后
-		if pool, ok := pools[c.Name]; ok && pool != nil {
-			best := pool.BestTier()
-			if best != "" {
-				if r, ok := tierRank[best]; ok {
-					rank = r
-				}
-			}
-		}
-		items[i] = struct {
-			cand ProviderRoute
-			rank int
-		}{cand: c, rank: rank}
-	}
-	// stable sort by rank
-	for i := 1; i < len(items); i++ {
-		for j := i; j > 0 && items[j].rank < items[j-1].rank; j-- {
-			items[j], items[j-1] = items[j-1], items[j]
-		}
-	}
-	out := make([]ProviderRoute, len(items))
-	for i, it := range items {
-		out[i] = it.cand
-	}
-	return out
 }
 
 // filterCandidates 协议匹配 + 健康 + 已注册
@@ -270,10 +231,20 @@ func detectProtocol(path string) provider.Protocol {
 	}
 }
 
+// KeyCandidate P64: 把候选从 provider 维度展开到 (provider, tier) 维度
+// 嵌入 ProviderRoute 保留 Name/Model/Priority/Weight 字段;Tier 标注该候选
+// 来自哪个 billing_source 桶(token_plan / api / free)
+type KeyCandidate struct {
+	ProviderRoute
+	Tier string
+}
+
 // RouteIterator 持有排序好的候选,Next() 取下一个可用
+// P64: candidates 类型从 []ProviderRoute 改为 []KeyCandidate,
+// 跨 provider 拉平为 token_plan → api → free 三层
 type RouteIterator struct {
 	alias          string
-	candidates     []ProviderRoute
+	candidates     []KeyCandidate
 	pools          map[string]*keypool.Pool
 	manager        *provider.Manager
 	providerKeyIDs []uint // P34: 限定的 ProviderKey ID 子集(空 = 不限)
@@ -281,6 +252,8 @@ type RouteIterator struct {
 }
 
 // Next 返回下一个可用的 RouteResult
+// P64: 每个候选指定 tier,Next() 调用 AcquireFromTier(不做 provider 内降级)
+// 失败 → 推进到下一 KeyCandidate(可能是同 tier 下一个 provider,或下一 tier)
 func (it *RouteIterator) Next() (*RouteResult, error) {
 	for it.current < len(it.candidates) {
 		c := it.candidates[it.current]
@@ -291,32 +264,73 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 			continue
 		}
 
-		var k *keypool.Key
 		if pool, ok := it.pools[c.Name]; ok && pool != nil {
 			var (
-				kk  *keypool.Key
+				k   *keypool.Key
 				err error
 			)
 			if len(it.providerKeyIDs) > 0 {
-				// P34: 限定 ProviderKey ID 子集
-				kk, err = pool.AcquireFromIDs(it.providerKeyIDs)
+				// P34 + P64: 限定 ProviderKey ID 子集,同时指定 tier
+				idSet := make(map[uint]struct{}, len(it.providerKeyIDs))
+				for _, id := range it.providerKeyIDs {
+					idSet[id] = struct{}{}
+				}
+				k, err = pool.AcquireFromTier(c.Tier, idSet)
 			} else {
-				kk, err = pool.Acquire()
+				k, err = pool.AcquireFromTier(c.Tier, nil)
 			}
 			if err != nil {
 				continue
 			}
-			k = kk
+			return &RouteResult{
+				ProviderName: c.Name,
+				ModelID:      c.Model,
+				Key:          k,
+				Protocol:     pv.Protocol(),
+			}, nil
 		}
 
+		// 没有 pool(测试场景)— 仍返回 RouteResult,Key=nil
 		return &RouteResult{
 			ProviderName: c.Name,
 			ModelID:      c.Model,
-			Key:          k,
 			Protocol:     pv.Protocol(),
 		}, nil
 	}
 	return nil, ErrNoRoute
+}
+
+// buildKeyCandidates P64: 跨 provider 拉平,先 token_plan 全部 → 再 api → 再 free
+// 同 tier 内 stable 保留输入顺序(由 policy.Order 排出的 provider 顺序)
+// 每个 provider 按 pool.Tiers() 展开成它声明的所有 tier
+//   - provider 没有 pool → 兜底按 "api" 产一个 KeyCandidate
+//   - provider 没有声明任何 key → pool.Tiers() 返回 [],同样兜底 "api"
+//   (调用方 AcquireFromTier 实际拿不到 key 时会自动 continue)
+func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool) []KeyCandidate {
+	tierOrder := []string{"token_plan", "api", "free"}
+	buckets := make(map[string][]KeyCandidate, 3)
+	for _, t := range tierOrder {
+		buckets[t] = nil
+	}
+
+	for _, r := range routes {
+		var tiers []string
+		if pool, ok := pools[r.Name]; ok && pool != nil {
+			tiers = pool.Tiers()
+		}
+		if len(tiers) == 0 {
+			tiers = []string{"api"} // 兜底
+		}
+		for _, t := range tiers {
+			buckets[t] = append(buckets[t], KeyCandidate{ProviderRoute: r, Tier: t})
+		}
+	}
+
+	out := make([]KeyCandidate, 0, len(routes)*3)
+	for _, t := range tierOrder {
+		out = append(out, buckets[t]...)
+	}
+	return out
 }
 
 // Aliases 返回所有已注册的别名

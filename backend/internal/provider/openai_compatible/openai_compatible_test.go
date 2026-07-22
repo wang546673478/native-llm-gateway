@@ -85,7 +85,7 @@ func TestSendRequest_RateLimitTriggersCooling(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(429)
-		w.Write([]byte(`{"error":{"message":"rate limit"}}`))
+		w.Write([]byte(`{"error":{"message":"too many requests"}}`))
 	}))
 	defer upstream.Close()
 

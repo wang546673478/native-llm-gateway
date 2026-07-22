@@ -187,3 +187,115 @@ func TestPool_Status(t *testing.T) {
 		t.Errorf("DisabledKeys = %d, want 1", s.DisabledKeys)
 	}
 }
+
+// === P64 AcquireFromTier 测试 ===
+
+func newTestKeysWithTiers(tiers []string) []*Key {
+	keys := make([]*Key, len(tiers))
+	now := time.Now()
+	for i, t := range tiers {
+		keys[i] = &Key{
+			ID:            string(rune('a' + i)),
+			ProviderName:  "test",
+			Name:          "k" + string(rune('a'+i)),
+			Key:           "sk-test",
+			Status:        KeyStatusActive,
+			BillingSource: t,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
+	}
+	return keys
+}
+
+func TestAcquireFromTier_OnlyRequestedTier(t *testing.T) {
+	// 池里有 token_plan 和 api key,指定 api → 只返回 api
+	keys := newTestKeysWithTiers([]string{"token_plan", "api"})
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	k, err := pool.AcquireFromTier("api", nil)
+	if err != nil {
+		t.Fatalf("AcquireFromTier(api): %v", err)
+	}
+	if k.BillingSource != "api" {
+		t.Errorf("got tier %s, want api", k.BillingSource)
+	}
+
+	k, err = pool.AcquireFromTier("token_plan", nil)
+	if err != nil {
+		t.Fatalf("AcquireFromTier(token_plan): %v", err)
+	}
+	if k.BillingSource != "token_plan" {
+		t.Errorf("got tier %s, want token_plan", k.BillingSource)
+	}
+}
+
+func TestAcquireFromTier_EmptyBucketErr(t *testing.T) {
+	// 池里只有 token_plan,指定 api → ErrNoAvailableKey(不降级)
+	keys := newTestKeysWithTiers([]string{"token_plan"})
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	_, err := pool.AcquireFromTier("api", nil)
+	if !errors.Is(err, ErrNoAvailableKey) {
+		t.Errorf("expected ErrNoAvailableKey, got %v", err)
+	}
+}
+
+func TestAcquire_BackwardCompatibleTierFallback(t *testing.T) {
+	// P64 保留 Acquire() 的 tier 降级兼容入口
+	// token_plan 死了 → Acquire() 降级到 api
+	now := time.Now()
+	tpKey := &Key{
+		ID: "z", ProviderName: "test", Name: "kz", Key: "sk",
+		Status: KeyStatusDisabled, BillingSource: "token_plan",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	apiKey := &Key{
+		ID: "a", ProviderName: "test", Name: "ka", Key: "sk",
+		Status: KeyStatusActive, BillingSource: "api",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	pool := NewPool("test", []*Key{tpKey, apiKey}, NewScheduler("round_robin"), Config{})
+
+	k, err := pool.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if k.BillingSource != "api" {
+		t.Errorf("expected api fallback, got %s", k.BillingSource)
+	}
+}
+
+func TestAcquireFromTier_AllowedIDFilter(t *testing.T) {
+	// P34 + P64: 指定 tier + ID 白名单
+	now := time.Now()
+	mkKey := func(id, tier string) *Key {
+		return &Key{
+			ID: id, ProviderName: "test", Name: "k", Key: "sk",
+			Status: KeyStatusActive, BillingSource: tier,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	keys := []*Key{
+		mkKey("100", "token_plan"),
+		mkKey("200", "token_plan"),
+		mkKey("300", "api"),
+	}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	// 只允许 ID=100 的 token_plan key
+	set := map[uint]struct{}{100: {}}
+	k, err := pool.AcquireFromTier("token_plan", set)
+	if err != nil {
+		t.Fatalf("AcquireFromTier: %v", err)
+	}
+	if k.ID != "100" {
+		t.Errorf("got ID %s, want 100", k.ID)
+	}
+
+	// ID=300 是 api,白名单只有 100 → api 桶空
+	_, err = pool.AcquireFromTier("api", set)
+	if !errors.Is(err, ErrNoAvailableKey) {
+		t.Errorf("expected ErrNoAvailableKey, got %v", err)
+	}
+}

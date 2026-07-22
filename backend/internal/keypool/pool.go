@@ -63,10 +63,18 @@ func BuildPoolFromStrings(providerName string, plainKeys []string, cfg Config) *
 
 // Acquire 获取一个可用的 Key
 //   1. 遍历 keys,若 COOLING 且 cooling_until < now,自动恢复为 ACTIVE
-//   2. Scheduler 从可用 keys 中选一个
+//   2. 按 tier 降级顺序尝试:token_plan → api → free
 //   3. 若没有可用,返回 ErrNoAvailableKey
+// P64: 这里保留 tier 降级是作为"无 tier 信息的旧 caller"的兼容入口
+// 新调用方应明确用 AcquireFromTier
 func (p *Pool) Acquire() (*Key, error) {
-	return p.acquireFiltered(nil)
+	for _, tier := range []string{"token_plan", "api", "free"} {
+		k, err := p.AcquireFromTier(tier, nil)
+		if err == nil {
+			return k, nil
+		}
+	}
+	return nil, ErrNoAvailableKey
 }
 
 // AcquireFromIDs P34: 从指定 ID 子集里挑 Key(Gateway Key 绑定了 ProviderKeyIDs 时用)
@@ -81,13 +89,23 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
 	for _, id := range allowedIDs {
 		set[id] = struct{}{}
 	}
-	return p.acquireFiltered(set)
+	for _, tier := range []string{"token_plan", "api", "free"} {
+		k, err := p.AcquireFromTier(tier, set)
+		if err == nil {
+			return k, nil
+		}
+	}
+	return nil, ErrNoAvailableKey
 }
 
-// acquireFiltered 内部实现,allowedIDSet 为 nil 表示用所有 keys
-// P48: 按 BillingSource 分桶,优先返回 token_plan key,没有再 api,最后 free
-// 同 tier 内用 Scheduler(round-robin)
-func (p *Pool) acquireFiltered(allowedIDSet map[uint]struct{}) (*Key, error) {
+// AcquireFromTier P64: 只从指定 tier 桶里挑 key,不做 tier 间降级
+// tier ∈ {"token_plan", "api", "free"};空字符串按 "api" 兜底
+// allowedIDSet nil = 不限 ID;非 nil = 只从 ID 在集合里的 key 里挑
+// 该 tier 桶为空时直接返回 ErrNoAvailableKey,让 Router 推进到下一档候选
+func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}) (*Key, error) {
+	if tier == "" {
+		tier = "api" // 兜底
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -120,26 +138,21 @@ func (p *Pool) acquireFiltered(allowedIDSet map[uint]struct{}) (*Key, error) {
 		return nil, ErrNoAvailableKey
 	}
 
-	// 3. P48: 按 billing_source 分桶,优先 token_plan > api > free
-	tierOrder := []string{"token_plan", "api", "free"}
-	for _, tier := range tierOrder {
-		bucket := make([]*Key, 0, len(usable))
-		for _, k := range usable {
-			tierOfKey := k.BillingSource
-			if tierOfKey == "" {
-				tierOfKey = "api" // 兜底
-			}
-			if tierOfKey == tier {
-				bucket = append(bucket, k)
-			}
+	// 3. P64: 只从指定 tier 桶里挑,不再做 tier 降级
+	bucket := make([]*Key, 0, len(usable))
+	for _, k := range usable {
+		bs := k.BillingSource
+		if bs == "" {
+			bs = "api" // 兜底
 		}
-		if len(bucket) > 0 {
-			return p.scheduler.Select(bucket)
+		if bs == tier {
+			bucket = append(bucket, k)
 		}
 	}
-
-	// 所有 bucket 都没有(理论上不会到这)— 兜底用全量
-	return p.scheduler.Select(usable)
+	if len(bucket) == 0 {
+		return nil, ErrNoAvailableKey
+	}
+	return p.scheduler.Select(bucket)
 }
 
 // parseKeyIDUint 把 Key.ID (格式 "<provider>-key-<N>" 或纯数字字符串) 转 uint
@@ -195,7 +208,7 @@ func (p *Pool) ReportRateLimit(k *Key, retryAfter time.Duration) {
 }
 
 // ReportError 上报非 429 错误
-// 当前实现:auth / invalid_request 直接 DISABLED;
+// 当前实现:auth / invalid_request / quota_exceeded 直接 DISABLED;
 // 其他错误仅累计计数,不立即禁用
 func (p *Pool) ReportError(k *Key, errType string) {
 	p.mu.Lock()
@@ -207,8 +220,11 @@ func (p *Pool) ReportError(k *Key, errType string) {
 	k.UpdatedAt = now
 
 	switch errType {
-	case "auth", "invalid_request":
-		// 401/403/400 通常说明 Key 本身有问题,直接禁用
+	case "auth", "invalid_request", "quota_exceeded":
+		// auth: 401/403 — Key 本身有问题
+		// invalid_request: 400 — 请求体有问题,这个 Key 配错了
+		// quota_exceeded: 402 / 429 quota / 403 quota — 配额耗尽,该 Key 不能再用
+		// P49+P64: quota_exceeded 也直接 DISABLED,让 Router 推进到下一候选(api tier)
 		k.Status = KeyStatusDisabled
 	}
 }
