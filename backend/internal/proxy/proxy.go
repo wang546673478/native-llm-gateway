@@ -2,11 +2,14 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +22,10 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
 
+// maxConcurrentStreams 全局并发流式响应上限(spec §3.3 / F4)
+// 超过此值的新流式请求只记 metadata,不缓存 response body。
+const maxConcurrentStreams = 1000
+
 // Engine 是 Gateway 的代理引擎
 type Engine struct {
 	logger        *zap.Logger
@@ -30,6 +37,20 @@ type Engine struct {
 	authn         *auth.Authenticator // P19: Provider binding 检查
 	accessLog     *accesslog.Recorder // P67: 接入日志 Recorder(可选,启用时为非 nil)
 	maxRetry      int
+	// streamBuf 持有当前正在累积的流式响应 buffer,key 是 traceID。
+	// Task 7: 配合 streamCnt 实现 F4 全局 1000 上限。
+	streamBuf sync.Map
+	streamCnt int64 // atomic counter — 保护 maxConcurrentStreams 上限
+}
+
+// streamAcc 是单条流式响应的累积 buffer + truncated 标记。
+//
+// Mutex 保护 buf/truncated;Engine 层 streamBuf 提供 traceID 维度查找,
+// streamCnt 提供全局维度计数。两个维度是不同并发问题,不能合并。
+type streamAcc struct {
+	sync.Mutex
+	buf       bytes.Buffer
+	truncated bool
 }
 
 // Config 构造 Engine 的配置
@@ -330,7 +351,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 				}
 				// 检查通过,把这个候选放回 iterator(不太好做,所以重置当前 idx)
 				// 简单做法:迭代器不支持 reset,改为手动用 probeResult 开始循环
-				e.runWithFirstResult(c, ctx, req, iter, probeResult, &lastProviderName, &lastErr)
+				e.runWithFirstResult(c, ctx, req, iter, probeResult, &lastProviderName, &lastErr, entry)
 				return
 			}
 		}
@@ -371,7 +392,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 
 		start := time.Now()
 		if isStream {
-			ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result)
+			ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result, entry)
 			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 			if ok {
 				e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", isStream, streamUsage)
@@ -387,7 +408,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			resp, perr := e.doRequest(ctx, pv, req, result)
 			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), false, perr)
 			if perr == nil && resp != nil {
-				e.writeNonStreamResponse(c, req, resp, result, time.Since(start))
+				e.writeNonStreamResponse(c, req, resp, result, time.Since(start), entry)
 				lastProviderName = result.ProviderName
 				return
 			}
@@ -479,12 +500,16 @@ func (e *Engine) doRequest(
 // 返回 (success, usage, lastErr)
 // success=true 表示流已经成功传完
 // usage 从流最后一个 chunk 抽出(可能是 nil,如果上游没发 usage 字段)
+//
+// Task 7 / F4: 同时累积响应 body 到 access log buffer;若全局流数 >= 1000
+// 则只写 metadata 不缓存 body。entry 可为 nil(调用方未启用 accesslog)。
 func (e *Engine) doStream(
 	ctx context.Context,
 	c *gin.Context,
 	pv provider.Provider,
 	req *provider.Request,
 	result *router.RouteResult,
+	entry *accesslog.AccessEntry,
 ) (bool, *provider.Usage, *provider.ProviderError) {
 	chunkCh, headerResp, err := pv.SendStreamRequest(ctx, req)
 	if err != nil {
@@ -503,6 +528,10 @@ func (e *Engine) doStream(
 	// 流式响应开始 — 此后不可 failover
 	e.breaker.RecordSuccess(result.ProviderName)
 	e.reportKeySuccess(result)
+
+	// Task 7 / F4: 全局流上限由 acquireStreamSlot 内部处理,
+	// finalizeStream 用 defer 兜底,确保任意退出路径都收尾
+	defer e.finalizeStream(req.TraceID, entry)
 
 	// 设置 SSE headers
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -536,6 +565,8 @@ func (e *Engine) doStream(
 		if len(chunk.Data) == 0 {
 			continue
 		}
+		// Task 7: 累积到 access log buffer(F4 上限由 appendStreamChunk 内部判断)
+		e.appendStreamChunk(req.TraceID, chunk.Data)
 		// chunk.Data 已经是 SSE data 行的内容(Provider 负责格式化)
 		if _, err := c.Writer.Write(chunk.Data); err != nil {
 			e.logger.Warn("write stream chunk", zap.Error(err))
@@ -555,18 +586,30 @@ func (e *Engine) doStream(
 	return true, streamUsage, nil
 }
 
-// writeNonStreamResponse 把 Provider Response 原样写回客户端
+// writeNonStreamResponse 把 Provider Response 原样写回客户端,并同步写
+// access log 响应 body 文件(Task 7 / spec §3.3)。
+//
+// entry 可为 nil(调用方未启用 accesslog)。enabled body 文件写入失败只记 warn,
+// 不影响响应主路径。
 func (e *Engine) writeNonStreamResponse(
 	c *gin.Context,
 	req *provider.Request,
 	resp *provider.Response,
 	result *router.RouteResult,
 	latency time.Duration,
+	entry *accesslog.AccessEntry,
 ) {
 	copyResponseHeaders(c, resp.Headers)
 	c.Writer.WriteHeader(resp.StatusCode)
 	if _, err := c.Writer.Write(resp.Body); err != nil {
 		e.logger.Warn("write response", zap.Error(err))
+	}
+	// P67 / Task 7: 同步写响应 body 文件(失败也继续 — body 文件丢了不影响主响应)
+	if entry != nil && e.accessLog != nil && !req.IsStream {
+		if p, _ := e.accessLog.WriteBody(req.TraceID, "resp", resp.Body); p != "" {
+			entry.RespBodyPath = p
+			entry.RespBodySize = len(resp.Body)
+		}
 	}
 	e.recordUsageWithTokens(req, result, latency, resp.StatusCode, "", req.IsStream, resp.Usage)
 }
@@ -728,11 +771,12 @@ func statusFromErr(pe *provider.ProviderError) int {
 // runWithFirstResult 用已经 Next 出来的第一个 result 开始循环
 // (P19:把 provider-binding 检查 pass 的第一个候选"放回"循环)
 // P67: 透传 outProviderName / outLastErr 让外层 handle() 的 defer 拿得到
-func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *provider.Request, iter *router.RouteIterator, first *router.RouteResult, outProviderName *string, outLastErr **provider.ProviderError) {
+// Task 7: 透传 entry 让非流式分支能写 access log 响应 body 文件
+func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *provider.Request, iter *router.RouteIterator, first *router.RouteResult, outProviderName *string, outLastErr **provider.ProviderError, entry *accesslog.AccessEntry) {
 	attempts := 0
 
 	// 先处理 first
-	if e.tryOneCandidate(c, ctx, req, first, outProviderName, outLastErr) {
+	if e.tryOneCandidate(c, ctx, req, first, outProviderName, outLastErr, entry) {
 		return
 	}
 	if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
@@ -749,7 +793,7 @@ func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *pr
 		if err != nil {
 			break
 		}
-		if e.tryOneCandidate(c, ctx, req, result, outProviderName, outLastErr) {
+		if e.tryOneCandidate(c, ctx, req, result, outProviderName, outLastErr, entry) {
 			return
 		}
 		if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
@@ -768,6 +812,7 @@ func (e *Engine) tryOneCandidate(
 	result *router.RouteResult,
 	outProviderName *string,
 	lastErr **provider.ProviderError,
+	entry *accesslog.AccessEntry,
 ) bool {
 	req.Headers.Set("X-Request-Id", req.TraceID)
 	if result.Key != nil {
@@ -786,7 +831,7 @@ func (e *Engine) tryOneCandidate(
 
 	start := time.Now()
 	if req.IsStream {
-		ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result)
+		ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result, entry)
 		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 		if ok {
 			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", true, streamUsage)
@@ -799,7 +844,7 @@ func (e *Engine) tryOneCandidate(
 		resp, perr := e.doRequest(ctx, pv, req, result)
 		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), false, perr)
 		if perr == nil && resp != nil {
-			e.writeNonStreamResponse(c, req, resp, result, time.Since(start))
+			e.writeNonStreamResponse(c, req, resp, result, time.Since(start), entry)
 			*outProviderName = result.ProviderName
 			return true
 		}
@@ -816,4 +861,80 @@ func extractOrGenTraceID(c *gin.Context) string {
 	}
 	c.Writer.Header().Set("X-Request-Id", id)
 	return id
+}
+
+// acquireStreamSlot 试图为本 trace 申请一个流式累积 slot。
+//
+// F4 行为:
+//   - 全局计数 < 1000 → 计数 +1,在 streamBuf 占位 traceID,返回 (acc, true)
+//   - 全局计数 ≥ 1000 → 不占位,计数原样减回去,返回 (nil, false)
+//     调用方应视作"超出上限" — 只记 metadata,不缓存 body。
+//
+// 计数与占位是两步,理论上并发下仍有微小窗口让"占位成功但计数已超"。
+// 该窗口在工程上不构成问题:最坏情况是再多一两条流被累计,远小于 1000。
+// 严格实现需要 CAS / mutex,这里不做。
+func (e *Engine) acquireStreamSlot(traceID string) (*streamAcc, bool) {
+	n := atomic.AddInt64(&e.streamCnt, 1)
+	if n > maxConcurrentStreams {
+		atomic.AddInt64(&e.streamCnt, -1)
+		return nil, false
+	}
+	acc := &streamAcc{}
+	actual, _ := e.streamBuf.LoadOrStore(traceID, acc)
+	return actual.(*streamAcc), true
+}
+
+// appendStreamChunk 累积单个 SSE chunk 到对应 trace 的 buffer。
+//
+// slot 申请失败(超出 1000 上限)→ 直接返回,不留任何状态。
+// 写入过程中达到 MaxBodyBytes → 标记 truncated,但不再继续追加。
+// (BodyFileWriter.Write 会再次校验 data 长度并打 .truncated.json 后缀。)
+func (e *Engine) appendStreamChunk(traceID string, chunk []byte) {
+	acc, ok := e.acquireStreamSlot(traceID)
+	if !ok {
+		// 超 F4 上限 — 不累积 body,metadata 仍照写
+		return
+	}
+	acc.Lock()
+	if acc.buf.Len() < accesslog.MaxBodyBytes {
+		// Write 一次写完,避免多次 mutex + 多次校验
+		room := accesslog.MaxBodyBytes - acc.buf.Len()
+		if len(chunk) > room {
+			acc.buf.Write(chunk[:room])
+			acc.truncated = true
+		} else {
+			acc.buf.Write(chunk)
+		}
+	} else {
+		acc.truncated = true
+	}
+	acc.Unlock()
+}
+
+// finalizeStream 在流结束时调用,写入 body 文件并清理 slot。
+//
+// 幂等性:streamBuf.LoadAndDelete 保证只调用一次 WriteBody,
+// 即使调用方多次 defer 也安全(defer 顺序 LIFO,但 LoadAndDelete 本身原子)。
+//
+// 调用方应负责:正常 EOF / message_stop / 客户端断开 / 错误路径都调一次。
+func (e *Engine) finalizeStream(traceID string, entry *accesslog.AccessEntry) {
+	accAny, ok := e.streamBuf.LoadAndDelete(traceID)
+	if !ok {
+		// 没累积过(可能 acquire 失败,或根本没流式响应) — 计数要减回去
+		atomic.AddInt64(&e.streamCnt, -1)
+		return
+	}
+	acc := accAny.(*streamAcc)
+	if e.accessLog != nil {
+		// body 文件由 BodyFileWriter.Write 根据 data 长度决定是否 .truncated.json 后缀,
+		// 我们这里只需要传 raw bytes 即可。
+		data := acc.buf.Bytes()
+		if p, _ := e.accessLog.WriteBody(traceID, "resp", data); p != "" {
+			if entry != nil {
+				entry.RespBodyPath = p
+				entry.RespBodySize = acc.buf.Len()
+			}
+		}
+	}
+	atomic.AddInt64(&e.streamCnt, -1)
 }

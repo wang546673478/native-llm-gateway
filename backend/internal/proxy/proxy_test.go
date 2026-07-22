@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -372,3 +374,48 @@ func TestCopyResponseHeadersStripsHopByHop(t *testing.T) {
 // silence unused if some imports trimmed
 var _ = json.NewEncoder
 var _ = bytes.NewReader
+
+// TestStreamBuffer_GlobalCap 验证 F4 全局 1000 上限:
+// 启动 1500 个 goroutines 并发 acquire stream slot,期望前 ~1000 拿到,
+// 其余 fail。计数器最终应回 0(slot 没有被 finalize,本测试只验证 acquire)。
+func TestStreamBuffer_GlobalCap(t *testing.T) {
+	e := &Engine{}
+
+	const total = 1500
+	const cap = maxConcurrentStreams
+
+	var (
+		wg          sync.WaitGroup
+		acquiredN   int64
+		rejectedN   int64
+		startBarrier sync.WaitGroup
+	)
+	startBarrier.Add(1)
+
+	wg.Add(total)
+	for i := 0; i < total; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			startBarrier.Wait() // 让所有 goroutine 同步出发,增大并发争用
+			_, ok := e.acquireStreamSlot(fmt.Sprintf("trace-%d", idx))
+			if ok {
+				atomic.AddInt64(&acquiredN, 1)
+			} else {
+				atomic.AddInt64(&rejectedN, 1)
+			}
+		}(i)
+	}
+
+	startBarrier.Done()
+	wg.Wait()
+
+	if acquiredN != cap {
+		t.Errorf("acquired = %d, want %d", acquiredN, cap)
+	}
+	if rejectedN != total-cap {
+		t.Errorf("rejected = %d, want %d", rejectedN, total-cap)
+	}
+	if got := atomic.LoadInt64(&e.streamCnt); got != int64(cap) {
+		t.Errorf("streamCnt = %d, want %d (no finalize called)", got, cap)
+	}
+}
