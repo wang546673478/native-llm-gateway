@@ -13,8 +13,8 @@
 
       <n-space style="margin-bottom: 12px" :wrap="false">
         <n-input
-          v-model:value="filterModel"
-          placeholder="Model"
+          v-model:value="filterTraceId"
+          placeholder="Trace ID"
           clearable
           style="width: 220px"
         />
@@ -149,7 +149,7 @@ const pagination = reactive({
   pageSizes: [20, 50, 100, 200] as number[],
 })
 
-const filterModel = ref('')
+const filterTraceId = ref('')
 const filterKey = ref<string | null>(null)
 const filterStatus = ref<string[]>([])
 const keyOptions = ref<{ label: string; value: string }[]>([])
@@ -225,7 +225,7 @@ async function load() {
       limit: pagination.pageSize,
       offset: (pagination.page - 1) * pagination.pageSize,
     }
-    if (filterModel.value) params.model = filterModel.value
+    if (filterTraceId.value) params.trace_id = filterTraceId.value
     if (filterKey.value) params.gateway_key = filterKey.value
     if (filterStatus.value.length > 0) params.status = filterStatus.value.join(',')
 

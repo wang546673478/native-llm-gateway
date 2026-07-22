@@ -33,6 +33,7 @@ type QueryFilter struct {
 	GatewayKey    string
 	ProviderName  string
 	ModelID       string
+	TraceID       string
 	ErrorType     string
 	StatusMin     int
 	StatusMax     int
@@ -224,6 +225,9 @@ func (s *Store) buildWhere(q *gorm.DB, f QueryFilter) *gorm.DB {
 	}
 	if f.ModelID != "" {
 		q = q.Where("(requested_model = ? OR final_model = ?)", f.ModelID, f.ModelID)
+	}
+	if f.TraceID != "" {
+		q = q.Where("trace_id = ?", f.TraceID)
 	}
 	if f.ErrorType != "" {
 		q = q.Where("error_type = ?", f.ErrorType)

@@ -470,6 +470,7 @@ func parseStatusBuckets(s string) (buckets []accesslog.StatusBucket, unknown []s
 //   gateway_key  精确匹配 gateway_key_name
 //   provider     精确匹配 provider_name
 //   model        匹配 requested_model 或 final_model
+//   trace_id     精确匹配 trace_id
 //   error_type   精确匹配 error_type
 //   status       F9 多值,逗号分隔;OR 拼接
 //   limit        默认 20,上限 200(Store.List 内部夹紧)
@@ -484,6 +485,7 @@ func (a *Admin) listAccessLogs(c *gin.Context) {
 		GatewayKey:   c.Query("gateway_key"),
 		ProviderName: c.Query("provider"),
 		ModelID:      c.Query("model"),
+		TraceID:      c.Query("trace_id"),
 		ErrorType:    c.Query("error_type"),
 	}
 	if t, ok := parseTime(c.Query("start")); ok {
