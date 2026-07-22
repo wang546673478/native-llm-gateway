@@ -25,7 +25,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
+import { h, onMounted, reactive, ref } from 'vue'
 import { NButton, NCard, NDataTable, NInput, NSpace, NSpin, NText, NTag } from 'naive-ui'
 import { api, type AggregateRow, type ModelProviderRow } from '../api/client'
 
@@ -41,29 +41,29 @@ const start = ref('')
 const end = ref('')
 
 // P66: 最近请求后端分页状态
-const pagination = ref({
+// 用 reactive 包一个对象,这样 n-data-table 通过 :pagination 拿到的
+// 是响应式对象,内部 page/pageSize/itemCount 变化会触发分页器重渲
+const pagination = reactive({
   page: 1,
   pageSize: 20,
   itemCount: 0,
   showSizePicker: true,
-  pageSizes: [20, 50, 100, 200],
-  onUpdatePage: (p: number) => onPageChange(p),
-  onUpdatePageSize: (s: number) => onPageSizeChange(s),
+  pageSizes: [20, 50, 100, 200] as number[],
 })
 
 function onPageChange(page: number) {
-  pagination.value.page = page
+  pagination.page = page
   load()
 }
 function onPageSizeChange(pageSize: number) {
-  pagination.value.pageSize = pageSize
-  pagination.value.page = 1
+  pagination.pageSize = pageSize
+  pagination.page = 1
   load()
 }
 
 // query 是「重新查询」(用户改时间窗) — 重置 page=1
 async function query() {
-  pagination.value.page = 1
+  pagination.page = 1
   providerMap.value = {} // P65: 时间窗变了 provider 缓存也清
   await load()
 }
@@ -134,8 +134,8 @@ async function load() {
   try {
     const params: any = {
       // P66: 后端分页 — 带 limit/offset
-      limit: pagination.value.pageSize,
-      offset: (pagination.value.page - 1) * pagination.value.pageSize,
+      limit: pagination.pageSize,
+      offset: (pagination.page - 1) * pagination.pageSize,
     }
     if (start.value) params.start = start.value
     if (end.value) params.end = end.value
@@ -145,7 +145,7 @@ async function load() {
     ])
     rows.value = agg.rows
     records.value = rec.records
-    pagination.value.itemCount = rec.total // P66: 总数驱动分页器
+    pagination.itemCount = rec.total // P66: 总数驱动分页器
   } finally {
     loading.value = false
   }
