@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,10 +102,21 @@ func (r *Retention) runOnce(ctx context.Context) {
 	// 删 body 文件
 	for _, e := range rows {
 		if e.ReqBodyPath != "" {
-			_ = os.Remove(filepath.Join(r.bf.RootDir(), e.ReqBodyPath))
+			rel := filepath.Clean(e.ReqBodyPath)
+			// defense-in-depth:即使 DB 行被污染,也不会删 rootDir 之外的文件
+			if !filepath.IsAbs(rel) && !strings.Contains(rel, "..") {
+				_ = os.Remove(filepath.Join(r.bf.RootDir(), rel))
+			} else {
+				r.logger.Warn("retention skip suspicious req_body_path", zap.String("path", e.ReqBodyPath))
+			}
 		}
 		if e.RespBodyPath != "" {
-			_ = os.Remove(filepath.Join(r.bf.RootDir(), e.RespBodyPath))
+			rel := filepath.Clean(e.RespBodyPath)
+			if !filepath.IsAbs(rel) && !strings.Contains(rel, "..") {
+				_ = os.Remove(filepath.Join(r.bf.RootDir(), rel))
+			} else {
+				r.logger.Warn("retention skip suspicious resp_body_path", zap.String("path", e.RespBodyPath))
+			}
 		}
 	}
 

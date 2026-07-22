@@ -67,11 +67,51 @@ func (b *BodyFileWriter) Write(traceID, kind string, data []byte) (string, error
 }
 
 // Read 读取相对于 rootDir 的 body 文件内容。
+//
+// 安全性(relPath containment,F2/F-defense-in-depth):
+//   - 拒绝空 relPath
+//   - 拒绝绝对路径(filepath.IsAbs)
+//   - filepath.Clean 规范化后再 join,然后验证最终结果仍在 rootDir 内
+//
+// 这样即使将来某条 DB 行的 req_body_path 被污染为 "../etc/passwd",
+// 也会被此处拦下,不会越权读到 rootDir 之外的文件。
 func (b *BodyFileWriter) Read(relPath string) ([]byte, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	return os.ReadFile(filepath.Join(b.rootDir, relPath))
+	if err := b.checkContainment(relPath); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(filepath.Join(b.rootDir, filepath.Clean(relPath)))
+}
+
+// checkContainment 校验 relPath 经 Clean 后仍位于 rootDir 之内。
+//
+// 设计要点:
+//   - relPath 必须非空、非绝对路径
+//   - filepath.Clean 消除 "../" 等相对穿越
+//   - 最终绝对路径必须以 rootDir + PathSeparator 开头(避免
+//     /var/data 与 /var/data2 这种"看起来包含但实际不同"的情况)
+func (b *BodyFileWriter) checkContainment(relPath string) error {
+	if relPath == "" {
+		return os.ErrNotExist
+	}
+	if filepath.IsAbs(relPath) {
+		return os.ErrPermission
+	}
+	cleanRel := filepath.Clean(relPath)
+	absRoot, err := filepath.Abs(b.rootDir)
+	if err != nil {
+		return err
+	}
+	absPath, err := filepath.Abs(filepath.Join(b.rootDir, cleanRel))
+	if err != nil {
+		return err
+	}
+	if absPath != absRoot && !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) {
+		return os.ErrPermission
+	}
+	return nil
 }
 
 // RootDir 返回 rootDir。
