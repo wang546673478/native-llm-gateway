@@ -2,7 +2,6 @@ package accesslog
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -108,13 +107,15 @@ func (r *Recorder) RecordAsync(e *AccessEntry) {
 	r.buf.Push(e)
 }
 
-// WriteBody 同步写 body,返回相对路径 + 是否 truncated。
+// WriteBody 同步写 body,返回相对路径 + 写入错误。
 //
-// 注意:BodyFileWriter.Write 只返回 (relPath, error);truncated 标记写在
-// 文件名后缀(.truncated.json,见 bodyfile.go:53)。这里从 path 后缀反推 bool。
-func (r *Recorder) WriteBody(traceID, kind string, data []byte) (string, bool) {
+// canonical contract 与 BodyFileWriter.Write 一致:(string, error)。
+// truncated 标记不通过返回值暴露,而是编码在 relPath 的文件名后缀
+// (.truncated.json,见 bodyfile.go)。需要判断是否被截断时调用方应使用
+// accesslog.IsTruncated(path)。
+func (r *Recorder) WriteBody(traceID, kind string, data []byte) (string, error) {
 	if !r.cfg.Enabled {
-		return "", false
+		return "", nil
 	}
 	path, err := r.bf.Write(traceID, kind, data)
 	if err != nil {
@@ -122,10 +123,9 @@ func (r *Recorder) WriteBody(traceID, kind string, data []byte) (string, bool) {
 			zap.String("trace_id", traceID),
 			zap.String("kind", kind),
 			zap.Error(err))
-		return "", false
+		return "", err
 	}
-	trunc := strings.HasSuffix(path, ".truncated.json")
-	return path, trunc
+	return path, nil
 }
 
 // ReadBody 暴露给 handler 用(读 body 文件)

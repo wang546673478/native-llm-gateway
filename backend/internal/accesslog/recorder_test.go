@@ -38,7 +38,10 @@ func TestRecorder_RecordAsyncStoresAfterFlush(t *testing.T) {
 	defer r.Close()
 
 	// 写 body
-	reqPath, _ := r.WriteBody("trace-1", "req", []byte("{}"))
+	reqPath, err := r.WriteBody("trace-1", "req", []byte("{}"))
+	if err != nil {
+		t.Errorf("WriteBody: %v", err)
+	}
 	if reqPath == "" {
 		t.Errorf("WriteBody returned empty path")
 	}
