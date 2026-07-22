@@ -30,6 +30,20 @@ export interface ProvidersResp {
   count: number
 }
 
+// /providers/registered — 比 /providers 轻量,只含 name/protocol/loaded/models
+// AccessLogs.vue 用它做 Provider/Model 下拉(spec §0)
+export interface RegisteredProvider {
+  name: string
+  protocol: string
+  loaded: boolean
+  models: string[]
+}
+
+export interface RegisteredProvidersResp {
+  providers: RegisteredProvider[]
+  count: number
+}
+
 export interface AliasInfo {
   Alias: string
   Strategy: string
@@ -161,6 +175,8 @@ export interface ModelProviderRow {
 
 export const api = {
   providers: () => client.get<ProvidersResp>('/providers').then(r => r.data),
+  providersRegistered: () =>
+    client.get<RegisteredProvidersResp>('/providers/registered').then(r => r.data),
   provider: (name: string) => client.get<ProviderInfo>(`/providers/${name}`).then(r => r.data),
   routing: () => client.get<RoutingResp>('/routing').then(r => r.data),
   keys: {

@@ -27,6 +27,24 @@
           @update:value="resetAndLoad"
         />
         <n-select
+          v-model:value="filterProvider"
+          :options="providerOptions"
+          placeholder="Provider"
+          filterable
+          clearable
+          style="width: 180px"
+          @update:value="resetAndLoad"
+        />
+        <n-select
+          v-model:value="filterModel"
+          :options="modelOptions"
+          placeholder="Model"
+          filterable
+          clearable
+          style="width: 180px"
+          @update:value="resetAndLoad"
+        />
+        <n-select
           v-model:value="filterStatus"
           :options="statusOptions"
           placeholder="状态"
@@ -151,8 +169,12 @@ const pagination = reactive({
 
 const filterTraceId = ref('')
 const filterKey = ref<string | null>(null)
+const filterProvider = ref<string | null>(null)
+const filterModel = ref<string | null>(null)
 const filterStatus = ref<string[]>([])
 const keyOptions = ref<{ label: string; value: string }[]>([])
+const providerOptions = ref<{ label: string; value: string }[]>([])
+const modelOptions = ref<{ label: string; value: string }[]>([])
 
 const statusOptions = [
   { label: '成功 (2xx/3xx)', value: 'ok' },
@@ -227,6 +249,8 @@ async function load() {
     }
     if (filterTraceId.value) params.trace_id = filterTraceId.value
     if (filterKey.value) params.gateway_key = filterKey.value
+    if (filterProvider.value) params.provider = filterProvider.value
+    if (filterModel.value) params.model = filterModel.value
     if (filterStatus.value.length > 0) params.status = filterStatus.value.join(',')
 
     const [listResp, statsResp] = await Promise.all([
@@ -246,6 +270,32 @@ async function load() {
 async function loadKeyOptions() {
   const response = await api.keys.list().catch(() => ({ keys: [], count: 0 }))
   keyOptions.value = response.keys.map(key => ({ label: key.name, value: key.name }))
+}
+
+// 加载 provider / model 选项(spec §0:核心 UI 过滤维度)
+// 复用 /providers/registered 接口,它返回 name + protocol + models,
+// 省掉额外去 /providers 拉 key_pool/circuit 信息的开销。
+async function loadProviderModelOptions() {
+  try {
+    const resp = await api.providersRegistered()
+    const list = resp.providers ?? []
+    providerOptions.value = list.map(p => ({ label: p.name, value: p.name }))
+    // dedupe models across providers
+    const seen = new Set<string>()
+    const models: { label: string; value: string }[] = []
+    for (const p of list) {
+      for (const m of p.models ?? []) {
+        if (!seen.has(m)) {
+          seen.add(m)
+          models.push({ label: m, value: m })
+        }
+      }
+    }
+    modelOptions.value = models
+  } catch {
+    providerOptions.value = []
+    modelOptions.value = []
+  }
 }
 
 function onPageChange(page: number) {
@@ -299,5 +349,6 @@ function errorMessage(error: unknown) {
 onMounted(() => {
   load()
   loadKeyOptions()
+  loadProviderModelOptions()
 })
 </script>
