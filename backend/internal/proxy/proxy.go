@@ -143,7 +143,8 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		}
 		entry.StatusCode = c.Writer.Status()
 		entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr)
-		if lastErr != nil && lastProviderName != "" {
+		// 无论成功还是失败,只要命中过 provider 就记录 — 成功路径同样需要可观测性(spec §1.2 F2/F5)
+		if lastProviderName != "" {
 			entry.ProviderName = lastProviderName
 		}
 		entry.LatencyMs = int(time.Since(entry.CreatedAt) / time.Millisecond)
