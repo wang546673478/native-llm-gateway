@@ -76,7 +76,11 @@ func (r *Recorder) Start(ctx context.Context) {
 	r.started = true
 }
 
-// Close flush + 关闭
+// Close 是 Recorder 的完整 facade shutdown —— 负责 flush buffer worker 并
+// 停止 owned retention goroutine。Close 后不再有任何后台活动:
+//
+//   - r.buf.Close() flush 残余 + 退出 buffer worker
+//   - r.reten.Close() cancel retention ctx 并等待其 goroutine 退出
 //
 // 注意:Close 不可并发调用。Buffer.Close() 内部 Get/Set 是 mutex 保护的,
 // 但不是原子的;两次并发 Close 可能都越过 guard 然后对同一 channel close(b.ch)
@@ -88,6 +92,9 @@ func (r *Recorder) Close() error {
 		return nil
 	}
 	r.buf.Close()
+	if r.reten != nil {
+		r.reten.Close()
+	}
 	return nil
 }
 
