@@ -16,6 +16,7 @@
         :columns="recordColumns"
         :data="records"
         :bordered="false"
+        :remote="true"
         :pagination="pagination"
         @update:page="onPageChange"
         @update:page-size="onPageSizeChange"
