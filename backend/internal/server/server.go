@@ -447,16 +447,17 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 			TPM:           k.RateLimit.TPM,
 		})
 	}
-	admin := &handler.Admin{
-		Manager:  s.manager,
-		Registry: provider.Default(),
-		Pools:    s.pools,
-		Router:   s.router,
-		Breakers: s.cm,
-		Usage:    s.usageR,
-		Aliases:  toRouterAliases(s.cfg.Routing.Aliases, s.cfg.Routing.Chains),
-		Keys:     gkInfos,
-	}
+	admin := handler.NewAdmin(
+		s.manager,
+		provider.Default(),
+		s.pools,
+		s.router,
+		s.cm,
+		s.usageR,
+		toRouterAliases(s.cfg.Routing.Aliases, s.cfg.Routing.Chains),
+		gkInfos,
+		s.accessR, // P67: 接入日志 Recorder(可能为 no-op)
+	)
 	admin.Register(r.Group("/api/v1"))
 
 	// P16: Gateway Keys CRUD handler

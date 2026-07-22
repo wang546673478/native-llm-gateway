@@ -2,6 +2,7 @@ package accesslog
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -9,20 +10,35 @@ import (
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 )
 
+// StatusBucket 是 status 过滤的单个原子条件(spec F9 决议)。
+//
+// 一个 bucket 要么按 status_code 区间(Min/Max 至少一个非零),要么按 error_type
+// 精确匹配(ErrorType 非空)。两种语义互斥 — handler 端构造,store 端 OR 拼装。
+//
+// 示例:status=4xx,auth_failed →
+//   {Min:400, Max:500} OR {ErrorType:"auth_failed"}
+type StatusBucket struct {
+	Min       int    // status_code >= Min(0 表示无下界)
+	Max       int    // status_code <  Max(0 表示无上界)
+	ErrorType string // 精确匹配 error_type;非空时忽略 Min/Max
+}
+
 // QueryFilter 列表/计数共用过滤条件
-//   - StatusMin/StatusMax 提供方便的 status_code 范围过滤(status=ok → max<400)
+//   - StatusMin/StatusMax 提供方便的 status_code 范围过滤(向后兼容的单区间)
+//   - StatusBuckets 提供 F9 多 bucket OR:F9 调用时优先使用
 //   - 字符串字段精确匹配
 type QueryFilter struct {
-	StartTime    time.Time
-	EndTime      time.Time
-	GatewayKey   string
-	ProviderName string
-	ModelID      string
-	ErrorType    string
-	StatusMin    int
-	StatusMax    int
-	Limit        int
-	Offset       int
+	StartTime     time.Time
+	EndTime       time.Time
+	GatewayKey    string
+	ProviderName  string
+	ModelID       string
+	ErrorType     string
+	StatusMin     int
+	StatusMax     int
+	StatusBuckets []StatusBucket // F9:status= 多值时设置,OR 拼接
+	Limit         int
+	Offset        int
 }
 
 // Store AccessLog 的 DB 读写
@@ -159,11 +175,14 @@ func (s *Store) DeleteByIDs(ctx context.Context, ids []uint) (int64, error) {
 	return res.RowsAffected, res.Error
 }
 
-// GroupByCount 按指定列分组,返回每个不同值的出现次数
-//   - column 必须是 dbpkg.AccessLog 上存在的列名(用白名单校验)
-//   - 用于 handler 统计(例如按 gateway_key_name 分组计数)
-//   - 返回 map[column_value]count,顺序不保证
-func (s *Store) GroupByCount(ctx context.Context, f QueryFilter, column string) (map[string]int64, error) {
+// GroupByCount 返回指定列在 filter 范围内的 distinct 值数量(0 if filter 无匹配)。
+//
+// F14 决议:admin "active_keys" 需要真正 distinct 的 gateway key 数,不能用
+// COUNT(*) 替代 — 不同 key 可能调用 N 次,但只算 1 个 active key。
+//
+//   - column 走白名单(防止 SQL 注入),只支持 AccessLog 上已有列名
+//   - 复用 buildWhere 的过滤(时间/状态/错误类型等)
+func (s *Store) GroupByCount(ctx context.Context, f QueryFilter, column string) (int64, error) {
 	// 白名单 — 防止 SQL 注入 & 拼写错误
 	allowed := map[string]bool{
 		"trace_id":         true,
@@ -178,26 +197,15 @@ func (s *Store) GroupByCount(ctx context.Context, f QueryFilter, column string) 
 		"error_type":       true,
 	}
 	if !allowed[column] {
-		return nil, gorm.ErrInvalidField
+		return 0, gorm.ErrInvalidField
 	}
 
 	q := s.buildWhere(s.db.WithContext(ctx).Model(&dbpkg.AccessLog{}), f)
-	var rows []struct {
-		Val   string
-		Count int64
+	var n int64
+	if err := q.Select("COUNT(DISTINCT " + column + ")").Scan(&n).Error; err != nil {
+		return 0, err
 	}
-	if err := q.Select(column + " AS val, COUNT(*) AS count").
-		Group("val").
-		Order("count DESC").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-
-	out := make(map[string]int64, len(rows))
-	for _, r := range rows {
-		out[r.Val] = r.Count
-	}
-	return out, nil
+	return n, nil
 }
 
 // buildWhere 是 List/Count 共用的 where 构造器
@@ -220,6 +228,13 @@ func (s *Store) buildWhere(q *gorm.DB, f QueryFilter) *gorm.DB {
 	if f.ErrorType != "" {
 		q = q.Where("error_type = ?", f.ErrorType)
 	}
+	// F9 多 bucket 优先:handler 设置了 StatusBuckets,这里 OR 拼接所有 bucket
+	// 每个 bucket 是 (status range) 或 (error_type),互斥
+	if len(f.StatusBuckets) > 0 {
+		q = q.Where(statusBucketClause(f.StatusBuckets), statusBucketArgs(f.StatusBuckets)...)
+		return q
+	}
+	// 向后兼容:单区间 status 过滤(老的 usage 测试 / retention 等)
 	if f.StatusMin > 0 {
 		q = q.Where("status_code >= ?", f.StatusMin)
 	}
@@ -227,4 +242,52 @@ func (s *Store) buildWhere(q *gorm.DB, f QueryFilter) *gorm.DB {
 		q = q.Where("status_code < ?", f.StatusMax)
 	}
 	return q
+}
+
+// statusBucketClause 与 statusBucketArgs 配套,把 []StatusBucket 转成
+// "(bucket1) OR (bucket2) ..." + args slice,供 gorm Where 拼接。
+//
+// 设计目标:不要手工拼字符串插入值(column whitelist 已保证安全);
+// 用占位符 ? + gorm 绑定,避免任何形式的注入风险。
+func statusBucketClause(buckets []StatusBucket) string {
+	parts := make([]string, 0, len(buckets))
+	for _, b := range buckets {
+		if b.ErrorType != "" {
+			parts = append(parts, "error_type = ?")
+			continue
+		}
+		conds := make([]string, 0, 2)
+		if b.Min > 0 {
+			conds = append(conds, "status_code >= ?")
+		}
+		if b.Max > 0 {
+			conds = append(conds, "status_code < ?")
+		}
+		switch len(conds) {
+		case 0:
+			// 空 bucket,跳过(no-op)
+		case 1:
+			parts = append(parts, conds[0])
+		default:
+			parts = append(parts, "("+strings.Join(conds, " AND ")+")")
+		}
+	}
+	return strings.Join(parts, " OR ")
+}
+
+func statusBucketArgs(buckets []StatusBucket) []any {
+	out := make([]any, 0, len(buckets)*2)
+	for _, b := range buckets {
+		if b.ErrorType != "" {
+			out = append(out, b.ErrorType)
+			continue
+		}
+		if b.Min > 0 {
+			out = append(out, b.Min)
+		}
+		if b.Max > 0 {
+			out = append(out, b.Max)
+		}
+	}
+	return out
 }
