@@ -388,44 +388,78 @@ func last24hFilter() accesslog.QueryFilter {
 	}
 }
 
-// parseStatusBuckets 把 ?status=4xx,auth_failed,no_route,... 解析成
-// []accesslog.StatusBucket(F9 binding)。
+// validStatusTokens 是 ?status= 允许的合法 token 白名单(F9 enum)。
+//
+// 必须与 spec §1.2 错误桶枚举保持一致,且只允许这些值;
+// 任何不在表内的输入视为"未知",由 caller 决定如何回应(本 handler
+// 选择 400 BadRequest,见 listAccessLogs)。
+var validStatusTokens = map[string]bool{
+	"ok":                   true,
+	"4xx":                  true,
+	"5xx":                  true,
+	"auth_failed":          true,
+	"no_route":             true,
+	"model_not_allowed":    true,
+	"key_provider_mismatch": true,
+	"upstream_4xx":         true,
+	"upstream_429":         true,
+	"upstream_5xx":         true,
+	"connection_error":     true,
+	"timeout":              true,
+	"unknown":              true,
+}
+
+// statusBucketFor 把合法的 status token 翻译成对应的 accesslog.StatusBucket。
 //
 // 映射规则(spec F9):
 //   - "ok"   → status_code < 400
 //   - "4xx"  → status_code ∈ [400, 500)
 //   - "5xx"  → status_code >= 500
-//   - "auth_failed" / "no_route" / "model_not_allowed" /
-//     "key_provider_mismatch" / "upstream_4xx" / "upstream_429" /
-//     "upstream_5xx" / "connection_error" / "timeout" / "unknown"
-//     → error_type = 该值(精确匹配)
+//   - 其它 enum 值(error_type 系列)→ error_type 精确匹配
 //
-// 多值用 OR 拼装(store.buildWhere 处理)。未知 token 静默忽略 —
-// 前端若传错不至于让接口 500,只是结果少几行。
-func parseStatusBuckets(s string) []accesslog.StatusBucket {
-	if s == "" {
-		return nil
+// 调用方必须先用 validStatusTokens 校验 t 合法后再调用本函数。
+func statusBucketFor(t string) accesslog.StatusBucket {
+	switch t {
+	case "ok":
+		return accesslog.StatusBucket{Max: 400}
+	case "4xx":
+		return accesslog.StatusBucket{Min: 400, Max: 500}
+	case "5xx":
+		return accesslog.StatusBucket{Min: 500}
+	default:
+		return accesslog.StatusBucket{ErrorType: t}
 	}
-	tokens := strings.Split(s, ",")
-	out := make([]accesslog.StatusBucket, 0, len(tokens))
-	for _, t := range tokens {
+}
+
+// parseStatusBuckets 把 ?status=4xx,auth_failed,no_route,... 解析成
+// []accesslog.StatusBucket(F9 binding)。
+//
+// 返回值:
+//   buckets  — 翻译后的 StatusBucket 列表(OR 拼装,store.buildWhere 处理)
+//   unknown  — 输入中遇到的未知 token(用于在响应里告诉前端具体哪几个)
+//   ok       — 是否全部合法;为 false 时 caller 应 400 拒绝
+//
+// 多值用 OR 拼装。未知 token 不再"静默忽略"(原实现 bug):一旦出现
+// 未知值就 ok=false,由 caller 决定如何回应。
+func parseStatusBuckets(s string) (buckets []accesslog.StatusBucket, unknown []string, ok bool) {
+	if s == "" {
+		return nil, nil, true
+	}
+	for _, t := range strings.Split(s, ",") {
 		t = strings.TrimSpace(t)
 		if t == "" {
 			continue
 		}
-		switch t {
-		case "ok":
-			out = append(out, accesslog.StatusBucket{Max: 400})
-		case "4xx":
-			out = append(out, accesslog.StatusBucket{Min: 400, Max: 500})
-		case "5xx":
-			out = append(out, accesslog.StatusBucket{Min: 500})
-		default:
-			// 其他 enum 值都按 error_type 精确匹配
-			out = append(out, accesslog.StatusBucket{ErrorType: t})
+		if !validStatusTokens[t] {
+			unknown = append(unknown, t)
+			continue
 		}
+		buckets = append(buckets, statusBucketFor(t))
 	}
-	return out
+	if len(unknown) > 0 {
+		return buckets, unknown, false
+	}
+	return buckets, nil, true
 }
 
 // listAccessLogs GET /api/v1/access-logs
@@ -459,13 +493,32 @@ func (a *Admin) listAccessLogs(c *gin.Context) {
 		f.EndTime = t
 	}
 	if v := c.Query("status"); v != "" {
-		f.StatusBuckets = parseStatusBuckets(v)
+		buckets, unknown, ok := parseStatusBuckets(v)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_status", "unknown": unknown})
+			return
+		}
+		f.StatusBuckets = buckets
 	}
 	if v := c.Query("limit"); v != "" {
 		f.Limit, _ = strconv.Atoi(v)
 	}
 	if v := c.Query("offset"); v != "" {
 		f.Offset, _ = strconv.Atoi(v)
+	}
+
+	// 归一化分页参数,确保响应里 limit/offset 与实际查询一致:
+	//   - limit  默认 20,上限 200(Store.List 内部也夹紧,但响应要
+	//     反映 effective 值,前端才能正确分页)
+	//   - offset 不允许为负
+	if f.Limit <= 0 {
+		f.Limit = 20
+	}
+	if f.Limit > 200 {
+		f.Limit = 200
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
 	}
 
 	ctx := c.Request.Context()
