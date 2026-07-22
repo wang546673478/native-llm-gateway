@@ -503,6 +503,10 @@ func (e *Engine) doRequest(
 //
 // Task 7 / F4: 同时累积响应 body 到 access log buffer;若全局流数 >= 1000
 // 则只写 metadata 不缓存 body。entry 可为 nil(调用方未启用 accesslog)。
+//
+// Slot 申请在 chunk loop 开始之前一次性完成(doStream 顶部),不是 per-chunk
+// 申请 — 这样 appendStreamChunk 后续的 per-chunk 调用只会做 lookup,
+// 不会让 streamCnt 反复 +1。finalizeStream 的 defer 与 acquire 严格配对。
 func (e *Engine) doStream(
 	ctx context.Context,
 	c *gin.Context,
@@ -529,8 +533,13 @@ func (e *Engine) doStream(
 	e.breaker.RecordSuccess(result.ProviderName)
 	e.reportKeySuccess(result)
 
-	// Task 7 / F4: 全局流上限由 acquireStreamSlot 内部处理,
-	// finalizeStream 用 defer 兜底,确保任意退出路径都收尾
+	// Task 7 / F4: 全局流上限由 acquireStreamSlot 内部处理 — 在 chunk
+	// loop 开始之前一次性申请 slot(每个 stream 只 +1 一次)。
+	// acquireStreamSlot 失败时不动计数器,appendStreamChunk 后续
+	// 的 streamBuf.Load 会自然返回 nil → chunk 不入 buffer。
+	// finalizeStream 用 defer 兜底,通过 LoadAndDelete 是否拿到判断
+	// 是否需要 -1,与 acquire 严格配对。
+	_, _ = e.acquireStreamSlot(req.TraceID)
 	defer e.finalizeStream(req.TraceID, entry)
 
 	// 设置 SSE headers
@@ -565,7 +574,8 @@ func (e *Engine) doStream(
 		if len(chunk.Data) == 0 {
 			continue
 		}
-		// Task 7: 累积到 access log buffer(F4 上限由 appendStreamChunk 内部判断)
+		// Task 7: 累积到 access log buffer(lookup-only,slot 已由
+		// doStream 开头的 acquireStreamSlot 一次性申请)
 		e.appendStreamChunk(req.TraceID, chunk.Data)
 		// chunk.Data 已经是 SSE data 行的内容(Provider 负责格式化)
 		if _, err := c.Writer.Write(chunk.Data); err != nil {
@@ -870,6 +880,14 @@ func extractOrGenTraceID(c *gin.Context) string {
 //   - 全局计数 ≥ 1000 → 不占位,计数原样减回去,返回 (nil, false)
 //     调用方应视作"超出上限" — 只记 metadata,不缓存 body。
 //
+// 计数与占位是绑定的:ok==true 路径必然两者都发生,ok==false 路径
+// 两者都不保留(计数器短暂 +1/-1 后回到原值)。这保证 finalizeStream
+// 可以用 streamBuf.LoadAndDelete 的结果作为唯一信号判断是否需要 -1,
+// 严格配对,无泄漏无 underflow。
+//
+// 调用方应只从 doStream 调用一次(在 chunk loop 开始之前)。
+// appendStreamChunk 是 lookup-only,不申请 slot,不会让计数器再 +1。
+//
 // 计数与占位是两步,理论上并发下仍有微小窗口让"占位成功但计数已超"。
 // 该窗口在工程上不构成问题:最坏情况是再多一两条流被累计,远小于 1000。
 // 严格实现需要 CAS / mutex,这里不做。
@@ -886,15 +904,21 @@ func (e *Engine) acquireStreamSlot(traceID string) (*streamAcc, bool) {
 
 // appendStreamChunk 累积单个 SSE chunk 到对应 trace 的 buffer。
 //
-// slot 申请失败(超出 1000 上限)→ 直接返回,不留任何状态。
+// Lookup-only:slot 必须已由 doStream 通过 acquireStreamSlot 申请过。
+// lookup 失败(slot 被 F4 上限拒绝,或 stream 已被 finalize 清掉)
+// → 直接返回,不留任何状态。这样 per-chunk 调用不会让 streamCnt
+// 反复 +1(原 bug: 旧实现每 chunk 都调 acquire,一个 N-chunk 的 stream
+// 会泄漏 N-1 的计数)。
+//
 // 写入过程中达到 MaxBodyBytes → 标记 truncated,但不再继续追加。
 // (BodyFileWriter.Write 会再次校验 data 长度并打 .truncated.json 后缀。)
 func (e *Engine) appendStreamChunk(traceID string, chunk []byte) {
-	acc, ok := e.acquireStreamSlot(traceID)
+	accAny, ok := e.streamBuf.Load(traceID)
 	if !ok {
-		// 超 F4 上限 — 不累积 body,metadata 仍照写
+		// slot 未申请成功(或已被 finalize) — 不累积 body,metadata 仍照写
 		return
 	}
+	acc := accAny.(*streamAcc)
 	acc.Lock()
 	if acc.buf.Len() < accesslog.MaxBodyBytes {
 		// Write 一次写完,避免多次 mutex + 多次校验
@@ -913,15 +937,25 @@ func (e *Engine) appendStreamChunk(traceID string, chunk []byte) {
 
 // finalizeStream 在流结束时调用,写入 body 文件并清理 slot。
 //
+// 计数严格配对:acquireStreamSlot 在 ok==true 时必然 +1 并占位 streamBuf;
+// 这里通过 LoadAndDelete 是否拿到作为"是否需要 -1"的唯一信号。
+//   - LoadAndDelete 返回 ok=true → 配对的 +1 在 finalize 之前一定发生过
+//     (否则 streamBuf 里不可能有占位)→ 减 1
+//   - LoadAndDelete 返回 ok=false → acquire 没成功(被 F4 上限拒绝),
+//     也没占位 → 不动计数器
+//
+// 这样 increment / decrement 是严格一一对应,无泄漏,无 underflow。
+//
 // 幂等性:streamBuf.LoadAndDelete 保证只调用一次 WriteBody,
 // 即使调用方多次 defer 也安全(defer 顺序 LIFO,但 LoadAndDelete 本身原子)。
+// 二次调用时 LoadAndDelete 返回 ok=false → 直接 return → 不会重复 -1。
 //
 // 调用方应负责:正常 EOF / message_stop / 客户端断开 / 错误路径都调一次。
 func (e *Engine) finalizeStream(traceID string, entry *accesslog.AccessEntry) {
 	accAny, ok := e.streamBuf.LoadAndDelete(traceID)
 	if !ok {
-		// 没累积过(可能 acquire 失败,或根本没流式响应) — 计数要减回去
-		atomic.AddInt64(&e.streamCnt, -1)
+		// 没累积过(acquire 被 F4 上限拒绝,或 streamBuf 已被清) —
+		// 配对规则下,既然 acquire 没成功,这里也不动计数器。
 		return
 	}
 	acc := accAny.(*streamAcc)

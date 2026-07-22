@@ -375,20 +375,70 @@ func TestCopyResponseHeadersStripsHopByHop(t *testing.T) {
 var _ = json.NewEncoder
 var _ = bytes.NewReader
 
-// TestStreamBuffer_GlobalCap 验证 F4 全局 1000 上限:
-// 启动 1500 个 goroutines 并发 acquire stream slot,期望前 ~1000 拿到,
-// 其余 fail。计数器最终应回 0(slot 没有被 finalize,本测试只验证 acquire)。
-func TestStreamBuffer_GlobalCap(t *testing.T) {
+// TestStreamBuffer_NoLeakAcrossChunks 验证 F4 streamCnt 不会因为 per-chunk
+// 调用而泄漏 — 这是旧实现里的一个 critical bug:
+//
+//   旧 acquireStreamSlot 在 appendStreamChunk 内被调用,每个 SSE chunk 都
+//   +1,但 finalizeStream 只 -1 一次。一个 N-chunk 的 stream 会泄漏 N-1
+//   的计数,长 SSE 响应会让计数器永久超过 1000,后续 stream 的 chunk
+//   全部被静默丢弃,body 不入 buffer。
+//
+// 修复后,acquireStreamSlot 只在 doStream 开始前调一次,appendStreamChunk
+// 是 lookup-only。本测试覆盖真实工作模式:
+//
+//   Part 1: 5 个 stream × 300 chunk,全部 finalize → streamCnt 必须归 0。
+//   Part 2: F4 cap — 1500 并发 acquire,前 1000 成功,后 500 拒绝;
+//           finalize 全部 1000 个成功 slot 后 → streamCnt 必须归 0。
+func TestStreamBuffer_NoLeakAcrossChunks(t *testing.T) {
 	e := &Engine{}
 
+	// -------------------------------------------------------------------------
+	// Part 1: per-chunk 模式 — 模拟真实 SSE 流式响应(多 chunk + finalize)
+	// -------------------------------------------------------------------------
+	const streams = 5
+	const chunksPerStream = 300
+	chunk := []byte(`data: {"delta":"hello world"}\n\n`)
+
+	for s := 0; s < streams; s++ {
+		traceID := fmt.Sprintf("leak-trace-%d", s)
+		acc, ok := e.acquireStreamSlot(traceID)
+		if !ok {
+			t.Fatalf("stream %d: acquire unexpectedly failed (counter should be 0 here)", s)
+		}
+		// 一次 acquire,模拟 N 个 chunk 入 buffer(per-chunk lookup,不再 +1)
+		for c := 0; c < chunksPerStream; c++ {
+			e.appendStreamChunk(traceID, chunk)
+		}
+		// sanity:buffer 应累积到 (chunksPerStream * len(chunk)) bytes(远小于 cap)
+		if got := acc.buf.Len(); got != chunksPerStream*len(chunk) {
+			t.Errorf("stream %d: buf.Len = %d, want %d", s, got, chunksPerStream*len(chunk))
+		}
+		e.finalizeStream(traceID, nil)
+	}
+
+	if got := atomic.LoadInt64(&e.streamCnt); got != 0 {
+		t.Errorf("after %d streams × %d chunks + finalize: streamCnt = %d, want 0 (counter leak!)",
+			streams, chunksPerStream, got)
+	}
+
+	// -------------------------------------------------------------------------
+	// Part 2: F4 cap — 1500 并发 acquire,前 1000 成功,后 500 拒绝;
+	// finalize 全部成功 slot 后,计数器必须归 0。
+	// -------------------------------------------------------------------------
 	const total = 1500
-	const cap = maxConcurrentStreams
+	const capN = maxConcurrentStreams
 
 	var (
-		wg          sync.WaitGroup
-		acquiredN   int64
-		rejectedN   int64
+		wg           sync.WaitGroup
+		acquiredN    int64
+		rejectedN    int64
 		startBarrier sync.WaitGroup
+		// 记录 acquire 成功的 traceIDs(顺序非确定,因为是并发),
+		// finalize 阶段只能 finalize 这些,不能按 idx 循环 — 否则
+		// 会对某些从未占位 streamBuf 的 traceID 调 finalizeStream,
+		// 那是预期路径但会让本测试看起来像"counter 泄漏"。
+		acquiredMu  sync.Mutex
+		acquiredIDs []string
 	)
 	startBarrier.Add(1)
 
@@ -397,9 +447,13 @@ func TestStreamBuffer_GlobalCap(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			startBarrier.Wait() // 让所有 goroutine 同步出发,增大并发争用
-			_, ok := e.acquireStreamSlot(fmt.Sprintf("trace-%d", idx))
+			traceID := fmt.Sprintf("cap-trace-%d", idx)
+			_, ok := e.acquireStreamSlot(traceID)
 			if ok {
 				atomic.AddInt64(&acquiredN, 1)
+				acquiredMu.Lock()
+				acquiredIDs = append(acquiredIDs, traceID)
+				acquiredMu.Unlock()
 			} else {
 				atomic.AddInt64(&rejectedN, 1)
 			}
@@ -409,13 +463,27 @@ func TestStreamBuffer_GlobalCap(t *testing.T) {
 	startBarrier.Done()
 	wg.Wait()
 
-	if acquiredN != cap {
-		t.Errorf("acquired = %d, want %d", acquiredN, cap)
+	if acquiredN != capN {
+		t.Errorf("acquired = %d, want %d", acquiredN, capN)
 	}
-	if rejectedN != total-cap {
-		t.Errorf("rejected = %d, want %d", rejectedN, total-cap)
+	if rejectedN != total-capN {
+		t.Errorf("rejected = %d, want %d", rejectedN, total-capN)
 	}
-	if got := atomic.LoadInt64(&e.streamCnt); got != int64(cap) {
-		t.Errorf("streamCnt = %d, want %d (no finalize called)", got, cap)
+
+	// acquire 阶段后,counter 应该停在 capN(因为被拒绝的 slot 短暂 +1/-1
+	// 后回到原值,而成功的 capN 个 slot 在 streamBuf 里仍占着)。
+	if got := atomic.LoadInt64(&e.streamCnt); got != int64(capN) {
+		t.Errorf("after acquire phase: streamCnt = %d, want %d", got, capN)
+	}
+
+	// finalize 全部成功 acquire 的 slot,counter 必须归 0。
+	// (不能用 idx 循环 — 1500 个并发 goroutine 不保证 acquire 顺序。)
+	for _, traceID := range acquiredIDs {
+		e.finalizeStream(traceID, nil)
+	}
+
+	if got := atomic.LoadInt64(&e.streamCnt); got != 0 {
+		t.Errorf("after finalizing all %d acquired slots: streamCnt = %d, want 0 (counter leak!)",
+			capN, got)
 	}
 }
