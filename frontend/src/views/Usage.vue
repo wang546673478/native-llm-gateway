@@ -6,7 +6,7 @@
         <n-input v-model:value="start" placeholder="RFC3339" style="width: 280px" />
         <n-text>结束:</n-text>
         <n-input v-model:value="end" placeholder="RFC3339" style="width: 280px" />
-        <n-button type="primary" @click="load">查询</n-button>
+        <n-button type="primary" @click="query">查询</n-button>
       </n-space>
       <n-data-table :columns="columns" :data="rows" :bordered="false" :pagination="false" />
     </n-card>
@@ -16,7 +16,9 @@
         :columns="recordColumns"
         :data="records"
         :bordered="false"
-        :pagination="{ pageSize: 20 }"
+        :pagination="pagination"
+        @update:page="onPageChange"
+        @update:page-size="onPageSizeChange"
       />
     </n-card>
   </n-spin>
@@ -32,12 +34,39 @@ const records = ref<any[]>([])
 const loading = ref(true)
 
 // P65: provider 分布缓存(model_id → providers 列表)
-//  - 后端只按 model 聚合,Provider 列渲染时按需拉 + 缓存
 const providerMap = ref<Record<string, ModelProviderRow[]>>({})
 const loadingProvider = ref<Record<string, boolean>>({})
 
 const start = ref('')
 const end = ref('')
+
+// P66: 最近请求后端分页状态
+const pagination = ref({
+  page: 1,
+  pageSize: 20,
+  itemCount: 0,
+  showSizePicker: true,
+  pageSizes: [20, 50, 100, 200],
+  onUpdatePage: (p: number) => onPageChange(p),
+  onUpdatePageSize: (s: number) => onPageSizeChange(s),
+})
+
+function onPageChange(page: number) {
+  pagination.value.page = page
+  load()
+}
+function onPageSizeChange(pageSize: number) {
+  pagination.value.pageSize = pageSize
+  pagination.value.page = 1
+  load()
+}
+
+// query 是「重新查询」(用户改时间窗) — 重置 page=1
+async function query() {
+  pagination.value.page = 1
+  providerMap.value = {} // P65: 时间窗变了 provider 缓存也清
+  await load()
+}
 
 async function fetchProviders(modelId: string) {
   if (providerMap.value[modelId] || loadingProvider.value[modelId]) return
@@ -60,11 +89,9 @@ const columns = [
   {
     title: 'Provider',
     key: 'providers',
-    // P65: 异步渲染 — Provider 标签列表
     render(row: AggregateRow) {
       const list = providerMap.value[row.model_id]
       if (!list) {
-        // 首次渲染触发拉取
         fetchProviders(row.model_id)
         return h('span', { style: 'color:#888' }, '加载中…')
       }
@@ -104,10 +131,12 @@ const recordColumns = [
 
 async function load() {
   loading.value = true
-  // 清空 provider 缓存,时间窗变了就重新拉
-  providerMap.value = {}
   try {
-    const params: any = { limit: 20 }
+    const params: any = {
+      // P66: 后端分页 — 带 limit/offset
+      limit: pagination.value.pageSize,
+      offset: (pagination.value.page - 1) * pagination.value.pageSize,
+    }
     if (start.value) params.start = start.value
     if (end.value) params.end = end.value
     const [agg, rec] = await Promise.all([
@@ -116,6 +145,7 @@ async function load() {
     ])
     rows.value = agg.rows
     records.value = rec.records
+    pagination.value.itemCount = rec.total // P66: 总数驱动分页器
   } finally {
     loading.value = false
   }

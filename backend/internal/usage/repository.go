@@ -62,6 +62,35 @@ func (r *Repository) Query(ctx context.Context, f QueryFilter) ([]dbpkg.UsageRec
 	return out, nil
 }
 
+// Count P66: 统计符合过滤条件的记录总数(用于分页)
+//
+// 与 Query 共用同一 filter — 这里不复用 buildUsageWhere(那是私有 helper)
+// 因为 Query 已经把 filter 散在 Where 里,这里也照搬一遍保持简单
+// 后续可重构为共享 where builder
+func (r *Repository) Count(ctx context.Context, f QueryFilter) (int64, error) {
+	q := r.db.WithContext(ctx).Model(&dbpkg.UsageRecord{})
+	if !f.StartTime.IsZero() {
+		q = q.Where("created_at >= ?", f.StartTime)
+	}
+	if !f.EndTime.IsZero() {
+		q = q.Where("created_at <= ?", f.EndTime)
+	}
+	if f.ProviderName != "" {
+		q = q.Where("provider_name = ?", f.ProviderName)
+	}
+	if f.ModelID != "" {
+		q = q.Where("model_id = ?", f.ModelID)
+	}
+	if f.GatewayKeyID != "" {
+		q = q.Where("gateway_key_id = ?", f.GatewayKeyID)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 // AggregateResult 聚合结果
 type AggregateResult struct {
 	TotalRequests int64   `json:"total_requests"`

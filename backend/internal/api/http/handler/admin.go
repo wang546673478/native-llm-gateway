@@ -189,6 +189,12 @@ func (a *Admin) queryUsage(c *gin.Context) {
 		}
 	}
 
+	// P66: 先 Count 拿总量,再 Query 拉当前页 — 让前端做分页
+	total, err := a.Usage.Count(c.Request.Context(), f)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "count_failed", "detail": err.Error()})
+		return
+	}
 	records, err := a.Usage.Query(c.Request.Context(), f)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query_failed", "detail": err.Error()})
@@ -196,7 +202,7 @@ func (a *Admin) queryUsage(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"records": records,
-		"count":   len(records),
+		"total":   total, // P66: 总量(用于分页)
 		"limit":   f.Limit,
 		"offset":  f.Offset,
 	})

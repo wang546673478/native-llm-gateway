@@ -122,8 +122,9 @@ export const api = {
   dashboard: () => client.get<DashboardResp>('/dashboard').then(r => r.data),
   aggregateUsage: (params?: { start?: string; end?: string }) =>
     client.get<{ rows: AggregateRow[]; count: number }>('/usage/aggregate', { params }).then(r => r.data),
-  usage: (params?: { start?: string; end?: string; limit?: number }) =>
-    client.get<{ records: any[]; count: number }>('/usage', { params }).then(r => r.data),
+  // P66: usage 返回 total/limit/offset,支持后端分页
+  usage: (params?: { start?: string; end?: string; limit?: number; offset?: number }) =>
+    client.get<{ records: any[]; total: number; limit: number; offset: number }>('/usage', { params }).then(r => r.data),
   // P65: 给定 model,查 provider 分布
   modelProviders: (modelId: string, params?: { start?: string; end?: string }) =>
     client.get<{ model_id: string; providers: ModelProviderRow[]; count: number }>(
