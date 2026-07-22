@@ -54,6 +54,7 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/routing", a.listRouting)
 	r.GET("/usage", a.queryUsage)
 	r.GET("/usage/aggregate", a.aggregateUsage)
+	r.GET("/usage/by_model/:model_id/providers", a.modelProviders) // P65
 	r.GET("/dashboard", a.dashboard)
 }
 
@@ -234,7 +235,8 @@ func (a *Admin) dashboard(c *gin.Context) {
 	}
 	rows, _ := a.Usage.Aggregate(c.Request.Context(), f)
 
-	total := usage.AggregateResult{}
+	// P65: total 是独立 AggregateResult 类型(只含聚合列,无 provider/model)
+	var total usage.AggregateResult
 	for _, r := range rows {
 		total.TotalRequests += r.TotalRequests
 		total.TotalInput += r.TotalInput
@@ -248,12 +250,50 @@ func (a *Admin) dashboard(c *gin.Context) {
 	byBilling, _ := a.Usage.AggregateByBillingSource(c.Request.Context(), f)
 
 	c.JSON(http.StatusOK, gin.H{
-		"window":             "24h",
-		"total":              total,
-		"by_provider_model":  rows,
-		"by_billing_source":  byBilling, // P47
-		"providers_count":    len(a.Manager.GetAll()),
-		"keypools":           poolStatuses(a.Pools),
+		"window":            "24h",
+		"total":             total,
+		"by_model":          rows, // P65: 重命名 by_provider_model → by_model
+		"by_billing_source": byBilling,
+		"providers_count":   len(a.Manager.GetAll()),
+		"keypools":          poolStatuses(a.Pools),
+	})
+}
+
+// modelProviders P65: GET /api/v1/usage/by_model/:model_id/providers
+// 返回该 model 在时间窗内被哪些 provider 调用过 + 各 provider 的请求数
+// Usage.vue 表格的 Provider 列渲染时按需调用
+func (a *Admin) modelProviders(c *gin.Context) {
+	modelID := c.Param("model_id")
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model_id required"})
+		return
+	}
+	f := usage.QueryFilter{
+		StartTime: time.Now().Add(-24 * time.Hour),
+		EndTime:   time.Now(),
+	}
+	if v := c.Query("start"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			f.StartTime = t
+		}
+	}
+	if v := c.Query("end"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			f.EndTime = t
+		}
+	}
+	if v := c.Query("gateway_key"); v != "" {
+		f.GatewayKeyID = v
+	}
+	rows, err := a.Usage.ModelProviders(c.Request.Context(), f, modelID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "model_providers_failed", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"model_id": modelID,
+		"providers": rows,
+		"count":    len(rows),
 	})
 }
 

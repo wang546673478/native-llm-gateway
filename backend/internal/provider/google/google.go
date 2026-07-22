@@ -271,8 +271,12 @@ func (b *Base) newError(status int, errType provider.ErrorType, msg string, rawE
 
 // parseGoogleUsage 从 Google 响应抽 usage
 // 格式: {"usageMetadata": {"promptTokenCount": N, "candidatesTokenCount": M, "totalTokenCount": T}}
+//
+// P65: 同时抽取顶层 "modelVersion" 字段(Gemini 用 modelVersion 而非 model)
+// proxy 写入 UsageRecord.ModelID 时优先用此字段覆盖客户端请求的 model
 func parseGoogleUsage(body []byte) *provider.Usage {
 	var resp struct {
+		ModelVersion  string `json:"modelVersion"`
 		UsageMetadata *struct {
 			PromptTokenCount     int `json:"promptTokenCount"`
 			CandidatesTokenCount int `json:"candidatesTokenCount"`
@@ -283,6 +287,7 @@ func parseGoogleUsage(body []byte) *provider.Usage {
 		return nil
 	}
 	return &provider.Usage{
+		Model:            resp.ModelVersion, // P65: 上游响应的真实 model 名
 		PromptTokens:     resp.UsageMetadata.PromptTokenCount,
 		CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,
 		TotalTokens:      resp.UsageMetadata.TotalTokenCount,

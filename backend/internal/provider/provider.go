@@ -67,7 +67,13 @@ type StreamChunk struct {
 //   - CacheCreationTokens: 创建新 cache 单元的 token(Anthropic 才有,DeepSeek = 0)
 //   - CacheReadTokens:     命中已有 cache 的 token(DeepSeek prompt_cache_hit_tokens,Anthropic cache_read_input_tokens)
 //   - CompletionTokens:    输出 token
+// P65: 新增 Model 字段 — 上游响应里的真实 model 名
+//   - OpenAI 协议: 响应顶层 "model" 字段
+//   - Anthropic 协议: 响应顶层 "model" 字段
+//   - Google 协议: 响应顶层 "modelVersion" 字段(Gemini 命名不一样)
+//   proxy 写入 UsageRecord.ModelID 时,优先用此字段覆盖客户端请求的 model
 type Usage struct {
+	Model               string
 	PromptTokens        int
 	CompletionTokens    int
 	TotalTokens         int

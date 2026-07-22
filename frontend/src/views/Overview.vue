@@ -25,14 +25,13 @@
       </n-gi>
     </n-grid>
 
-    <!-- P48: 按 Model 卡片(替换之前的按计费来源)— 每张卡显示一个 Model 的用量 -->
+    <!-- P65: 按 Model 卡片(每张卡显示一个 Model 的用量,不再按 provider 归类) -->
     <n-card title="按 Model 用量 (24h)" style="margin-top: 16px">
       <n-grid :cols="3" :x-gap="16" :y-gap="16">
-        <n-gi v-for="row in data?.by_provider_model ?? []" :key="`${row.provider_name}-${row.model_id}`">
+        <n-gi v-for="row in data?.by_model ?? []" :key="row.model_id">
           <div class="bs-card">
             <div class="bs-label">
-              <span class="bs-tag">{{ row.provider_name }}</span>
-              <span class="bs-desc">{{ row.model_id }}</span>
+              <span class="bs-tag">{{ row.model_id }}</span>
             </div>
             <div class="bs-stats">
               <div class="bs-row">
@@ -75,20 +74,7 @@ const data = ref<DashboardResp | null>(null)
 const loading = ref(true)
 let timer: number | undefined
 
-const columns = [
-  { title: 'Provider', key: 'provider_name' },
-  { title: 'Model', key: 'model_id' },
-  { title: '请求数', key: 'total_requests' },
-  { title: 'Input', key: 'total_input_tokens' },
-  { title: 'Output', key: 'total_output_tokens' },
-  { title: '总 Token', key: 'total_tokens' },
-  { title: '错误数', key: 'error_count' },
-  {
-    title: '平均延迟',
-    key: 'avg_latency_ms',
-    render: (row: any) => `${(row.avg_latency_ms ?? 0).toFixed(0)} ms`,
-  },
-]
+// P65: 移除过时的 columns(P48 卡片替代了它,模板从未引用)
 
 const poolColumns = [
   { title: 'Provider', key: 'provider_name' },
@@ -134,7 +120,7 @@ onUnmounted(() => {
 }
 .danger { color: #d03050; }
 
-/* P48: 按 Model 卡片(替代 P47 按计费来源卡片) */
+/* P65: 按 Model 卡片(替代之前按 provider 归类) */
 .bs-card {
   border: 1px solid #e0e0e6;
   border-radius: 6px;
@@ -150,6 +136,7 @@ onUnmounted(() => {
 .bs-tag {
   font-size: 16px;
   font-weight: 600;
+  color: #2080f0;
 }
 .bs-desc {
   font-size: 12px;

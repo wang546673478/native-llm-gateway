@@ -352,6 +352,9 @@ func (b *Base) SetPool(p *keypool.Pool) {
 // parseOpenAIUsage 从 OpenAI Chat Completions 响应中抽取 usage
 // 基础格式: {"usage": {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T}}
 //
+// P65: 同时抽取顶层 "model" 字段(上游响应的真实 model 名,例如 "deepseek-v4-pro")
+// proxy 写入 UsageRecord.ModelID 时优先用此字段覆盖客户端请求的 model
+//
 // DeepSeek 扩展:
 //   - prompt_cache_hit_tokens / prompt_cache_miss_tokens (cache 命中/未命中)
 //   - completion_tokens_details.reasoning_tokens (思考模式消耗)
@@ -359,6 +362,7 @@ func (b *Base) SetPool(p *keypool.Pool) {
 // 这些字段记在 RawUsage 里,Gateway 用作可选的精细计费输入。
 func parseOpenAIUsage(body []byte) *provider.Usage {
 	var resp struct {
+		Model string `json:"model"`
 		Usage *struct {
 			PromptTokens            int `json:"prompt_tokens"`
 			CompletionTokens        int `json:"completion_tokens"`
@@ -389,6 +393,7 @@ func parseOpenAIUsage(body []byte) *provider.Usage {
 	}
 
 	u := &provider.Usage{
+		Model:            resp.Model, // P65: 上游响应的真实 model 名
 		PromptTokens:     resp.Usage.PromptTokens,
 		CompletionTokens: resp.Usage.CompletionTokens,
 		TotalTokens:      resp.Usage.TotalTokens,

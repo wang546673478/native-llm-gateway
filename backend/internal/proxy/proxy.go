@@ -445,6 +445,13 @@ func (e *Engine) recordUsageWithTokens(
 		ErrorType:    errorType,
 		IsStream:     isStream,
 	}
+	// P65: 上游响应的真实 model 覆盖客户端请求的 model
+	//   - 客户端发 "claude-sonnet-5"(别名)→ 路由到 minimax → 实际命中 "MiniMax-M3"
+	//   - DB 用 "MiniMax-M3" 做 GROUP BY,前端按 model 归类才能显示正确
+	//   - cost 计算仍用 result.ModelID(客户端请求的 model),因为计费价格表是按 client model 配的
+	if u != nil && u.Model != "" {
+		r.ModelID = u.Model
+	}
 	// P48: 计费来源 — 优先用这把 key 自己的 billing_source(provider 上的是默认值)
 	if result.Key != nil && result.Key.BillingSource != "" {
 		r.BillingSource = result.Key.BillingSource

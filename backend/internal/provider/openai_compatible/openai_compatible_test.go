@@ -209,6 +209,38 @@ func TestParseOpenAIUsage_Missing(t *testing.T) {
 	}
 }
 
+// TestParseOpenAIUsage_Model P65: 验证 OpenAI 响应顶层 model 字段被抽到 Usage.Model
+func TestParseOpenAIUsage_Model(t *testing.T) {
+	body := []byte(`{
+		"id": "x",
+		"model": "deepseek-v4-pro",
+		"choices": [{"message": {"content": "hi"}}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+	}`)
+	u := parseOpenAIUsage(body)
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.Model != "deepseek-v4-pro" {
+		t.Errorf("Model = %q, want deepseek-v4-pro", u.Model)
+	}
+	if u.PromptTokens != 10 || u.CompletionTokens != 5 || u.TotalTokens != 15 {
+		t.Errorf("usage wrong: %+v", u)
+	}
+}
+
+// TestParseOpenAIUsage_MissingModel P65: 响应无 model 字段时 Usage.Model 为空字符串
+func TestParseOpenAIUsage_MissingModel(t *testing.T) {
+	body := []byte(`{"id":"x","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	u := parseOpenAIUsage(body)
+	if u == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if u.Model != "" {
+		t.Errorf("Model = %q, want empty (no model field in body)", u.Model)
+	}
+}
+
 func TestParseOpenAIUsage_InvalidJSON(t *testing.T) {
 	u := parseOpenAIUsage([]byte(`not json`))
 	if u != nil {

@@ -186,7 +186,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 
 	ch := make(chan *provider.StreamChunk, 16)
 	// P42: 收集流中的 usage — Anthropic 在 message_start (input+cache) 和 message_delta (output) 里发
+	// P65: 也从 message_start 抽 model(message.model 字段)
 	var inputTokens, outputTokens, cacheCreation, cacheRead int
+	var upstreamModel string
 	resp := &provider.Response{
 		StatusCode: httpResp.StatusCode,
 		Headers:    httpResp.Header,
@@ -196,6 +198,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			// 在 close(ch) 前填 usage
 			if inputTokens > 0 || outputTokens > 0 || cacheCreation > 0 || cacheRead > 0 {
 				resp.Usage = &provider.Usage{
+					Model:               upstreamModel, // P65
 					PromptTokens:        inputTokens,
 					CompletionTokens:    outputTokens,
 					TotalTokens:         inputTokens + outputTokens + cacheCreation + cacheRead,
@@ -235,8 +238,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			if len(line) == 0 {
 				if buf.Len() > 0 {
 					eventData := append([]byte{}, buf.Bytes()...)
-					// P42: 在转发前尝试解析 usage
-					extractAnthropicStreamUsage(eventData, &inputTokens, &outputTokens, &cacheCreation, &cacheRead)
+					// P42 + P65: 在转发前尝试解析 usage 和 model
+					extractAnthropicStreamUsage(eventData, &inputTokens, &outputTokens, &cacheCreation, &cacheRead, &upstreamModel)
 					eventData = append(eventData, '\n', '\n')
 					ch <- &provider.StreamChunk{Data: eventData}
 					buf.Reset()
@@ -260,7 +263,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 // 关注两种事件:
 //   - message_start: data 里 {"message":{...,"usage":{input_tokens,cache_creation_input_tokens,cache_read_input_tokens}}}
 //   - message_delta:  data 里 {"usage":{output_tokens}}(output 在顶层)
-func extractAnthropicStreamUsage(event []byte, input, output, cacheCreate, cacheRead *int) {
+//
+// P65: 同时抽 model(message_start.message.model 字段,作为 upstream model 名)
+func extractAnthropicStreamUsage(event []byte, input, output, cacheCreate, cacheRead *int, model *string) {
 	// 找 event: 类型行(决定这是哪种事件)
 	var eventType string
 	for _, line := range bytes.Split(event, []byte("\n")) {
@@ -287,6 +292,7 @@ func extractAnthropicStreamUsage(event []byte, input, output, cacheCreate, cache
 				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 			Message *struct {
+				Model string `json:"model"` // P65: 上游真实 model 名
 				Usage *struct {
 					InputTokens              int `json:"input_tokens"`
 					OutputTokens             int `json:"output_tokens"`
@@ -302,6 +308,10 @@ func extractAnthropicStreamUsage(event []byte, input, output, cacheCreate, cache
 		usageObj := u.Usage
 		if usageObj == nil && u.Message != nil {
 			usageObj = u.Message.Usage
+		}
+		// P65: 抽 model — message_start 的 message.model 是上游真实 model
+		if u.Message != nil && u.Message.Model != "" && *model == "" {
+			*model = u.Message.Model
 		}
 		if usageObj == nil {
 			return
@@ -379,12 +389,16 @@ func (b *Base) newError(status int, errType provider.ErrorType, msg string, rawE
 // parseAnthropicUsage 从 Anthropic 响应抽取 usage
 // 格式: {"usage": {"input_tokens": N, "output_tokens": M, "cache_creation_input_tokens": ?, "cache_read_input_tokens": ?}}
 //
+// P65: 同时抽取顶层 "model" 字段(上游响应的真实 model 名,例如 "MiniMax-M3")
+// proxy 写入 UsageRecord.ModelID 时优先用此字段覆盖客户端请求的 model
+//
 // 注意:Anthropic 的 input_tokens 不含 cache 部分(cache 是另外计的)
 //   - PromptTokens        = input_tokens
 //   - CacheCreationTokens = cache_creation_input_tokens
 //   - CacheReadTokens     = cache_read_input_tokens
 func parseAnthropicUsage(body []byte) *provider.Usage {
 	var resp struct {
+		Model string `json:"model"`
 		Usage *struct {
 			InputTokens              int `json:"input_tokens"`
 			OutputTokens             int `json:"output_tokens"`
@@ -396,9 +410,10 @@ func parseAnthropicUsage(body []byte) *provider.Usage {
 		return nil
 	}
 	u := &provider.Usage{
-		PromptTokens:     resp.Usage.InputTokens,
-		CompletionTokens: resp.Usage.OutputTokens,
-		TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens +
+		Model:               resp.Model, // P65: 上游响应的真实 model 名
+		PromptTokens:        resp.Usage.InputTokens,
+		CompletionTokens:    resp.Usage.OutputTokens,
+		TotalTokens:         resp.Usage.InputTokens + resp.Usage.OutputTokens +
 			resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
 		CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
 		CacheReadTokens:     resp.Usage.CacheReadInputTokens,

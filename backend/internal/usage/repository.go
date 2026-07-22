@@ -73,10 +73,11 @@ type AggregateResult struct {
 	ErrorCount    int64   `json:"error_count"`
 }
 
-// Aggregate 按 Provider + Model 聚合
+// Aggregate 按 Model 聚合(P65:去掉 provider 维度,只按 model_id)
+//   - 前端按 model 归类卡片
+//   - provider 信息由 Usage.vue 表格按需调用 ModelProviders 端点拉
 func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateRow, error) {
 	type row struct {
-		ProviderName  string
 		ModelID       string
 		Count         int64
 		InputTokens   int64
@@ -100,7 +101,7 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 
 	var rows []row
 	err := q.Select(`
-		provider_name, model_id,
+		model_id,
 		COUNT(*) as count,
 		COALESCE(SUM(input_tokens),0) as input_tokens,
 		COALESCE(SUM(output_tokens),0) as output_tokens,
@@ -108,7 +109,7 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 		COALESCE(SUM(cost),0) as cost,
 		COALESCE(AVG(latency_ms),0) as avg_latency,
 		COALESCE(SUM(CASE WHEN status_code >= 400 OR error_type != '' THEN 1 ELSE 0 END),0) as error_count
-	`).Group("provider_name, model_id").Order("count DESC").Scan(&rows).Error
+	`).Group("model_id").Order("count DESC").Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -116,8 +117,7 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 	out := make([]AggregateRow, len(rows))
 	for i, r := range rows {
 		out[i] = AggregateRow{
-			ProviderName: r.ProviderName,
-			ModelID:      r.ModelID,
+			ModelID: r.ModelID,
 			AggregateResult: AggregateResult{
 				TotalRequests: r.Count,
 				TotalInput:    r.InputTokens,
@@ -132,11 +132,43 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 	return out, nil
 }
 
-// AggregateRow 一行聚合(Provider + Model 维度)
+// AggregateRow P65: 一行聚合(只按 Model 维度)
+//   - 去掉 ProviderName,因为 GROUP BY 不再按 provider 分组
+//   - 前端按 model 归类卡片,Provider 信息走 ModelProviders 单独查
 type AggregateRow struct {
-	ProviderName string `json:"provider_name"`
-	ModelID      string `json:"model_id"`
+	ModelID string `json:"model_id"`
 	AggregateResult
+}
+
+// ModelProviderRow P65: 给定 model,列出哪些 provider 调用过(按请求数排序)
+type ModelProviderRow struct {
+	ProviderName string `json:"provider_name"`
+	RequestCount int64   `json:"request_count"`
+}
+
+// ModelProviders 按 model 查 provider 分布
+//   - Usage.vue 表格的 Provider 列 click/hover 时调用
+//   - 返回该 model 在时间窗内被哪些 provider 调用 + 各 provider 的请求数
+func (r *Repository) ModelProviders(ctx context.Context, f QueryFilter, modelID string) ([]ModelProviderRow, error) {
+	var rows []ModelProviderRow
+	q := r.db.WithContext(ctx).Model(&dbpkg.UsageRecord{}).
+		Where("model_id = ?", modelID)
+	if !f.StartTime.IsZero() {
+		q = q.Where("created_at >= ?", f.StartTime)
+	}
+	if !f.EndTime.IsZero() {
+		q = q.Where("created_at <= ?", f.EndTime)
+	}
+	if f.GatewayKeyID != "" {
+		q = q.Where("gateway_key_id = ?", f.GatewayKeyID)
+	}
+	err := q.Select("provider_name, COUNT(*) as request_count").
+		Group("provider_name").Order("request_count DESC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // BillingSourceRow P47: 按计费来源聚合
