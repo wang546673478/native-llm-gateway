@@ -102,6 +102,30 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	}
 	isStream = bodyStream
 
+	// 2.5 P63: 检查 Gateway Key 的 AllowedModels 白名单
+	// 在路由解析之前拒绝 → 节省 failover 开销,也避免误用配额
+	if e.authn != nil {
+		if gkVal, ok := c.Get("gateway_key"); ok {
+			if gk, ok := gkVal.(*auth.GatewayKey); ok {
+				if err := e.authn.CheckAllowed(gk, model); err != nil {
+					e.logger.Warn("model not allowed for key",
+						zap.String("key", gk.Name),
+						zap.String("model", model),
+						zap.Strings("allowed", gk.AllowedModels),
+						zap.String("trace_id", traceID),
+					)
+					c.JSON(http.StatusForbidden, gin.H{
+						"error": gin.H{
+							"type":    "model_not_allowed",
+							"message": fmt.Sprintf("key %q does not allow model %q (allowed: %v)", gk.Name, model, gk.AllowedModels),
+						},
+					})
+					return
+				}
+			}
+		}
+	}
+
 	// 3. 构造 Provider.Request(Body 透传)
 	req := &provider.Request{
 		Method:       c.Request.Method,
