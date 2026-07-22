@@ -123,19 +123,19 @@ func hashKey(plain string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// Authenticate 验证 Bearer token,返回对应的 GatewayKey
+// Authenticate 验证 Gateway Key,返回对应的 GatewayKey
+//
+// 优先级:
+//   1. Authorization: Bearer <token>   (OpenAI 客户端风格,curl / OpenAI SDK)
+//   2. x-api-key: <token>              (Anthropic SDK / Claude Code 风格)
+//   3. 都为空 → ErrMissingAuthHeader
+//
+// 任一存在即可,二者都给时以 Authorization 优先。
+// 这让 OpenAI / Anthropic 客户端都能直接对接 Gateway,不需要适配层。
 func (a *Authenticator) Authenticate(r *http.Request) (*GatewayKey, error) {
-	h := r.Header.Get("Authorization")
-	if h == "" {
-		return nil, ErrMissingAuthHeader
-	}
-	const prefix = "Bearer "
-	if !strings.HasPrefix(h, prefix) {
-		return nil, ErrInvalidAuthFormat
-	}
-	token := strings.TrimSpace(h[len(prefix):])
+	token := extractToken(r)
 	if token == "" {
-		return nil, ErrInvalidAuthFormat
+		return nil, ErrMissingAuthHeader
 	}
 
 	// token 与 KeyHash 都统一走 hashKey 函数比较
@@ -148,6 +148,25 @@ func (a *Authenticator) Authenticate(r *http.Request) (*GatewayKey, error) {
 		return nil, ErrUnknownKey
 	}
 	return key, nil
+}
+
+// extractToken 从 header 中提取 Gateway Key
+//   - Authorization: Bearer <token>  → 提取 token
+//   - x-api-key: <token>             → 直接返回(Anthropic 风格)
+func extractToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); h != "" {
+		const prefix = "Bearer "
+		if strings.HasPrefix(h, prefix) {
+			tok := strings.TrimSpace(h[len(prefix):])
+			if tok != "" {
+				return tok
+			}
+		}
+	}
+	if h := r.Header.Get("x-api-key"); h != "" {
+		return strings.TrimSpace(h)
+	}
+	return ""
 }
 
 // CheckAllowed 检查 model 是否在该 key 允许的范围内

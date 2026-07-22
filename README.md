@@ -194,21 +194,49 @@ curl -X POST http://127.0.0.1:8080/v1/messages \
 
 ### 2. Claude Code / Cursor 接入
 
+在 `~/.claude/settings.json`(Claude Code)或 Cursor 模型配置里:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
+    "ANTHROPIC_AUTH_TOKEN": "gw-xxxxxxxx",
+    "ANTHROPIC_MODEL": "glm-4.7",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+或者用 export 形式(测试用):
+
 ```bash
-# 用智谱 GLM(走 Anthropic 协议,前端推荐)
+# 用智谱 GLM(走 Anthropic 协议,推荐)
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
 export ANTHROPIC_AUTH_TOKEN=gw-xxxxxxxx
 export ANTHROPIC_MODEL=glm-4.7
+export ANTHROPIC_DEFAULT_SONNET_MODEL=glm-4.7
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7-flash
 
 # 用 Kimi(月之暗面)
 export ANTHROPIC_MODEL=kimi-k3
+export ANTHROPIC_DEFAULT_SONNET_MODEL=kimi-k3
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=kimi-k2.6
 
-# 用 DeepSeek
+# 用 DeepSeek(便宜,代码强)
 export ANTHROPIC_MODEL=deepseek-v4-pro
 
-# 用本地原生 MiniMax(走 Anthropic 协议)
+# 用 MiniMax 原生(走 Anthropic 协议)
 export ANTHROPIC_MODEL=claude-sonnet-5
 ```
+
+**关键变量**:
+
+| 变量 | 是否必填 | 说明 |
+|---|---|---|
+| `ANTHROPIC_BASE_URL` | 必填 | Gateway 地址,**不要带 `/v1` 后缀**(Claude Code 会自己拼 `/v1/messages`) |
+| `ANTHROPIC_AUTH_TOKEN` | 必填 | Gateway 颁发的 `gw-*` Key,Gateway 会通过 `x-api-key` header 识别(也接受 `Authorization: Bearer` 形式) |
+| `ANTHROPIC_MODEL` | **必填** | Claude Code 启动时会校验,漏了直接拒绝启动 |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` / `_HAIKU_MODEL` / `_OPUS_MODEL` | 推荐 | Claude Code 会按任务难度切换,设上避免某些场景 fallback 失败 |
 
 > `ANTHROPIC_BASE_URL` 指向 Gateway,不是上游。模型名直接传给 Gateway,由 Gateway 按 alias / model 表路由。
 
