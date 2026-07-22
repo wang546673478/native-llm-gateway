@@ -41,22 +41,40 @@ const (
 	ChatPath = "/chat/completions"
 )
 
-// DefaultModels 智谱 GLM 当前可用 Stable 模型(2026-07)
-// 来源:官方 BigModel 模型广场 + 智谱公众号/官网公告
-//   - glm-4.7-flash 是 glm-4.5-flash 的替代(后者 2026-01-30 下线)
-//   - 不再列出 glm-4.5-flash / deepseek-chat 等弃用模型
-//   - glm-4-long / glm-4-plus / glm-4-air / glm-4-airx / glm-4-flashx 持续维护
+// DefaultModels 智谱 GLM 当前可用模型(2026-07)
+// 来源:BigModel 模型广场 + 智谱公众号公告
+//
+// 旗舰/商用(付费):
+//   - glm-5.2         2026-06 开源,1M 上下文,Coding 旗舰
+//   - glm-4.7         2025-12 开源,200K 上下文
+//   - glm-4.6         上一代旗舰,200K 上下文
+//   - glm-4.6v        多模态
+//   - glm-4.5         Anthropic 协议首先支持的商用模型
+//
+// 永久免费(BigModel 官方标注,不限时):
+//   - glm-4.7-flash         200K 上下文,128K 输出,旗舰级 80%+ 性能
+//   - glm-4.6v-flash        视觉推理,128K 上下文
+//   - glm-4.1v-thinking-flash  视觉推理,64K 上下文
+//   - glm-4-flash-250414    128K 上下文,16K 输出
+//   - glm-4v-flash          图像理解,16K 上下文
+//
+// 已弃用(不要列):
+//   - glm-4.5-flash        2026-01-30 下线,自动路由到 glm-4.7-flash
+//   - glm-4-long / glm-4-plus / glm-4-air / glm-4-airx / glm-4-flashx
+//                          2024-2025 旧 GLM-4 系列,被新的 glm-4.6/4.7 系列替代
 var DefaultModels = []string{
-	"glm-4.7",        // 最新旗舰(2025-12 开源),32K 上下文,8K 输出
-	"glm-4.7-flash",  // 最新轻量免费(替代 glm-4.5-flash)
-	"glm-4.6",        // 上一代旗舰(2025-10),200K 上下文
-	"glm-4.6v",       // 多模态
-	"glm-4-long",     // 长上下文
-	"glm-4-plus",     // 高级版
-	"glm-4-flash",    // 免费稳定
-	"glm-4-flashx",   // 高速版
-	"glm-4-air",      // 轻量
-	"glm-4-airx",     // 增强轻量
+	// 旗舰/商用
+	"glm-5.2", // 2026-06 开源,1M 上下文,Coding 旗舰
+	"glm-4.7", // 200K 上下文
+	"glm-4.6", // 上一代旗舰,200K 上下文
+	"glm-4.6v",
+	"glm-4.5", // Anthropic 协议首先支持
+	// 免费
+	"glm-4.7-flash",
+	"glm-4.6v-flash",
+	"glm-4.1v-thinking-flash",
+	"glm-4-flash-250414",
+	"glm-4v-flash",
 }
 
 // Provider GLM Provider

@@ -51,15 +51,28 @@ const (
 	ChatPath = "/v1/chat/completions"
 )
 
-// DefaultModels Kimi 当前可用 Stable 模型(2026-07)
-// 来源:platform.kimi.com/docs/overview + platform.kimi.com/docs/models
-// 注:moonshot-v1-* / kimi-latest / kimi-thinking-preview / kimi-k2-0905-preview 全部已弃用
+// DefaultModels Kimi 当前可用模型(2026-07)
+// 来源:platform.kimi.com/docs/overview + 官方公告
+//
+//   - kimi-k3                   2026-07-16 上线,1M 上下文,Kimi 迄今最强旗舰
+//   - kimi-k2.7-code            2026-06-12 开源,256K 上下文,编程专项
+//                              强制开启思考模式(MoE 1T 总参 / 32B 激活)
+//   - kimi-k2.7-code-highspeed  同模型,2× 价格,5-6× 速度(180 tok/s, 短场景 260 tok/s)
+//   - kimi-k2.6                2026-04 发布,256K 上下文,通用
+//                              支持 thinking / 非 thinking 模式,智能体集群
+//   - kimi-for-coding          Kimi Code Plan 专用模型 ID(给 Cursor / Claude Code 订阅用户)
+//
+// 弃用(不要列):
+//   - moonshot-v1-* / kimi-latest / kimi-thinking-preview
+//   - kimi-k2-0905-preview / kimi-k2-turbo-preview / kimi-k2-0711
+//     全部已弃用(2025-Q4 切到 K2.6 / K2.7 命名)
+//   - kimi-k2.5                我之前误写,Kimi 没出过 K2.5
 var DefaultModels = []string{
 	"kimi-k3",                  // 当前最新旗舰,1M 上下文
-	"kimi-k2.7-code",           // 代码专用(2.7)
+	"kimi-k2.7-code",           // 代码专用
 	"kimi-k2.7-code-highspeed", // 代码高速版
-	"kimi-k2.6",                // 通用,256K 上下文,thinking + 非 thinking
-	"kimi-k2.5",                // 通用
+	"kimi-k2.6",                // 通用,256K 上下文
+	"kimi-for-coding",          // Kimi Code Plan 专用
 }
 
 // Provider Kimi Provider

@@ -111,33 +111,89 @@ providers:
       excluded_errors: ["429"]
 
   # --- 智谱 GLM (OpenAI 兼容) ---
-  # 文档:https://open.bigmodel.cn/dev/api
+  # 文档:https://docs.bigmodel.cn/cn/guide/start/introduction
   glm:
     enabled: true
+    billing_source: "api"        # 大多数 GLM 模型是付费 API,glm-4.7-flash 等免费层请在 Provider Keys 页面单独标注
     endpoint: "https://open.bigmodel.cn/api/paas/v4"
     protocol: "openai"
     timeout: 60s
     models:
-      - id: "glm-4-flash"          # 免费,稳定,默认推荐
+      # 旗舰/商用(付费)
+      - id: "glm-5.2"             # 2026-06 开源,1M 上下文,Coding 旗舰
+        aliases: []
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.015
+      - id: "glm-4.7"             # 2025-12 开源,200K 上下文
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.001
+      - id: "glm-4.6"             # 上一代旗舰,200K 上下文
+        aliases: []
+        cost_per_1k_input: 0.0006
+        cost_per_1k_output: 0.0006
+      - id: "glm-4.6v"            # 多模态
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.001
+      - id: "glm-4.5"             # Anthropic 协议最先支持的商用模型
+        aliases: []
+        cost_per_1k_input: 0.0006
+        cost_per_1k_output: 0.0006
+      # 永久免费(参考 BigModel 官方标注)
+      - id: "glm-4.7-flash"       # 替代 glm-4.5-flash(2026-01-30 下线)
         aliases: ["glm-flash"]
         cost_per_1k_input: 0.0
         cost_per_1k_output: 0.0
-      - id: "glm-4.7-flash"        # 2026-01 最新免费(替代 glm-4.5-flash)
+      - id: "glm-4.6v-flash"      # 视觉推理
         aliases: []
         cost_per_1k_input: 0.0
         cost_per_1k_output: 0.0
-      - id: "glm-4-air"            # 轻量
+      - id: "glm-4-flash-250414"  # 128K 上下文,16K 输出
         aliases: []
-        cost_per_1k_input: 0.0072
-        cost_per_1k_output: 0.0072
-      - id: "glm-4-long"           # 长上下文
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+    keys: []  # P30: 用 DB(provider_api_keys)管,这里留空
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # --- 智谱 GLM (Anthropic 兼容,给 Claude Code / Anthropic SDK 用户) ---
+  # 文档:https://docs.bigmodel.cn/cn/guide/start/introduction
+  # 端点:POST https://open.bigmodel.cn/api/anthropic/v1/messages
+  # 鉴权:x-api-key: {ZHIPU_API_KEY} / anthropic-version: 2023-06-01
+  glm-anthropic:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://open.bigmodel.cn/api/anthropic"
+    protocol: "anthropic"
+    timeout: 90s
+    models:
+      - id: "glm-5.2"             # Coding 旗舰
         aliases: []
-        cost_per_1k_input: 0.0072
-        cost_per_1k_output: 0.0072
-      - id: "glm-4-plus"           # 高级
+        cost_per_1k_input: 0.005
+        cost_per_1k_output: 0.015
+      - id: "glm-4.7"             # Claude Code 默认推荐
         aliases: []
-        cost_per_1k_input: 0.36
-        cost_per_1k_output: 0.36
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.001
+      - id: "glm-4.7-flash"       # 免费
+        aliases: []
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+      - id: "glm-4.6"
+        aliases: []
+        cost_per_1k_input: 0.0006
+        cost_per_1k_output: 0.0006
+      - id: "glm-4.5"             # Anthropic 协议最先支持
+        aliases: []
+        cost_per_1k_input: 0.0006
+        cost_per_1k_output: 0.0006
+    keys: []  # 与 glm 共享同一组 Provider Key
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -192,35 +248,70 @@ providers:
       excluded_errors: ["429"]
 
   # --- Kimi (Moonshot,OpenAI 兼容) ---
-  # 文档:https://platform.kimi.ai/docs/models
+  # 文档:https://platform.kimi.com/docs/overview (国内;国际 platform.kimi.ai,key 不通用)
   # 端点:https://api.moonshot.cn/v1/chat/completions
-  # 注意:moonshot-v1-* 已不对新用户开放;kimi-k2-0905-preview / kimi-latest 已弃用
   kimi:
     enabled: true
+    billing_source: "api"
     endpoint: "https://api.moonshot.cn"
     protocol: "openai"
     timeout: 120s
     models:
-      - id: "kimi-k3"               # 当前最新
+      - id: "kimi-k3"               # 2026-07-16 上线,1M 上下文,旗舰
         aliases: []
-        cost_per_1k_input: 0.0864
-        cost_per_1k_output: 0.0864
-      - id: "kimi-k2.7-code"        # 代码专用
+        cost_per_1k_input: 0.012
+        cost_per_1k_output: 0.012
+      - id: "kimi-k2.7-code"        # 2026-06-12 开源,256K 上下文,编程专项
         aliases: []
-        cost_per_1k_input: 0.108
-        cost_per_1k_output: 0.108
-      - id: "kimi-k2.7-code-highspeed"  # 代码高速
+        cost_per_1k_input: 0.0035
+        cost_per_1k_output: 0.0035
+      - id: "kimi-k2.7-code-highspeed"  # 同模型,2× 价格,5-6× 速度
         aliases: []
-        cost_per_1k_input: 0.036
-        cost_per_1k_output: 0.036
+        cost_per_1k_input: 0.007
+        cost_per_1k_output: 0.007
+      - id: "kimi-k2.6"             # 2026-04 发布,256K 上下文,通用
+        aliases: []
+        cost_per_1k_input: 0.0035
+        cost_per_1k_output: 0.0035
+      - id: "kimi-for-coding"       # Kimi Code Plan 专用模型 ID
+        aliases: []
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+    keys: []  # P30: 用 DB(provider_api_keys)管,这里留空
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # --- Kimi (Moonshot,Anthropic 兼容,给 Claude Code / Anthropic SDK 用户) ---
+  # 端点:POST https://api.moonshot.cn/anthropic/v1/messages
+  # 鉴权:x-api-key: {MOONSHOT_API_KEY} / anthropic-version: 2023-06-01
+  # Claude Code 接入:ANTHROPIC_BASE_URL=https://api.moonshot.cn/anthropic
+  #                  ANTHROPIC_AUTH_TOKEN={YOUR_API_KEY}
+  #                  ANTHROPIC_MODEL=kimi-k2.5
+  kimi-anthropic:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://api.moonshot.cn/anthropic"
+    protocol: "anthropic"
+    timeout: 90s
+    models:
+      - id: "kimi-k3"               # 旗舰,1M 上下文
+        aliases: []
+        cost_per_1k_input: 0.012
+        cost_per_1k_output: 0.012
+      - id: "kimi-k2.7-code"
+        aliases: []
+        cost_per_1k_input: 0.0035
+        cost_per_1k_output: 0.0035
       - id: "kimi-k2.6"
         aliases: []
-        cost_per_1k_input: 0.0864
-        cost_per_1k_output: 0.0864
-      - id: "kimi-k2.5"
-        aliases: []
-        cost_per_1k_input: 0.0864
-        cost_per_1k_output: 0.0864
+        cost_per_1k_input: 0.0035
+        cost_per_1k_output: 0.0035
+    keys: []  # 与 kimi 共享同一组 Provider Key
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s

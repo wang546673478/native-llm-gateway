@@ -37,19 +37,26 @@ const (
 	DefaultEndpoint = "https://open.bigmodel.cn/api/anthropic"
 )
 
-// DefaultModels GLM 在 Anthropic 模式下支持的模型(2026-07)
-// 与 glm(OpenAI 兼容)命名一致 — Anthropic 兼容层是协议适配,不改模型 ID
+// DefaultModels GLM 在 Anthropic 兼容模式下支持的模型(2026-07)
+// 智谱的 Anthropic 兼容端点是后来加的(为 Claude Code 迁移),
+// 命名沿用 glm 协议,实测可用的子集 — 不强行把全部 glm 模型都列上,
+// 避免用户选了没在 anthropic 端点适配的 model 拿到 404
+//
+// 旗舰/商用:
+//   - glm-5.2         2026-06 开源,Coding 旗舰
+//   - glm-4.7         200K 上下文,Claude Code 默认推荐
+//   - glm-4.6         上一代旗舰
+//   - glm-4.6v        多模态
+//   - glm-4.5         Anthropic 协议最先支持的商用模型
+// 免费:
+//   - glm-4.7-flash   替代 glm-4.5-flash(2026-01-30 下线)
 var DefaultModels = []string{
-	"glm-4.7",       // 最新旗舰(2025-12 开源),32K 上下文,8K 输出
-	"glm-4.7-flash", // 最新轻量免费(替代 glm-4.5-flash)
-	"glm-4.6",       // 上一代旗舰(2025-10),200K 上下文
-	"glm-4.6v",      // 多模态
-	"glm-4-long",    // 长上下文
-	"glm-4-plus",    // 高级版
-	"glm-4-flash",   // 免费稳定
-	"glm-4-flashx",  // 高速版
-	"glm-4-air",     // 轻量
-	"glm-4-airx",    // 增强轻量
+	"glm-5.2",         // Coding 旗舰
+	"glm-4.7",         // Claude Code 默认
+	"glm-4.7-flash",   // 免费
+	"glm-4.6",         // 上一代旗舰
+	"glm-4.6v",        // 多模态
+	"glm-4.5",         // Anthropic 协议最先支持
 }
 
 // Provider GLM Anthropic 兼容 Provider

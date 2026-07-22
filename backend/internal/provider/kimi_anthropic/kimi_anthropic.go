@@ -41,14 +41,13 @@ const (
 	DefaultEndpoint = "https://api.moonshot.cn/anthropic"
 )
 
-// DefaultModels Kimi 在 Anthropic 模式下支持的模型(2026-07)
-// 与 kimi(OpenAI 兼容)命名一致 — Anthropic 兼容层是协议适配,不改模型 ID
+// DefaultModels Kimi 在 Anthropic 兼容模式下支持的模型(2026-07)
+// 实测在 https://api.moonshot.cn/anthropic 可用的子集
+// 命名沿用 kimi 协议,协议层是 Claude Code 迁移用的,优先列 Claude Code 实际能调通的
 var DefaultModels = []string{
-	"kimi-k3",                  // 当前最新旗舰,1M 上下文
-	"kimi-k2.7-code",           // 代码专用
-	"kimi-k2.7-code-highspeed", // 代码高速版
-	"kimi-k2.6",                // 通用,256K 上下文
-	"kimi-k2.5",                // 通用
+	"kimi-k3",        // 旗舰,1M 上下文
+	"kimi-k2.7-code", // 代码专用,256K
+	"kimi-k2.6",      // 通用,256K
 }
 
 // Provider Kimi Anthropic 兼容 Provider
