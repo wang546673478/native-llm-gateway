@@ -77,6 +77,25 @@
           </n-text>
         </n-form-item>
 
+        <!-- default_model fallback:客户端发不在白名单/不在任何 provider 的未知 model
+             名时(如 Claude Code / CodeX 的探测名 claude-sonnet-4-5 / gpt-4o),
+             自动 fallback 到这里配置的 model。留空 = 不 fallback,严格 503。 -->
+        <n-form-item label="默认 Fallback Model(未知 model 名兜底)" path="default_model">
+          <n-select
+            v-model:value="form.default_model"
+            :options="defaultModelOptions"
+            placeholder="留空 = 严格模式(未知 model 名直接 503)。Claude Code / CodeX 用户建议设置"
+            :disabled="availableModelOptions.length === 0"
+            clearable
+            filterable
+          />
+          <n-text depth="3" style="font-size: 12px; display: block; margin-top: 4px">
+            适用场景:客户端(Claude Code / CodeX / Cline 等)发送的 model 名不在
+            白名单里时,Gateway 自动 fallback 到这里配置的 model。
+            <strong style="color: #d03050">本身也必须经过白名单校验</strong>,无法绕过白名单。
+          </n-text>
+        </n-form-item>
+
         <n-form-item label="RPM 限制" path="rpm">
           <n-input-number v-model:value="form.rpm" :min="0" style="width: 100%" />
         </n-form-item>
@@ -133,6 +152,7 @@ interface KeyView {
   providers: string[]
   provider_key_ids: number[]
   allowed_models: string[]
+  default_model?: string
   rpm: number
   tpm: number
   enabled: boolean
@@ -153,6 +173,7 @@ const form = ref({
   providers: [] as string[],
   provider_key_ids: [] as number[], // P34: 绑定的 ProviderKey ID
   allowed_models: ['*'] as string[],
+  default_model: '' as string, // 未知 model 名 fallback 目标
   rpm: 100,
   tpm: 500000,
   enabled: true,
@@ -208,6 +229,15 @@ const availableModelOptions = computed<SelectOption[]>(() => {
       .map(m => ({ label: m, value: m })),
   ]
   return opts
+})
+
+// default_model 下拉:只显示 provider 实际有的 model(不是通配 *)
+// 因为 fallback 后真正要路由到上游,* 通配没有意义
+const defaultModelOptions = computed<SelectOption[]>(() => {
+  return providerModelsUnion.value
+    .filter(m => m !== '*')
+    .sort()
+    .map(m => ({ label: m, value: m }))
 })
 
 function renderModelTag({ option, handleClose }: any) {
@@ -268,6 +298,7 @@ function openCreate() {
     providers: [],
     provider_key_ids: [],
     allowed_models: ['*'],
+    default_model: '',
     rpm: 100,
     tpm: 500000,
     enabled: true,
@@ -282,6 +313,7 @@ function openEdit(row: KeyView) {
     providers: [...row.providers],
     provider_key_ids: [...(row.provider_key_ids ?? [])],
     allowed_models: row.allowed_models.length > 0 ? [...row.allowed_models] : ['*'],
+    default_model: row.default_model ?? '',
     rpm: row.rpm,
     tpm: row.tpm,
     enabled: row.enabled,
@@ -290,7 +322,8 @@ function openEdit(row: KeyView) {
 }
 
 // P34: 把绑定的 ID 翻译成可读的 "minimax → key-1 (sk-...)"
-function describeProviderKeys(ids: number[]): string {
+import type { VNode } from 'vue'
+function describeProviderKeys(ids: number[]): VNode | string {
   if (!ids || ids.length === 0) return h('span', { style: 'color: #999' }, '全部')
   // 从 providerKeysMap 找
   const all = Object.values(providerKeysMap.value).flat()
@@ -310,6 +343,7 @@ async function save() {
       providers: form.value.providers,
       provider_key_ids: form.value.provider_key_ids,
       allowed_models: form.value.allowed_models,
+      default_model: form.value.default_model,
       rpm: form.value.rpm,
       tpm: form.value.tpm,
       enabled: form.value.enabled,
@@ -409,6 +443,20 @@ const columns: DataTableColumns<KeyView> = [
         : row.allowed_models.length > 3
         ? `${row.allowed_models.slice(0, 3).join(', ')} +${row.allowed_models.length - 3}`
         : row.allowed_models.join(', '),
+  },
+  {
+    title: 'Fallback',
+    key: 'default_model',
+    width: 130,
+    render: (row) => {
+      if (!row.default_model) {
+        return h('span', { style: 'color: #999; font-size: 12px' }, '关闭')
+      }
+      return h('span', {
+        style: 'color: #2080f0; font-size: 12px',
+        title: '客户端发不在白名单的 model 名时,自动 fallback 到这里',
+      }, `→ ${row.default_model}`)
+    },
   },
   { title: 'RPM', key: 'rpm', width: 60 },
   { title: 'TPM', key: 'tpm', width: 70 },
