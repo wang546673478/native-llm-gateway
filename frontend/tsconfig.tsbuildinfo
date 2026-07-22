@@ -1,1 +1,0 @@
-{"root":["./src/main.ts","./src/api/client.ts","./src/router/index.ts","./src/stores/health.ts","./src/App.vue","./src/views/Keys.vue","./src/views/Overview.vue","./src/views/ProviderKeys.vue","./src/views/Providers.vue","./src/views/Routing.vue","./src/views/Usage.vue","./vite.config.ts"],"version":"5.9.3"}

@@ -3,9 +3,11 @@ config.yaml
 
 # Build artifacts
 backend/bin/
+bin/
 *.exe
 *.test
 *.out
+frontend/tsconfig.tsbuildinfo
 
 # Local data
 data/
