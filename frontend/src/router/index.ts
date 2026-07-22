@@ -10,6 +10,7 @@ const router = createRouter({
     { path: '/keys', component: () => import('../views/Keys.vue') },
     { path: '/routing', component: () => import('../views/Routing.vue') },
     { path: '/usage', component: () => import('../views/Usage.vue') },
+    { path: '/access-logs', name: 'access-logs', component: () => import('../views/AccessLogs.vue') },
   ],
 })
 
