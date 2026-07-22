@@ -138,9 +138,17 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 	}
 
-	streamTimeout := b.cfg.Timeout
-	if streamTimeout < 120*time.Second {
-		streamTimeout = 120 * time.Second
+	// 流式请求:超时拉长到 10 分钟
+// http.Client.Timeout 是整个请求生命周期(包括读 body)的硬上限。
+// 对于流式响应,Anthropic 官方 API 自家超时是 10 分钟,thinking 模型可能更久。
+// 之前 120s 太短 — upstream 思考类请求会触发 context deadline exceeded,
+// 导致 Claude Code 报 "Connection closed mid-response"。
+//
+// 10 分钟足够绝大多数 thinking 模型生成;超时由 context 控制
+// (调用方 ctx cancel 即触发中断)
+streamTimeout := b.cfg.Timeout
+	if streamTimeout < 600*time.Second {
+		streamTimeout = 600 * time.Second
 	}
 	client := &http.Client{Timeout: streamTimeout}
 

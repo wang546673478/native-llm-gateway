@@ -194,10 +194,14 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		streamBody = injectStreamUsage(streamBody)
 	}
 
-	// 流式超时比非流式长
-	streamTimeout := b.cfg.Timeout
-	if streamTimeout < 120*time.Second {
-		streamTimeout = 120 * time.Second
+	// 流式超时:拉到 10 分钟
+// http.Client.Timeout 限制整个请求生命周期(包括读 body)。
+// 对于流式响应,Anthropic / OpenAI 官方自家超时是 10 分钟,thinking / 长上下文
+// 模型可能更久。120s 太短,容易触发 context deadline exceeded,
+// 导致客户端报 "Connection closed mid-response"。
+streamTimeout := b.cfg.Timeout
+	if streamTimeout < 600*time.Second {
+		streamTimeout = 600 * time.Second
 	}
 	client := &http.Client{Timeout: streamTimeout}
 
