@@ -128,6 +128,11 @@ type GatewayKey struct {
 	// 例:"[5,7]" 表示只能从 minimax provider_api_keys 表 ID=5 和 ID=7 的 key 池里挑
 	ProviderKeyIDs string    `gorm:"column:provider_key_ids;default:'[]'" json:"provider_key_ids"`
 	AllowedModels string    `gorm:"column:allowed_models;not null;default:'[\"*\"]'" json:"allowed_models"`
+	// DefaultModel: 客户端发 Gateway 没见过的 model 名(claude-sonnet-4-5 / gpt-4o 等
+	// Claude Code / CodeX 的探测名)时,fallback 到这个 model。
+	// 空字符串 = 不 fallback,严格返回 503。
+	// 也必须经过 AllowedModels 白名单 — 防止用 fallback 绕过白名单。
+	DefaultModel  string    `gorm:"column:default_model;default:''" json:"default_model"`
 	RPM           int       `gorm:"column:rpm;not null;default:100" json:"rpm"`
 	TPM           int       `gorm:"column:tpm;not null;default:500000" json:"tpm"`
 	Enabled       bool      `gorm:"column:enabled;not null;default:true" json:"enabled"`

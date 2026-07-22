@@ -68,6 +68,7 @@ func SeedFromConfig(ctx context.Context, db *gorm.DB, cfgKeys []GatewayKey) erro
 			Name:          k.Name,
 			KeyHash:       k.KeyHash,
 			AllowedModels: serializeAllowedModels(models),
+			DefaultModel:  k.DefaultModel,
 			RPM:           k.RateLimit.RPM,
 			TPM:           k.RateLimit.TPM,
 			Enabled:       enabled,
@@ -95,6 +96,7 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 			Providers:      parseProviders(k.Providers),
 			ProviderKeyIDs: parseProviderKeyIDs(k.ProviderKeyIDs),
 			AllowedModels:  parseAllowedModels(k.AllowedModels),
+			DefaultModel:   k.DefaultModel,
 			RateLimit:      RateLimitConfig{RPM: k.RPM, TPM: k.TPM},
 		})
 	}
@@ -110,6 +112,7 @@ type KeyView struct {
 	Providers      []string `json:"providers"`
 	ProviderKeyIDs []uint   `json:"provider_key_ids"` // P34: 绑定的 ProviderKey ID
 	AllowedModels  []string `json:"allowed_models"`
+	DefaultModel   string   `json:"default_model"`
 	RPM            int      `json:"rpm"`
 	TPM            int      `json:"tpm"`
 	Enabled        bool     `json:"enabled"`
@@ -127,6 +130,7 @@ func toView(k dbpkg.GatewayKey) KeyView {
 		Providers:      parseProviders(k.Providers),
 		ProviderKeyIDs: parseProviderKeyIDs(k.ProviderKeyIDs),
 		AllowedModels:  parseAllowedModels(k.AllowedModels),
+		DefaultModel:   k.DefaultModel,
 		RPM:            k.RPM,
 		TPM:            k.TPM,
 		Enabled:        k.Enabled,
@@ -140,6 +144,7 @@ type KeyCreateReq struct {
 	Providers      []string `json:"providers"`       // 多 Provider 绑定,空 = 不限制
 	ProviderKeyIDs []uint   `json:"provider_key_ids"` // P34: 绑定具体 Provider Key ID
 	AllowedModels  []string `json:"allowed_models"`
+	DefaultModel   string   `json:"default_model"`
 	RPM            int      `json:"rpm"`
 	TPM            int      `json:"tpm"`
 	Enabled        *bool    `json:"enabled"`
@@ -151,6 +156,7 @@ type KeyUpdateReq struct {
 	Providers      []string `json:"providers"`
 	ProviderKeyIDs []uint   `json:"provider_key_ids"`
 	AllowedModels  []string `json:"allowed_models"`
+	DefaultModel   *string  `json:"default_model"` // pointer:区分"不改"和"清空"
 	RPM            int      `json:"rpm"`
 	TPM            int      `json:"tpm"`
 	Enabled        *bool    `json:"enabled"`
@@ -197,6 +203,7 @@ func (h *KeysHandler) create(c *gin.Context) {
 		Providers:      serializeProviders(req.Providers),
 		ProviderKeyIDs: serializeProviderKeyIDs(req.ProviderKeyIDs),
 		AllowedModels:  serializeAllowedModels(models),
+		DefaultModel:   req.DefaultModel,
 		RPM:            req.RPM,
 		TPM:            req.TPM,
 		Enabled:        enabled,
@@ -234,6 +241,10 @@ func (h *KeysHandler) update(c *gin.Context) {
 	existing.ProviderKeyIDs = serializeProviderKeyIDs(req.ProviderKeyIDs)
 	if req.AllowedModels != nil {
 		existing.AllowedModels = serializeAllowedModels(req.AllowedModels)
+	}
+	// DefaultModel 允许显式清空(nil pointer 触发清空)
+	if req.DefaultModel != nil {
+		existing.DefaultModel = *req.DefaultModel
 	}
 	existing.RPM = req.RPM
 	existing.TPM = req.TPM

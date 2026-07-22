@@ -72,6 +72,33 @@ func NewEngine(cfg Config) *Engine {
 }
 
 // HandleRequest 处理非流式代理请求
+// tryDefaultModelFallback 尝试用 client key 的 default_model 替换 model 名
+// 返回替换后的 model 名,空字符串表示不需要/无法 fallback
+//
+// 调用方应该:
+//   1. 用返回值更新自己的 model 变量
+//   2. 重写 req.Model 和 req.Body(用 rewriteModelField)
+//   3. 重新调 router.Route
+//
+// 检查项:
+//   - client key 必须有 DefaultModel 配置
+//   - DefaultModel != 当前 model(避免无意义的自循环)
+//   - DefaultModel 必须经过 CheckAllowed(防止 fallback 绕过白名单)
+func (e *Engine) tryDefaultModelFallback(c *gin.Context, currentModel string, req *provider.Request) string {
+	if gkVal, ok := c.Get("gateway_key"); ok {
+		if gk, ok := gkVal.(*auth.GatewayKey); ok && gk.DefaultModel != "" && gk.DefaultModel != currentModel {
+			// fallback 必须本身在白名单里 — 防止 fallback 绕过白名单
+			if e.authn != nil && e.authn.CheckAllowed(gk, gk.DefaultModel) != nil {
+				return ""
+			}
+			req.Model = gk.DefaultModel
+			req.Body, _ = rewriteModelField(req.Body, gk.DefaultModel)
+			return gk.DefaultModel
+		}
+	}
+	return ""
+}
+
 func (e *Engine) HandleRequest(c *gin.Context) {
 	e.handle(c, false)
 }
@@ -102,29 +129,39 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	}
 	isStream = bodyStream
 
-	// 2.5 P63: 检查 Gateway Key 的 AllowedModels 白名单
-	// 在路由解析之前拒绝 → 节省 failover 开销,也避免误用配额
-	if e.authn != nil {
-		if gkVal, ok := c.Get("gateway_key"); ok {
-			if gk, ok := gkVal.(*auth.GatewayKey); ok {
-				if err := e.authn.CheckAllowed(gk, model); err != nil {
-					e.logger.Warn("model not allowed for key",
-						zap.String("key", gk.Name),
-						zap.String("model", model),
-						zap.Strings("allowed", gk.AllowedModels),
-						zap.String("trace_id", traceID),
-					)
-					c.JSON(http.StatusForbidden, gin.H{
-						"error": gin.H{
-							"type":    "model_not_allowed",
-							"message": fmt.Sprintf("key %q does not allow model %q (allowed: %v)", gk.Name, model, gk.AllowedModels),
-						},
-					})
-					return
-				}
+	// 2.4 alias 解析:把请求里的 model 名(alias,如 claude-sonnet-4-5)解析成真实 model
+	// 必须在 CheckAllowed 之前完成,否则白名单要列出所有 Claude Code 探测名才能用
+	// 解决后:用户配置 allowed_models 用真实 model 名(MiniMax-M3 等),
+	// Claude Code 发探测名(被 alias 解析后)也能通过白名单
+	if e.router != nil {
+		if target, ok := e.router.ResolveAlias(model); ok && target != model {
+			if newBody, ok2 := rewriteModelField(body, target); ok2 {
+				body = newBody
+				e.logger.Debug("alias resolved",
+					zap.String("alias", model),
+					zap.String("target", target),
+					zap.String("trace_id", traceID),
+				)
 			}
+			model = target
 		}
 	}
+
+	// 2.5 DefaultModel fallback + 白名单检查
+	// 流程:
+	//   a. 先尝试路由;失败 → 用 default_model 重试路由
+	//   b. 路由成功后(原 model 或 fallback 后),走白名单 CheckAllowed
+	//   c. CheckAllowed 失败 → 也试 fallback(因为 alias 命中场景下 model 是 alias 名,
+	//      不在白名单,但用户希望"用 default_model")
+	//
+	// 这样:
+	//   - 客户端发 claude-sonnet-4-5 / gpt-4o 等探测名(无 alias):
+	//     Route ErrNoRoute → fallback → 用 default_model 走通
+	//   - 客户端发 claude-sonnet-4-5(命中 alias 表,路由成功但 alias 名不在白名单):
+	//     Route OK → CheckAllowed fail → fallback → 用 default_model 走通
+	//   - 客户端发 glm-4.7(真实 model 但白名单不让):
+	//     Route OK → CheckAllowed fail → fallback 到 default_model(假设 default_model 在白名单)
+	//     如果 default_model 不在白名单 → 403
 
 	// 3. 构造 Provider.Request(Body 透传)
 	req := &provider.Request{
@@ -147,13 +184,63 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	}
 	iter, err := e.router.Route(ctx, req, routeOpts...)
 	if err != nil {
-		e.logger.Warn("no route",
-			zap.String("model", model),
-			zap.String("trace_id", traceID),
-			zap.Error(err))
-		writeJSONError(c, http.StatusServiceUnavailable, "no_route",
-			fmt.Sprintf("no available provider for model %q", model))
-		return
+		// 4.1: Route 失败 → 试 default_model fallback
+		if fb := e.tryDefaultModelFallback(c, model, req); fb != "" {
+			model = fb
+			iter, err = e.router.Route(ctx, req, routeOpts...)
+		}
+		if err != nil {
+			e.logger.Warn("no route",
+				zap.String("model", model),
+				zap.String("trace_id", traceID),
+				zap.Error(err))
+			writeJSONError(c, http.StatusServiceUnavailable, "no_route",
+				fmt.Sprintf("no available provider for model %q", model))
+			return
+		}
+	}
+
+	// 4.5: 白名单检查 → 失败时也试 default_model fallback(alias 命中场景)
+	if e.authn != nil {
+		if gkVal, ok := c.Get("gateway_key"); ok {
+			if gk, ok := gkVal.(*auth.GatewayKey); ok {
+				if err := e.authn.CheckAllowed(gk, model); err != nil {
+					if fb := e.tryDefaultModelFallback(c, model, req); fb != "" && fb != model {
+						// fallback 成功:重置 iter 用新的 model 重新路由
+						model = fb
+						e.logger.Info("default_model fallback (whitelist miss)",
+							zap.String("requested_model", req.Model),
+							zap.String("fallback_to", fb),
+							zap.String("trace_id", traceID))
+						iter, err = e.router.Route(ctx, req, routeOpts...)
+						if err != nil {
+							e.logger.Warn("no route after fallback",
+								zap.String("model", model),
+								zap.String("trace_id", traceID),
+								zap.Error(err))
+							writeJSONError(c, http.StatusServiceUnavailable, "no_route",
+								fmt.Sprintf("no available provider for model %q", model))
+							return
+						}
+					} else {
+						// 真没 fallback 或 fallback 失败,返回 403
+						e.logger.Warn("model not allowed for key",
+							zap.String("key", gk.Name),
+							zap.String("model", model),
+							zap.Strings("allowed", gk.AllowedModels),
+							zap.String("trace_id", traceID),
+						)
+						c.JSON(http.StatusForbidden, gin.H{
+							"error": gin.H{
+								"type":    "model_not_allowed",
+								"message": fmt.Sprintf("key %q does not allow model %q (allowed: %v)", gk.Name, model, gk.AllowedModels),
+							},
+						})
+						return
+					}
+				}
+			}
+		}
 	}
 
 	// 4.5 P19: 检查 Gateway Key 是否绑定了 Provider

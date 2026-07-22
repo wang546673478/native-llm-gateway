@@ -342,6 +342,46 @@ func (r *Router) Aliases() map[string]AliasConfig {
 	return out
 }
 
+// ResolveAlias 把请求中的 model 名解析成最终要路由的真实 model 名
+//
+// 三种返回情形:
+//
+//	A. 不是 alias(用户在白名单里直接写了一个真实 model 名):
+//	   → ok=false,proxy 用原 model 名继续(走 router.Route 时的 direct-model 路径)
+//
+//	B. 是 alias,且有 TargetModel(短格式,auto-discovery):
+//	   → ok=true, 返回 TargetModel(真实 model)
+//	   proxy 把 model 重写成 TargetModel,然后:
+//	   - CheckAllowed 用 TargetModel 走白名单
+//	   - body 里 model 字段也改成 TargetModel(让上游收到正确 model)
+//
+//	C. 是 alias,且只有 providers(长格式,显式路由):
+//	   → ok=true, 返回 alias 名 本身 + target_model="" 标记
+//	   proxy 不能简单重写 model(因为路由会按 provider 列表 failover),
+//	   所以白名单检查应该跳过 — 用 alias 名作为 "白名单检查的凭据":
+//	   如果 alias 名在白名单里(用户显式列了 claude-sonnet-4-5 等),通过;
+//	   如果 alias 名不在白名单,CheckAllowed 仍走 — 因为 alias 名 == 用户
+//	   明确想要的目标,跟直接发真实 model 名语义一致。
+//
+// 关键收益:Claude Code 发 claude-sonnet-4-5 → 命中 alias →
+//   - alias 在白名单 → 放行(用户显式允许)
+//   - alias 不在白名单 → 403(用户没有显式允许这个 alias)
+//
+// 这避免了用户被迫列出 claude-3-5-sonnet-* / claude-sonnet-4-5 等所有探测名。
+func (r *Router) ResolveAlias(model string) (target string, isAlias bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rule, exists := r.aliases[model]
+	if !exists {
+		return "", false
+	}
+	if rule.TargetModel != "" {
+		return rule.TargetModel, true
+	}
+	// 长格式 alias(只有 providers):alias 名本身就是用户意图的目标
+	return model, true
+}
+
 // ReloadAliases 原子替换别名表(P14 热重载)
 // 注意:这不会改变 underlying Manager / Pools,只更新路由规则
 func (r *Router) ReloadAliases(aliases map[string]AliasConfig) {

@@ -27,7 +27,14 @@ type GatewayKey struct {
 	// 例:[5, 7] 表示只能用 ProviderAPIKey 表里 ID=5 和 ID=7 的上游 key
 	ProviderKeyIDs []uint
 	AllowedModels  []string
-	RateLimit      RateLimitConfig
+	// DefaultModel: 客户端发的 model 既不在白名单、也不在 alias 表里、
+	// 又没有任何 provider 声明它时(典型:Claude Code / CodeX 探测名
+	// claude-sonnet-4-5 / gpt-4o 等),fallback 到这个 model。
+	// 空字符串 = 不 fallback,严格 403。
+	// 这样用户只需配白名单 + default_model 就能让任意 AI Agent 客户端工作,
+	// 不用为每个客户端单独写 alias 映射。
+	DefaultModel string
+	RateLimit    RateLimitConfig
 }
 
 // RateLimitConfig RPM/TPM 限制

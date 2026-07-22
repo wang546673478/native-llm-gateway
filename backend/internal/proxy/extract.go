@@ -29,3 +29,26 @@ func extractModelAndStream(body []byte) (model string, isStream bool, err error)
 	}
 	return m.Model, m.Stream, nil
 }
+
+// rewriteModelField 用 JSON 解析 + 序列化重写 body 里的 model 字段
+// 用 map[string]interface{} 而不是 struct 是为了保留其他未知字段
+// (Anthropic tools / OpenAI 各种 extra_body 都有未声明字段)
+//   - body 不是合法 JSON:返回原 body + false
+//   - 解析成功:重写 model 字段返回新 body + true
+//
+// 与 Gateway 的"body 透传"原则一致:只改 model 这一个字段,其他不变。
+func rewriteModelField(body []byte, newModel string) ([]byte, bool) {
+	if len(body) == 0 {
+		return body, false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body, false
+	}
+	m["model"] = newModel
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
