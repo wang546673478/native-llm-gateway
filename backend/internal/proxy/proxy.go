@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
@@ -25,8 +26,9 @@ type Engine struct {
 	usage         UsageRecorder
 	metrics       MetricsRecorder
 	breaker       CircuitReporter
-	tokenRecorder TokenUsageRecorder // P13: TPM 计数回调(可选)
+	tokenRecorder TokenUsageRecorder  // P13: TPM 计数回调(可选)
 	authn         *auth.Authenticator // P19: Provider binding 检查
+	accessLog     *accesslog.Recorder // P67: 接入日志 Recorder(可选,启用时为非 nil)
 	maxRetry      int
 }
 
@@ -37,9 +39,10 @@ type Config struct {
 	Usage         UsageRecorder
 	Metrics       MetricsRecorder
 	Breaker       CircuitReporter
-	TokenRecorder TokenUsageRecorder // P13: 可选
+	TokenRecorder TokenUsageRecorder  // P13: 可选
 	Authenticator *auth.Authenticator // P19: 可选,绑定 Provider 检查
-	MaxRetry      int // 最大 failover 次数,默认 3
+	AccessLog     *accesslog.Recorder // P67: 可选,nil 表示未启用
+	MaxRetry      int                 // 最大 failover 次数,默认 3
 }
 
 // NewEngine 构造 Proxy Engine
@@ -67,6 +70,7 @@ func NewEngine(cfg Config) *Engine {
 		breaker:       cfg.Breaker,
 		tokenRecorder: cfg.TokenRecorder,
 		authn:         cfg.Authenticator,
+		accessLog:     cfg.AccessLog,
 		maxRetry:      cfg.MaxRetry,
 	}
 }
@@ -113,12 +117,55 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	ctx := c.Request.Context()
 	traceID := extractOrGenTraceID(c)
 
+	// P67: 接入日志 — 入口建 entry,defer 统一 RecordAsync
+	var entry *accesslog.AccessEntry
+	if e.accessLog != nil {
+		entry = &accesslog.AccessEntry{
+			TraceID:        traceID,
+			CreatedAt:      time.Now().UTC(),
+			Method:         c.Request.Method,
+			Path:           c.Request.URL.Path, // 不含 query string(spec F1)
+			ClientIP:       c.ClientIP(),
+			UserAgent:      c.Request.UserAgent(),
+			GatewayKeyID:   c.GetString("gateway_key_id"),
+			GatewayKeyName: auth.KeyNameFromCtx(c),
+			IsStream:       isStream,
+		}
+	}
+	// 持有供 defer 使用 — entry / providerName / lastErr
+	var (
+		lastProviderName string
+		lastErr          *provider.ProviderError
+	)
+	defer func() {
+		if entry == nil || e.accessLog == nil {
+			return
+		}
+		entry.StatusCode = c.Writer.Status()
+		entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr)
+		if lastErr != nil && lastProviderName != "" {
+			entry.ProviderName = lastProviderName
+		}
+		entry.LatencyMs = int(time.Since(entry.CreatedAt) / time.Millisecond)
+		if entry.FinalModel == "" {
+			entry.FinalModel = entry.RequestedModel
+		}
+		e.accessLog.RecordAsync(entry)
+	}()
+
 	// 1. 读取 body
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		e.logger.Error("read body", zap.Error(err), zap.String("trace_id", traceID))
 		writeJSONError(c, http.StatusBadRequest, "invalid_request", "failed to read request body")
 		return
+	}
+	// P67: 写请求 body(同步,file-per-trace,失败也继续)
+	if entry != nil && e.accessLog != nil {
+		if p, _ := e.accessLog.WriteBody(traceID, "req", body); p != "" {
+			entry.ReqBodyPath = p
+			entry.ReqBodySize = len(body)
+		}
 	}
 
 	// 2. 提取 model + stream(body 里的 stream 字段是最终依据 — 客户端说了算)
@@ -128,6 +175,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		return
 	}
 	isStream = bodyStream
+	if entry != nil {
+		entry.RequestedModel = model
+	}
 
 	// 2.4 alias 解析:把请求里的 model 名(alias,如 claude-sonnet-4-5)解析成真实 model
 	// 必须在 CheckAllowed 之前完成,否则白名单要列出所有 Claude Code 探测名才能用
@@ -145,6 +195,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			}
 			model = target
 		}
+	}
+	if entry != nil {
+		entry.FinalModel = model
 	}
 
 	// 2.5 DefaultModel fallback + 白名单检查
@@ -173,6 +226,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		IsStream:     isStream,
 		GatewayKeyID: c.GetString("gateway_key_id"),
 		TraceID:      traceID,
+	}
+	if entry != nil {
+		entry.Protocol = req.Headers.Get("anthropic-version") // best-effort
 	}
 
 	// 4. 路由(failover iterator) — P34: 把 GatewayKey 绑定的 ProviderKeyIDs 传给 Router
@@ -267,16 +323,19 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 					})
 					return
 				}
+				// 记下第一个候选的 provider name,供 defer 写 ProviderName
+				if probeResult != nil {
+					lastProviderName = probeResult.ProviderName
+				}
 				// 检查通过,把这个候选放回 iterator(不太好做,所以重置当前 idx)
 				// 简单做法:迭代器不支持 reset,改为手动用 probeResult 开始循环
-				e.runWithFirstResult(c, ctx, req, iter, probeResult)
+				e.runWithFirstResult(c, ctx, req, iter, probeResult, &lastProviderName, &lastErr)
 				return
 			}
 		}
 	}
 
 	// 5. 依次尝试,failover
-	var lastErr *provider.ProviderError
 	attempts := 0
 	for {
 		if attempts >= e.maxRetry {
@@ -315,8 +374,10 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 			if ok {
 				e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", isStream, streamUsage)
+				lastProviderName = result.ProviderName
 				return
 			}
+			lastProviderName = result.ProviderName
 			lastErr = perr
 			if perr != nil && !errorIsRetryable(perr) {
 				break
@@ -326,8 +387,10 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), false, perr)
 			if perr == nil && resp != nil {
 				e.writeNonStreamResponse(c, req, resp, result, time.Since(start))
+				lastProviderName = result.ProviderName
 				return
 			}
+			lastProviderName = result.ProviderName
 			lastErr = perr
 			if perr != nil && !errorIsRetryable(perr) {
 				break
@@ -337,6 +400,43 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 
 	// 所有尝试都失败
 	e.handleAllFailed(c, req, lastErr, traceID)
+}
+
+// classifyError 把 HTTP status + 上游错误翻译成 error_type 枚举(spec §1.2)
+// Pure function — 不依赖 Engine 实例,方便单元测试。
+//   - statusCode 来自 c.Writer.Status()
+//   - providerEmpty 表示没成功路由到任何 provider (== no_route 场景)
+//   - upstreamErrType: 若最后出错有 provider.ProviderError,传它;否则传 provider.ErrorType("")
+func classifyError(statusCode int, providerEmpty bool, upstreamErrType *provider.ProviderError) string {
+	if statusCode == 0 {
+		return "unknown"
+	}
+	if statusCode < 400 {
+		return "ok"
+	}
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "auth_failed"
+	case http.StatusServiceUnavailable:
+		if providerEmpty {
+			return "no_route"
+		}
+		return "upstream_5xx"
+	case http.StatusTooManyRequests:
+		return "upstream_429"
+	}
+	if statusCode >= 500 {
+		return "upstream_5xx"
+	}
+	if upstreamErrType != nil {
+		switch upstreamErrType.ErrorType {
+		case provider.ErrorTypeTimeout:
+			return "timeout"
+		case provider.ErrorTypeConnection:
+			return "connection_error"
+		}
+	}
+	return "upstream_4xx"
 }
 
 // doRequest 调一次 Provider.SendRequest,处理 KeyPool 报告和 Circuit 上报
@@ -626,15 +726,15 @@ func statusFromErr(pe *provider.ProviderError) int {
 
 // runWithFirstResult 用已经 Next 出来的第一个 result 开始循环
 // (P19:把 provider-binding 检查 pass 的第一个候选"放回"循环)
-func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *provider.Request, iter *router.RouteIterator, first *router.RouteResult) {
-	var lastErr *provider.ProviderError
+// P67: 透传 outProviderName / outLastErr 让外层 handle() 的 defer 拿得到
+func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *provider.Request, iter *router.RouteIterator, first *router.RouteResult, outProviderName *string, outLastErr **provider.ProviderError) {
 	attempts := 0
 
 	// 先处理 first
-	if e.tryOneCandidate(c, ctx, req, first, &lastErr) {
+	if e.tryOneCandidate(c, ctx, req, first, outProviderName, outLastErr) {
 		return
 	}
-	if lastErr != nil && !errorIsRetryable(lastErr) {
+	if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
 		return
 	}
 
@@ -648,23 +748,24 @@ func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *pr
 		if err != nil {
 			break
 		}
-		if e.tryOneCandidate(c, ctx, req, result, &lastErr) {
+		if e.tryOneCandidate(c, ctx, req, result, outProviderName, outLastErr) {
 			return
 		}
-		if lastErr != nil && !errorIsRetryable(lastErr) {
+		if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
 			return
 		}
 	}
-	e.handleAllFailed(c, req, lastErr, req.TraceID)
+	e.handleAllFailed(c, req, *outLastErr, req.TraceID)
 }
 
 // tryOneCandidate 试一次候选。返回 true 表示成功处理(应该 return)
-// lastErr 在错误时被更新
+// lastErr / outProviderName 在错误时被更新(P67:供外层 defer 收尾)
 func (e *Engine) tryOneCandidate(
 	c *gin.Context,
 	ctx context.Context,
 	req *provider.Request,
 	result *router.RouteResult,
+	outProviderName *string,
 	lastErr **provider.ProviderError,
 ) bool {
 	req.Headers.Set("X-Request-Id", req.TraceID)
@@ -673,6 +774,7 @@ func (e *Engine) tryOneCandidate(
 	}
 	pv, ok := e.router.Manager().Get(result.ProviderName)
 	if !ok {
+		*outProviderName = result.ProviderName
 		*lastErr = &provider.ProviderError{
 			ProviderName: result.ProviderName,
 			ErrorType:    provider.ErrorTypeConnection,
@@ -687,16 +789,20 @@ func (e *Engine) tryOneCandidate(
 		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 		if ok {
 			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", true, streamUsage)
+			*outProviderName = result.ProviderName
 			return true
 		}
+		*outProviderName = result.ProviderName
 		*lastErr = perr
 	} else {
 		resp, perr := e.doRequest(ctx, pv, req, result)
 		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), false, perr)
 		if perr == nil && resp != nil {
 			e.writeNonStreamResponse(c, req, resp, result, time.Since(start))
+			*outProviderName = result.ProviderName
 			return true
 		}
+		*outProviderName = result.ProviderName
 		*lastErr = perr
 	}
 	return false

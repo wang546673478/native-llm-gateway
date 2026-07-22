@@ -118,7 +118,10 @@ func run(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := server.New(cfg, logger, db, manager)
+	srv, err := server.New(cfg, logger, db, manager)
+	if err != nil {
+		return fmt.Errorf("server new: %w", err)
+	}
 
 	// P14: 配置热重载
 	if err := config.Watch(ctx, cfgPath, logger, func(newCfg *config.Config) {

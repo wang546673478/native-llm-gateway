@@ -35,7 +35,29 @@ type ServerConfig struct {
 	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
 	IdleTimeout     time.Duration `mapstructure:"idle_timeout"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	// AccessLog 接入日志模块配置(§3.4 spec)
+	AccessLog AccessLogConfig `mapstructure:"access_log"`
 }
+
+// AccessLogConfig 接入日志模块配置(§3.4 spec)
+type AccessLogConfig struct {
+	Enabled       bool          `mapstructure:"enabled"`
+	BodyDir       string        `mapstructure:"body_dir"`
+	BufferSize    int           `mapstructure:"buffer_size"`
+	BatchSize     int           `mapstructure:"batch_size"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
+	Retention     time.Duration `mapstructure:"retention"`
+}
+
+// AccessLog 默认值(零值兜底)
+// 公开常量,方便 Server.New 直接引用
+const (
+	DefaultAccessLogBodyDir       = "./data/access"
+	DefaultAccessLogBufferSize    = 10000
+	DefaultAccessLogBatchSize     = 100
+	DefaultAccessLogFlushInterval = time.Second
+	DefaultAccessLogRetention     = 24 * time.Hour
+)
 
 // DatabaseConfig 数据库配置
 type DatabaseConfig struct {

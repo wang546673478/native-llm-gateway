@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	"github.com/wang546673478/native-llm-gateway/internal/api/http/handler"
 	"github.com/wang546673478/native-llm-gateway/internal/api/http/middleware"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
@@ -40,11 +41,12 @@ type Server struct {
 	usageC   *usage.Collector
 	usageR   *usage.Repository
 	metricsC *metrics.Collector
+	accessR  *accesslog.Recorder // P67: 接入日志 Recorder
 	http     *http.Server
 }
 
 // New 构造 Server
-func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.Manager) *Server {
+func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.Manager) (*Server, error) {
 	// P3+P4+P5: 构造 KeyPool map + Router + Proxy
 	// P30:从 DB (provider_api_keys 表) 读 key 而不是 config.yaml
 	pools := buildKeyPools(cfg, db, logger)
@@ -102,6 +104,37 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	usageRepo := usage.NewRepository(db)
 	metricsC := metrics.NewCollector()
 
+	// P67: AccessLog Recorder(接入日志模块)
+	//   - enabled=false:返回 no-op Recorder,proxy 所有调用都静默 no-op
+	//   - zero value 字段用 default 兜底
+	accessCfg := accesslog.RecorderConfig{
+		Enabled:       cfg.Server.AccessLog.Enabled,
+		BodyDir:       cfg.Server.AccessLog.BodyDir,
+		BufferSize:    cfg.Server.AccessLog.BufferSize,
+		BatchSize:     cfg.Server.AccessLog.BatchSize,
+		FlushInterval: cfg.Server.AccessLog.FlushInterval,
+		Retention:     cfg.Server.AccessLog.Retention,
+	}
+	if accessCfg.BodyDir == "" {
+		accessCfg.BodyDir = config.DefaultAccessLogBodyDir
+	}
+	if accessCfg.BufferSize == 0 {
+		accessCfg.BufferSize = config.DefaultAccessLogBufferSize
+	}
+	if accessCfg.BatchSize == 0 {
+		accessCfg.BatchSize = config.DefaultAccessLogBatchSize
+	}
+	if accessCfg.FlushInterval == 0 {
+		accessCfg.FlushInterval = config.DefaultAccessLogFlushInterval
+	}
+	if accessCfg.Retention == 0 {
+		accessCfg.Retention = config.DefaultAccessLogRetention
+	}
+	accessR, err := accesslog.NewRecorder(accessCfg, db, logger)
+	if err != nil {
+		return nil, fmt.Errorf("accesslog new: %w", err)
+	}
+
 	eng := proxy.NewEngine(proxy.Config{
 		Router:        r,
 		Logger:        logger,
@@ -110,6 +143,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		Breaker:       reporter,
 		TokenRecorder: newAuthTokenRecorder(authn), // P13: TPM 计数(若 auth 启用)
 		Authenticator: authn,                        // P19: Provider 绑定检查
+		AccessLog:     accessR,                      // P67: 接入日志
 		MaxRetry:      cfg.Retry.MaxAttempts,
 	})
 	// P30:把 DB Pool 注入到每个 Provider(Manager.LoadFromConfig 时 Pool 还是 nil)
@@ -128,7 +162,8 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		usageC:   usageC,
 		usageR:   usageRepo,
 		metricsC: metricsC,
-	}
+		accessR:  accessR,
+	}, nil
 }
 
 // P30:把 buildKeyPools 读出来的 Pool 注入到每个 Provider
@@ -303,6 +338,10 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// P8: 启动 Usage Collector 后台落库协程
 	s.usageC.Start(ctx)
+	// P67: 启动 AccessLog Recorder(async buffer + retention)
+	if s.accessR != nil {
+		s.accessR.Start(ctx)
+	}
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
 	s.http = &http.Server{
@@ -326,6 +365,9 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		s.logger.Info("shutdown signal received")
 		s.usageC.Stop() // flush 剩余记录
+		if s.accessR != nil {
+			_ = s.accessR.Close() // flush buffer + stop retention
+		}
 		return s.shutdown()
 	case err := <-errCh:
 		if err != nil {

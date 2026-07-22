@@ -8,6 +8,15 @@ server:
   write_timeout: 120s       # 流式响应需要较长写超时
   idle_timeout: 120s
   shutdown_timeout: 30s
+  # P67: 接入日志(P67 接入日志模块)
+  # 默认 enabled=false(保持现有行为);要做 observing 时开启
+  access_log:
+    enabled: false
+    body_dir: ./data/access
+    buffer_size: 10000
+    batch_size: 100
+    flush_interval: 1s
+    retention: 24h
 
 database:
   driver: "sqlite"          # sqlite | postgres
