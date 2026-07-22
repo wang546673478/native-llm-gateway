@@ -145,6 +145,20 @@ func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, e
 	return res.RowsAffected, res.Error
 }
 
+// DeleteByIDs 仅删除指定主键集合的记录,返回删除数。
+//
+// 用于 retention 等需要 page-aligned 删除的场景:先取一页 ID,删它们的
+// body 文件,再用本方法删对应的 DB 行 — 避免 List 取 1000 行但
+// DeleteOlderThan 把所有 expired 行都删了,导致超出首页的 body 文件被
+// 永久 orphan。
+func (s *Store) DeleteByIDs(ctx context.Context, ids []uint) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := s.db.WithContext(ctx).Where("id IN ?", ids).Delete(&dbpkg.AccessLog{})
+	return res.RowsAffected, res.Error
+}
+
 // GroupByCount 按指定列分组,返回每个不同值的出现次数
 //   - column 必须是 dbpkg.AccessLog 上存在的列名(用白名单校验)
 //   - 用于 handler 统计(例如按 gateway_key_name 分组计数)

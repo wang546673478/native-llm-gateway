@@ -91,6 +91,13 @@ func (r *Retention) runOnce(ctx context.Context) {
 		return
 	}
 
+	// page-aligned 删除:只删本轮 List 拿到的行 — 避免超出 1000 上限的过期
+	// 行的 body 文件被永久 orphan(Finding 1)。
+	ids := make([]uint, len(rows))
+	for i, e := range rows {
+		ids[i] = e.ID
+	}
+
 	// 删 body 文件
 	for _, e := range rows {
 		if e.ReqBodyPath != "" {
@@ -101,8 +108,8 @@ func (r *Retention) runOnce(ctx context.Context) {
 		}
 	}
 
-	// 删 DB 行
-	if _, err := r.store.DeleteOlderThan(ctx, cutoff); err != nil {
+	// 仅删本页 ID 的 DB 行
+	if _, err := r.store.DeleteByIDs(ctx, ids); err != nil {
 		r.logger.Warn("retention delete failed", zap.Error(err))
 	}
 }
