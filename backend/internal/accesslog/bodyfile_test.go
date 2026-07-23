@@ -139,23 +139,13 @@ func TestBodyFile_ReadContainment(t *testing.T) {
 	})
 
 	t.Run("sibling_dir_prefix_not_contained", func(t *testing.T) {
-		// 构造一个 rootDir 的兄弟目录,验证 HasPrefix+sep 边界检查
-		// rootDir=/tmp/abc,absPath=/tmp/abc2/foo 应该被拒
+		// 构造一个 "含 ./ 但 Clean 后落在已写出的文件上" 的 relPath,
+		// 验证 Reader 接受这种 normalized form。
 		//
-		// 这条用例用临时目录结构难精确构造,我们直接构造 relPath 让
-		// 解析后落在 sibling 中:在测试目录里建一个 rootDir/../sibling/foo,
-		// 但 filepath.Join + Clean 会先归一化,所以改用绝对路径(已被前面
-		// IsAbs 分支拦截)。这里再用一个嵌套 ../ 越过 rootDir 的场景:
-		// rootDir/a/b → ../a2/.. → rootDir 之外。
-		// 直接验证绝对路径拦截 + 显式 sibling 路径前缀检查。
-		//
-		// 用一个 symlink-free 的兄弟目录方案:在 dir 旁边建 dir-sibling,
-		// 然后给一个 relPath = "../<dir-sibling-name>/secret" — 这种
-		// "../" 路径会被 filepath.Clean 解析为 dir 之外,已被 path_traversal
-		// 覆盖。这里再覆盖一个易被忽略的变体:relPath 中含点号但不越权
-		// (如 "2026-07-22/../2026-07-22/trace.json"),Clean 后仍在
-		// rootDir 内,应允许。
-		clean := filepath.Clean("2026-07-22/./" + filepath.Base(rel))
+		// 真实目录里写的路径是 `2026-07-22/real-trace-req.json`。
+		// 给定的 relPath 是 `2026-07-22/./real-trace-req.json` —
+		// Clean 后等价于前者,Read 应能正确读到原数据。
+		clean := filepath.Clean(bw.today() + "/./" + filepath.Base(rel))
 		got, err := bw.Read(clean)
 		if err != nil {
 			t.Fatalf("Cleaned path %q should be allowed, got %v", clean, err)
