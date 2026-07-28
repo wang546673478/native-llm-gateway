@@ -286,6 +286,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 					if fb := e.tryDefaultModelFallback(c, model, req); fb != "" && fb != model {
 						// fallback 成功:重置 iter 用新的 model 重新路由
 						model = fb
+						if entry != nil {
+							entry.FinalModel = fb
+						}
 						e.logger.Info("default_model fallback (whitelist miss)",
 							zap.String("requested_model", req.Model),
 							zap.String("fallback_to", fb),

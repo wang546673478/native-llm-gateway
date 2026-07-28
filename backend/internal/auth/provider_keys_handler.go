@@ -50,7 +50,14 @@ func (s *gormProviderKeyStore) Create(ctx context.Context, k *dbpkg.ProviderAPIK
 }
 
 func (s *gormProviderKeyStore) Delete(ctx context.Context, id uint) error {
-	return s.db.WithContext(ctx).Where("id = ?", id).Delete(&dbpkg.ProviderAPIKey{}).Error
+	res := s.db.WithContext(ctx).Where("id = ?", id).Delete(&dbpkg.ProviderAPIKey{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // GetPlainKeys 返回某个 provider 的所有 enabled key 的明文(给 KeyPool 用)
@@ -240,7 +247,12 @@ func (h *ProviderKeysHandler) delete(c *gin.Context) {
 			}
 		}
 	}
-	if err := h.store.Delete(c.Request.Context(), id); err != nil {
+	err = h.store.Delete(c.Request.Context(), id)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
+		return
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete_failed", "detail": err.Error()})
 		return
 	}

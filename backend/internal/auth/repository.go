@@ -74,5 +74,12 @@ func (s *gormKeyStore) Update(ctx context.Context, name string, k *dbpkg.Gateway
 }
 
 func (s *gormKeyStore) Delete(ctx context.Context, name string) error {
-	return s.db.WithContext(ctx).Where("name = ?", name).Delete(&dbpkg.GatewayKey{}).Error
+	res := s.db.WithContext(ctx).Where("name = ?", name).Delete(&dbpkg.GatewayKey{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }

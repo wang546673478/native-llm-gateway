@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -104,11 +105,13 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 }
 
 // KeyView 返回给前端的形态(P32-B: 含明文 Key 字段)
-// 这是内部 LLM Gateway,管理员需要随时看到 key 来分发/重新部署,
-// 所以 DB 存的就是明文,list/get 直接返回(标 json:"key")
+// 仅 create 后立即返回一次,让用户能复制保存。其他 list / get / update 走 KeyViewSafe。
+// SECURITY: 早期 list/get 直接返明文,任何能访问 UI 的人都可拿到所有客户端明文 → token 泄露。
+// 改用 KeyViewSafe 防止 list 泄露,create 仍含 key(用户首次拿到需要)。
 type KeyView struct {
+	ID             uint     `json:"id"`
 	Name           string   `json:"name"`
-	Key            string   `json:"key"` // 明文,可复制
+	Key            string   `json:"key"` // 明文,可复制(只 create 返回)
 	Providers      []string `json:"providers"`
 	ProviderKeyIDs []uint   `json:"provider_key_ids"` // P34: 绑定的 ProviderKey ID
 	AllowedModels  []string `json:"allowed_models"`
@@ -119,14 +122,44 @@ type KeyView struct {
 	CreatedAt      string   `json:"created_at,omitempty"`
 }
 
+// KeyViewSafe list / get / update 用,不包含明文 key
+type KeyViewSafe struct {
+	ID             uint     `json:"id"`
+	Name           string   `json:"name"`
+	Providers      []string `json:"providers"`
+	ProviderKeyIDs []uint   `json:"provider_key_ids"`
+	AllowedModels  []string `json:"allowed_models"`
+	DefaultModel   string   `json:"default_model"`
+	RPM            int      `json:"rpm"`
+	TPM            int      `json:"tpm"`
+	Enabled        bool     `json:"enabled"`
+	CreatedAt      string   `json:"created_at,omitempty"`
+}
+
 // KeyCreateResp POST 返回值:等同 KeyView(创建后立刻就能看到 key)
-// P32-B 移除了 issued_key 一次性概念,key 在 list 里随时可看
 type KeyCreateResp = KeyView
 
 func toView(k dbpkg.GatewayKey) KeyView {
 	return KeyView{
+		ID:             k.ID,
 		Name:           k.Name,
 		Key:            k.KeyHash,
+		Providers:      parseProviders(k.Providers),
+		ProviderKeyIDs: parseProviderKeyIDs(k.ProviderKeyIDs),
+		AllowedModels:  parseAllowedModels(k.AllowedModels),
+		DefaultModel:   k.DefaultModel,
+		RPM:            k.RPM,
+		TPM:            k.TPM,
+		Enabled:        k.Enabled,
+		CreatedAt:      k.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+// toViewSafe list / get / update 用,不暴露明文 key
+func toViewSafe(k dbpkg.GatewayKey) KeyViewSafe {
+	return KeyViewSafe{
+		ID:             k.ID,
+		Name:           k.Name,
 		Providers:      parseProviders(k.Providers),
 		ProviderKeyIDs: parseProviderKeyIDs(k.ProviderKeyIDs),
 		AllowedModels:  parseAllowedModels(k.AllowedModels),
@@ -262,7 +295,12 @@ func (h *KeysHandler) update(c *gin.Context) {
 
 func (h *KeysHandler) delete(c *gin.Context) {
 	name := c.Param("name")
-	if err := h.store.Delete(c.Request.Context(), name); err != nil {
+	err := h.store.Delete(c.Request.Context(), name)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
+		return
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete_failed", "detail": err.Error()})
 		return
 	}

@@ -116,6 +116,36 @@
         </n-space>
       </template>
     </n-modal>
+
+    <!-- 创建后的明文密钥一次性展示对话框。
+         SECURITY: 关掉后丢失,用户必须现在复制保存。这是替代 list/get 泄露的唯一办法。 -->
+    <n-modal
+      v-model:show="newKeyModalVisible"
+      preset="card"
+      :title="`新密钥已生成: ${newKeyName}`"
+      style="width: 560px"
+      :mask-closable="false"
+      :closable="true"
+    >
+      <n-alert type="warning" style="margin-bottom: 16px">
+        这是密钥明文,<strong>只会展示这一次</strong>。关闭此弹窗后无法再次查看,请立即复制保存到安全位置。
+      </n-alert>
+      <n-input
+        :value="newKeySecret"
+        readonly
+        type="text"
+        style="font-family: monospace"
+      >
+        <template #suffix>
+          <n-button text @click="copyNewKeySecret">📋 复制</n-button>
+        </template>
+      </n-input>
+      <template #footer>
+        <n-space justify="end">
+          <n-button type="primary" @click="newKeyModalVisible = false">我已保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-spin>
 </template>
 
@@ -145,8 +175,12 @@ interface ProviderKeyView {
   enabled: boolean
 }
 
-// P34: KeyView 含 provider_key_ids + 明文 key
+// P34: KeyView 含 provider_key_ids + 明文 key(用户要求 list 也能直接复制)
+// 注意:这是内部 LLM Gateway,UI 部署在内网/反代后面,管理员需要随时复制 key 来分发/重新部署。
+// SECURITY trade-off:list 返明文 key 让任何能访问 UI 的人都可拿到所有客户端 token。
+// 外部部署必须在反代层加 basic auth + IP allowlist 保护 admin endpoints。
 interface KeyView {
+  id?: number
   name: string
   key: string
   providers: string[]
@@ -166,6 +200,10 @@ const loading = ref(false)
 const saving = ref(false)
 const modalVisible = ref(false)
 const editing = ref(false)
+// SECURITY: 创建后的明文 key 仅一次性展示在 newKeyModal,关闭后丢失
+const newKeySecret = ref('')
+const newKeyModalVisible = ref(false)
+const newKeyName = ref('')
 const message = useMessage()
 
 const form = ref({
@@ -351,12 +389,17 @@ async function save() {
     if (editing.value) {
       await axios.put(`/api/v1/keys/${encodeURIComponent(form.value.name)}`, body)
       message.success('已更新')
+      modalVisible.value = false
     } else {
       body.name = form.value.name
-      await axios.post('/api/v1/keys', body)
-      message.success('已创建,密钥已展示在列表中')
+      // 创建响应包含明文 key(KeyView 不含,用 any 临时接住)
+      const resp = await axios.post<{ key?: string }>('/api/v1/keys', body)
+      // SECURITY: 创建后明文仅此一次返回,弹窗展示给用户复制保存
+      modalVisible.value = false
+      newKeySecret.value = resp.data?.key ?? ''
+      newKeyName.value = form.value.name
+      newKeyModalVisible.value = true
     }
-    modalVisible.value = false
     await load()
   } catch (e: any) {
     message.error('保存失败: ' + (e.response?.data?.error ?? e.message))
@@ -365,7 +408,28 @@ async function save() {
   }
 }
 
+async function copyNewKeySecret() {
+  if (!newKeySecret.value) return
+  try {
+    await navigator.clipboard.writeText(newKeySecret.value)
+    message.success('已复制到剪贴板')
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = newKeySecret.value
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    message.success('已复制')
+  }
+}
+
+// 复制密钥到剪贴板
 async function copyKey(row: KeyView) {
+  if (!row.key) {
+    message.error('密钥为空,无法复制')
+    return
+  }
   try {
     await navigator.clipboard.writeText(row.key)
     message.success(`已复制 ${row.name} 的密钥`)
