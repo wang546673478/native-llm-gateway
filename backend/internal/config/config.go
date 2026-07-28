@@ -182,6 +182,17 @@ type KeyPoolConfig struct {
 	MaxCoolingCount    int           `mapstructure:"max_cooling_count"`
 	HealthCheckInterval time.Duration `mapstructure:"health_check_interval"`
 	KeyRotation        string        `mapstructure:"key_rotation"`
+
+	// P68: quota restore 配置
+	QuotaEnabled         bool          `mapstructure:"quota_enabled"`
+	QuotaProbeInitialDelay time.Duration `mapstructure:"quota_probe_initial_delay"`
+	QuotaProbeMaxBackoff time.Duration `mapstructure:"quota_probe_max_backoff"`
+	QuotaProbeJitterPct  int           `mapstructure:"quota_probe_jitter_pct"`
+	QuotaProbeMaxAttempts int           `mapstructure:"quota_probe_max_attempts"`
+	QuotaPollInterval    time.Duration `mapstructure:"quota_poll_interval"`
+	QuotaPollJitterPct   int           `mapstructure:"quota_poll_jitter_pct"`
+	QuotaHTTPTimeout     time.Duration `mapstructure:"quota_http_timeout"`
+	QuotaUserAgent       string        `mapstructure:"quota_user_agent"`
 }
 
 // TimeoutsConfig 超时配置

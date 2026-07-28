@@ -299,3 +299,115 @@ func TestAcquireFromTier_AllowedIDFilter(t *testing.T) {
 		t.Errorf("expected ErrNoAvailableKey, got %v", err)
 	}
 }
+
+// P68: Test 1 — quota_exceeded 不再被设 DISABLED,标成 QUOTA_EXCEEDED
+func TestPool_QuotaExceededIsNotDisabled(t *testing.T) {
+	keys := newTestKeys(1)
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	// 装回调,验证会 fire
+	called := false
+	pool.OnQuotaExceeded = func(k *Key) { called = true }
+
+	pool.ReportError(keys[0], "quota_exceeded")
+	k := keys[0]
+	if k.Status != KeyStatusQuotaExceeded {
+		t.Errorf("after quota_exceeded: status = %q, want QUOTA_EXCEEDED", k.Status)
+	}
+	if k.QuotaProbeAttempts != 0 {
+		t.Errorf("QuotaProbeAttempts = %d, want 0", k.QuotaProbeAttempts)
+	}
+	if k.QuotaExceededSince.IsZero() {
+		t.Errorf("QuotaExceededSince not set")
+	}
+	if k.IsUsable(time.Now()) {
+		t.Errorf("IsUsable should be false during QUOTA_EXCEEDED")
+	}
+	if !called {
+		t.Errorf("OnQuotaExceeded callback not fired")
+	}
+}
+
+// P68: Test 2 — RestoreQuota 让 key 回到 ACTIVE
+func TestPool_RestoreQuotaMakesUsable(t *testing.T) {
+	keys := newTestKeys(1)
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	pool.ReportError(keys[0], "quota_exceeded")
+	pool.RestoreQuota(keys[0])
+
+	k := keys[0]
+	if k.Status != KeyStatusActive {
+		t.Errorf("after RestoreQuota: status = %q, want ACTIVE", k.Status)
+	}
+	if !k.IsUsable(time.Now()) {
+		t.Errorf("IsUsable should be true after RestoreQuota")
+	}
+	if !k.QuotaExceededSince.IsZero() {
+		t.Errorf("QuotaExceededSince should be reset, got %v", k.QuotaExceededSince)
+	}
+
+	// Acquire 应该能拿到
+	got, err := pool.AcquireFromTier("api", nil)
+	if err != nil {
+		t.Fatalf("AcquireFromTier: %v", err)
+	}
+	if got.ID != k.ID {
+		t.Errorf("Acquire returned %s, want %s", got.ID, k.ID)
+	}
+}
+
+// P68: Test 3 — Router 视角:QuotaExceeded 时 Acquire 跳过,Restore 后能拿到
+func TestPool_AcquireSkipsQuotaExceededButCanReturnAfterRestore(t *testing.T) {
+	keys := newTestKeys(3)
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	// 标 k1 为 quota_exceeded
+	pool.ReportError(keys[0], "quota_exceeded")
+
+	// 跑 5 次 Acquire,k1 永远不出现
+	seen := map[string]int{}
+	for i := 0; i < 5; i++ {
+		got, err := pool.AcquireFromTier("api", nil)
+		if err != nil {
+			t.Fatalf("Acquire #%d: %v", i, err)
+		}
+		seen[got.ID]++
+	}
+	if seen[keys[0].ID] > 0 {
+		t.Errorf("quota_exceeded key %s was returned by Acquire", keys[0].ID)
+	}
+
+	// Restore 后再跑 9 次,k1 应出现至少一次
+	pool.RestoreQuota(keys[0])
+	for i := 0; i < 9; i++ {
+		got, err := pool.AcquireFromTier("api", nil)
+		if err != nil {
+			t.Fatalf("Acquire after restore #%d: %v", i, err)
+		}
+		seen[got.ID]++
+	}
+	if seen[keys[0].ID] == 0 {
+		t.Errorf("after RestoreQuota, key %s never returned by Acquire", keys[0].ID)
+	}
+}
+
+// P68: Status.QuotaExceededKeys 计数正确
+func TestPool_StatusCountsQuotaExceeded(t *testing.T) {
+	keys := newTestKeys(3)
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+	pool.ReportError(keys[0], "quota_exceeded")
+	pool.ReportError(keys[1], "quota_exceeded")
+	pool.ReportError(keys[2], "auth") // DISABLED
+
+	s := pool.Status()
+	if s.QuotaExceededKeys != 2 {
+		t.Errorf("QuotaExceededKeys = %d, want 2", s.QuotaExceededKeys)
+	}
+	if s.DisabledKeys != 1 {
+		t.Errorf("DisabledKeys = %d, want 1", s.DisabledKeys)
+	}
+	if s.ActiveKeys != 0 {
+		t.Errorf("ActiveKeys = %d, want 0", s.ActiveKeys)
+	}
+}

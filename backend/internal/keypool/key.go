@@ -10,10 +10,12 @@ import (
 type KeyStatus string
 
 const (
-	KeyStatusActive   KeyStatus = "ACTIVE"   // 正常可用
-	KeyStatusCooling  KeyStatus = "COOLING"  // 429 后冷却中
-	KeyStatusLimited  KeyStatus = "LIMITED"  // 配额受限(预留)
-	KeyStatusDisabled KeyStatus = "DISABLED" // 累计冷却超阈值,永久禁用
+	KeyStatusActive        KeyStatus = "ACTIVE"          // 正常可用
+	KeyStatusCooling       KeyStatus = "COOLING"         // 429 后冷却中
+	KeyStatusLimited       KeyStatus = "LIMITED"         // 配额受限(预留)
+	KeyStatusDisabled      KeyStatus = "DISABLED"        // 累计冷却超阈值,永久禁用
+	// P68: 配额耗尽(quota_exceeded) — 区别于 DISABLED,worker 可恢复
+	KeyStatusQuotaExceeded KeyStatus = "QUOTA_EXCEEDED"
 )
 
 // Key 是 Provider 的单个 API Key
@@ -36,6 +38,10 @@ type Key struct {
 	LastErrorAt   time.Time
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	// P68: quota restore worker 用 — 第一次被标记 QUOTA_EXCEEDED 的时间
+	QuotaExceededSince time.Time
+	// P68: 探测次数(成功 Restore 时 reset 为 0;max attempts 触发 DISABLED)
+	QuotaProbeAttempts int
 }
 
 // IsUsable 在给定时间点判断 Key 是否可用于调度
@@ -46,6 +52,9 @@ func (k *Key) IsUsable(now time.Time) bool {
 	case KeyStatusCooling:
 		return now.After(k.CoolingUntil)
 	case KeyStatusDisabled:
+		return false
+	case KeyStatusQuotaExceeded:
+		// P68: 配额耗尽期间不可用,等 worker 探测到恢复才回 ACTIVE
 		return false
 	default:
 		return false

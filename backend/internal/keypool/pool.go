@@ -21,6 +21,12 @@ type Pool struct {
 	mu           sync.RWMutex
 	keys         []*Key
 	scheduler    Scheduler
+	// P68: quota restore 回调槽(默认 nil = no-op)。
+	// 注入方是 quotacheck.Manager(启动时通过 SetupQuotaCallbacks),
+	// Pool 不感知 quotacheck 包,避免 import cycle。
+	OnQuotaExceeded func(*Key)
+	OnKeyRestored   func(*Key)
+	OnKeyDisabled   func(*Key)
 }
 
 // NewPool 构造 Pool
@@ -208,34 +214,101 @@ func (p *Pool) ReportRateLimit(k *Key, retryAfter time.Duration) {
 }
 
 // ReportError 上报非 429 错误
-// 当前实现:auth / invalid_request / quota_exceeded 直接 DISABLED;
-// 其他错误仅累计计数,不立即禁用
+//   - auth / invalid_request → 直接 DISABLED
+//   - quota_exceeded → P68: 走 quota restore 路径(QUOTA_EXCEEDED + worker 探测)
+//   - 其他 → 仅累计计数
 func (p *Pool) ReportError(k *Key, errType string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	now := time.Now()
 	k.ErrorCount++
 	k.LastErrorAt = now
 	k.UpdatedAt = now
 
+	var quotaCB func(*Key)
 	switch errType {
-	case "auth", "invalid_request", "quota_exceeded":
-		// auth: 401/403 — Key 本身有问题
-		// invalid_request: 400 — 请求体有问题,这个 Key 配错了
-		// quota_exceeded: 402 / 429 quota / 403 quota — 配额耗尽,该 Key 不能再用
-		// P49+P64: quota_exceeded 也直接 DISABLED,让 Router 推进到下一候选(api tier)
+	case "auth", "invalid_request":
 		k.Status = KeyStatusDisabled
+	case "quota_exceeded":
+		// P68: 配额耗尽(402 / 429 quota / 403 quota) — 标 QUOTA_EXCEEDED
+		// 让 quotacheck.Manager 探测恢复后调 RestoreQuota 回到 ACTIVE
+		p.markQuotaExceededLocked(k, now)
+		quotaCB = p.OnQuotaExceeded
 	}
+	p.mu.Unlock() // 提前释放锁,回调里再调 Pool 不会死锁
+
+	if quotaCB != nil {
+		quotaCB(k)
+	}
+}
+
+// markQuotaExceededLocked ReportError quota 分支内部调,要求已持锁
+// 不在 defer Unlock 前 fire 回调,避免回调里再调 Pool 死锁
+func (p *Pool) markQuotaExceededLocked(k *Key, now time.Time) {
+	k.Status = KeyStatusQuotaExceeded
+	k.QuotaExceededSince = now
+	k.QuotaProbeAttempts = 0
+	k.UpdatedAt = now
+}
+
+// ReportQuotaExceeded 公开方法 — 报告配额耗尽(供非 ReportError 路径调用)
+// 调用者应确保已分类 errType==quota_exceeded
+func (p *Pool) ReportQuotaExceeded(k *Key) {
+	p.mu.Lock()
+	now := time.Now()
+	p.markQuotaExceededLocked(k, now)
+	cb := p.OnQuotaExceeded
+	p.mu.Unlock() // 提前释放锁,回调里再调 Pool 不会死锁
+
+	if cb != nil {
+		cb(k)
+	}
+}
+
+// RestoreQuota 配额恢复 — Manager 探测到余额 > 0 时调
+func (p *Pool) RestoreQuota(k *Key) {
+	p.mu.Lock()
+	k.Status = KeyStatusActive
+	k.QuotaProbeAttempts = 0
+	k.QuotaExceededSince = time.Time{}
+	k.UpdatedAt = time.Now()
+	cb := p.OnKeyRestored
+	p.mu.Unlock()
+
+	if cb != nil {
+		go cb(k) // 异步,避免阻塞调用方
+	}
+}
+
+// MarkDisabledAfterQuota 探测连续失败达到 max attempts → 永久 DISABLED
+func (p *Pool) MarkDisabledAfterQuota(k *Key) {
+	p.mu.Lock()
+	k.Status = KeyStatusDisabled
+	k.UpdatedAt = time.Now()
+	cb := p.OnKeyDisabled
+	p.mu.Unlock()
+
+	if cb != nil {
+		go cb(k)
+	}
+}
+
+// IncQuotaProbeAttempts 探测次数 +1(RESTORE 时由 Manager reset 为 0)
+// 返回新的 attempts 数
+func (p *Pool) IncQuotaProbeAttempts(k *Key) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k.QuotaProbeAttempts++
+	return k.QuotaProbeAttempts
 }
 
 // Status 返回池当前状态摘要
 type PoolStatus struct {
-	ProviderName string `json:"provider_name"`
-	TotalKeys    int    `json:"total_keys"`
-	ActiveKeys   int    `json:"active_keys"`
-	CoolingKeys  int    `json:"cooling_keys"`
-	DisabledKeys int    `json:"disabled_keys"`
+	ProviderName      string `json:"provider_name"`
+	TotalKeys         int    `json:"total_keys"`
+	ActiveKeys        int    `json:"active_keys"`
+	CoolingKeys       int    `json:"cooling_keys"`
+	DisabledKeys      int    `json:"disabled_keys"`
+	QuotaExceededKeys int    `json:"quota_exceeded_keys"` // P68
 }
 
 // Status 池状态摘要
@@ -252,6 +325,8 @@ func (p *Pool) Status() PoolStatus {
 			s.CoolingKeys++
 		case KeyStatusDisabled:
 			s.DisabledKeys++
+		case KeyStatusQuotaExceeded:
+			s.QuotaExceededKeys++
 		}
 	}
 	return s
@@ -265,6 +340,16 @@ func (p *Pool) Keys() []Key {
 	for i, k := range p.keys {
 		out[i] = *k
 	}
+	return out
+}
+
+// KeyPtrs P68: 返 []*Key 让 caller 能直接调 Report* 方法
+// 调用者必须自己保证生命周期(指针指向 pool 内部 key,期间 key 不能被 Reload 替换)
+func (p *Pool) KeyPtrs() []*Key {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]*Key, len(p.keys))
+	copy(out, p.keys)
 	return out
 }
 

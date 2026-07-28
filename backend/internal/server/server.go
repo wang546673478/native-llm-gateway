@@ -23,6 +23,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/proxy"
+	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 	"github.com/wang546673478/native-llm-gateway/internal/usage"
 )
@@ -42,6 +43,7 @@ type Server struct {
 	usageR   *usage.Repository
 	metricsC *metrics.Collector
 	accessR  *accesslog.Recorder // P67: 接入日志 Recorder
+	quotaM   *quotacheck.Manager  // P68: 配额恢复 worker
 	http     *http.Server
 }
 
@@ -149,6 +151,26 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	// P30:把 DB Pool 注入到每个 Provider(Manager.LoadFromConfig 时 Pool 还是 nil)
 	injectPools(manager, pools, logger)
 
+	// P68: 构造 quotacheck.Manager(quota restore worker)
+	endpoints := make(map[string]string, len(cfg.Providers))
+	for name, p := range cfg.Providers {
+		if p.Enabled && p.Endpoint != "" {
+			endpoints[name] = p.Endpoint
+		}
+	}
+	quotaCfg := quotacheck.ManagerConfig{
+		Enabled:             cfg.KeyPool.QuotaEnabled,
+		ProbeInitialDelay:   cfg.KeyPool.QuotaProbeInitialDelay,
+		ProbeMaxBackoff:     cfg.KeyPool.QuotaProbeMaxBackoff,
+		ProbeJitterPct:      cfg.KeyPool.QuotaProbeJitterPct,
+		ProbeMaxAttempts:    cfg.KeyPool.QuotaProbeMaxAttempts,
+		PollInterval:        cfg.KeyPool.QuotaPollInterval,
+		PollJitterPct:       cfg.KeyPool.QuotaPollJitterPct,
+		HTTPTimeout:         cfg.KeyPool.QuotaHTTPTimeout,
+		UserAgent:           cfg.KeyPool.QuotaUserAgent,
+	}
+	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, quotaCfg)
+
 	return &Server{
 		cfg:      cfg,
 		logger:   logger,
@@ -163,6 +185,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		usageR:   usageRepo,
 		metricsC: metricsC,
 		accessR:  accessR,
+		quotaM:   quotaM,
 	}, nil
 }
 
@@ -341,6 +364,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// P67: 启动 AccessLog Recorder(async buffer + retention)
 	if s.accessR != nil {
 		s.accessR.Start(ctx)
+	}
+	// P68: 启动 quota restore worker(probing + polling)
+	if s.quotaM != nil {
+		s.quotaM.Start(ctx)
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
