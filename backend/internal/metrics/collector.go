@@ -16,7 +16,12 @@ type Collector struct {
 	requestsTotal *prometheus.CounterVec
 	tokensTotal   *prometheus.CounterVec
 	latencySecs   *prometheus.HistogramVec
-	registry      *prometheus.Registry
+	// P68: quota restore metrics
+	quotaProbeTotal       *prometheus.CounterVec   // probe 调用结果
+	quotaPollTotal        *prometheus.CounterVec   // poll 调用结果
+	quotaKeyTransitions   *prometheus.CounterVec   // 状态转换计数
+	quotaPendingProbes    prometheus.Gauge        // 当前待探测 key 数
+	registry              *prometheus.Registry
 }
 
 // NewCollector 构造 Collector
@@ -36,9 +41,29 @@ func NewCollector() *Collector {
 			Help:    "Request latency distribution.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120},
 		}, []string{"provider", "is_stream"}),
+		// P68
+		quotaProbeTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_quota_probe_total",
+			Help: "Quota probe attempts by provider and result (restored|still_exhausted|auth_failed|transport_error).",
+		}, []string{"provider", "result"}),
+		quotaPollTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_quota_poll_total",
+			Help: "Quota poll attempts (balance API) by provider and result.",
+		}, []string{"provider", "result"}),
+		quotaKeyTransitions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_quota_key_status_transitions_total",
+			Help: "Quota-related key status transitions.",
+		}, []string{"provider", "from", "to"}),
+		quotaPendingProbes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "gateway_quota_pending_probes",
+			Help: "Number of keys currently waiting in the probe min-heap (PendingProbe scheduler size).",
+		}),
 		registry: reg,
 	}
-	reg.MustRegister(c.requestsTotal, c.tokensTotal, c.latencySecs)
+	reg.MustRegister(
+		c.requestsTotal, c.tokensTotal, c.latencySecs,
+		c.quotaProbeTotal, c.quotaPollTotal, c.quotaKeyTransitions, c.quotaPendingProbes,
+	)
 	return c
 }
 
@@ -66,6 +91,32 @@ func (c *Collector) RecordTokens(provider string, input, output int) {
 	if output > 0 {
 		c.tokensTotal.With(prometheus.Labels{"provider": provider, "type": "output"}).Add(float64(output))
 	}
+}
+
+// P68: 记录一次 probe 结果
+// result ∈ {"restored", "still_exhausted", "auth_failed", "transport_error"}
+func (c *Collector) IncQuotaProbe(provider, result string) {
+	c.quotaProbeTotal.With(prometheus.Labels{"provider": provider, "result": result}).Inc()
+}
+
+// P68: 记录一次 poll 结果
+func (c *Collector) IncQuotaPoll(provider, result string) {
+	c.quotaPollTotal.With(prometheus.Labels{"provider": provider, "result": result}).Inc()
+}
+
+// P68: 记录一次 quota-related 状态转换
+// from/to ∈ {"active", "quota_exceeded", "disabled"} (current scope only)
+func (c *Collector) IncQuotaKeyTransition(provider, from, to string) {
+	c.quotaKeyTransitions.With(prometheus.Labels{
+		"provider": provider,
+		"from":     from,
+		"to":       to,
+	}).Inc()
+}
+
+// P68: 设置当前待探测 key 数
+func (c *Collector) SetQuotaPendingProbes(n int) {
+	c.quotaPendingProbes.Set(float64(n))
 }
 
 // Handler 返回 /metrics HTTP handler

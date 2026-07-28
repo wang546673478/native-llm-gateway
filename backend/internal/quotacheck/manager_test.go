@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 )
 
 // fakeProviderLookup 测试用,无外部依赖
@@ -230,3 +231,71 @@ func TestManager_RescanExistingSchedulesQuotaExceeded(t *testing.T) {
 // helpers
 
 var _ sync.Mutex // keep sync import used even if not directly referenced
+
+// TestManager_MetricsEmittedOnRestore 验证 metricsC 收到 IncQuotaKeyTransition
+func TestManager_MetricsEmittedOnRestore(t *testing.T) {
+	keys := []*keypool.Key{
+		{ID: "1", Name: "k1", Status: keypool.KeyStatusActive, CreatedAt: time.Now(), UpdatedAt: time.Now(), BillingSource: "api"},
+	}
+	pool := keypool.NewPool("test", keys, nil, keypool.Config{})
+	pool.ReportError(keys[0], "quota_exceeded")
+
+	mc := metrics.NewCollector()
+	m := &Manager{
+		logger:   zap.NewNop(),
+		cfg:      DefaultManagerConfig(),
+		pools:    NewPoolsRef(map[string]*keypool.Pool{"test": pool}),
+		prov:     &fakeProviderLookup{endpoints: map[string]string{"test": "http://x"}},
+		sched:    NewScheduler(),
+		now:      time.Now,
+		metricsC: mc,
+	}
+
+	m.handleProbeResult("test", "1", ResultRestored)
+
+	// gather metrics,看 transition counter
+	mfs, _ := mc.Registry().Gather()
+	found := false
+	for _, mf := range mfs {
+		if mf.GetName() != "gateway_quota_key_status_transitions_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labelStr := ""
+			for _, lp := range m.Label {
+				labelStr += lp.GetName() + "=" + lp.GetValue() + " "
+			}
+			if m.Counter != nil && m.Counter.GetValue() > 0 {
+				found = true
+				t.Logf("transition: %s -> %v", labelStr, m.Counter.GetValue())
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a quota transition counter to fire on Restored")
+	}
+}
+
+// TestManager_MetricsNilSafe 验证 metricsC=nil 时所有路径不 panic
+func TestManager_MetricsNilSafe(t *testing.T) {
+	keys := []*keypool.Key{
+		{ID: "1", Name: "k1", Status: keypool.KeyStatusActive, CreatedAt: time.Now(), UpdatedAt: time.Now(), BillingSource: "api"},
+	}
+	pool := keypool.NewPool("test", keys, nil, keypool.Config{})
+	pool.ReportError(keys[0], "quota_exceeded")
+
+	m := &Manager{
+		logger:   zap.NewNop(),
+		cfg:      DefaultManagerConfig(),
+		pools:    NewPoolsRef(map[string]*keypool.Pool{"test": pool}),
+		prov:     &fakeProviderLookup{endpoints: map[string]string{"test": "http://x"}},
+		sched:    NewScheduler(),
+		now:      time.Now,
+		metricsC: nil, // 显式 nil
+	}
+
+	// 不应 panic
+	m.handleQuotaExceeded("test", keys[0], keypool.KeyStatusActive)
+	m.handleProbeResult("test", "1", ResultRestored)
+	m.handleProbeResult("test", "1", ResultStillExhausted)
+}

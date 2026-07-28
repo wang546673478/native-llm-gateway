@@ -78,6 +78,7 @@ func (s *gormProviderKeyStore) GetPlainKeys(ctx context.Context, providerName st
 
 // ProviderKeyView 返回给前端(不含明文 key)
 // P48: 加 BillingSource — 路由时按这个字段选 tier(token_plan 优先)
+// P68: 加 Status 字段,前端可显示 QUOTA_EXCEEDED 等运行时状态
 type ProviderKeyView struct {
 	ID            uint      `json:"id"`
 	ProviderName  string    `json:"provider_name"`
@@ -85,18 +86,25 @@ type ProviderKeyView struct {
 	// KeyMasked 是脱敏后的 key(只显示前 8 + 后 4 字符)
 	KeyMasked     string    `json:"key_masked"`
 	Enabled       bool      `json:"enabled"`
+	// P68: 运行时状态 — "ACTIVE" / "COOLING" / "QUOTA_EXCEEDED" / "DISABLED" 等
+	// 由 poolLookup 在 list 时填充。如果 pool 找不到该 key,fallback 到 "ACTIVE"。
+	Status        string    `json:"status"`
 	BillingSource string    `json:"billing_source"` // P48: token_plan / api / free
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-func toProviderKeyView(k dbpkg.ProviderAPIKey) ProviderKeyView {
+func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
+	if status == "" {
+		status = "ACTIVE"
+	}
 	return ProviderKeyView{
 		ID:            k.ID,
 		ProviderName:  k.ProviderName,
 		Name:          k.Name,
 		KeyMasked:     maskKey(k.KeyHash),
 		Enabled:       k.Enabled,
+		Status:        status,
 		BillingSource: k.BillingSource,
 		CreatedAt:     k.CreatedAt,
 		UpdatedAt:    k.UpdatedAt,
@@ -119,11 +127,28 @@ type ProviderKeysHandler struct {
 	store ProviderKeyStore
 	// P35: reload hook — Create/Delete 后调一次,让 Server 重建 Pool 并注入到 Provider
 	reload func(providerName string)
+	// P68: 查运行时 key status (QUOTA_EXCEEDED / DISABLED 等)
+	// 由 server.go 注入。如果 nil,list 时 status 默认为 "ACTIVE"。
+	keyStatusLookup func(providerName, keyID string) string
+	// P68: 把指定 key 标 QUOTA_EXCEEDED(admin 端 e2e / 调试用)
+	quotaMarkFunc func(providerName, keyID string)
 }
 
 // NewProviderKeysHandler 构造 handler
 func NewProviderKeysHandler(db *gorm.DB, reload func(providerName string)) *ProviderKeysHandler {
 	return &ProviderKeysHandler{store: NewProviderKeyStore(db), reload: reload}
+}
+
+// SetKeyStatusLookup P68: 注入 status lookup(从 Pool 查 key 当前状态)
+// 在 server.go 启动时设置,after buildKeyPools 完毕。
+func (h *ProviderKeysHandler) SetKeyStatusLookup(fn func(providerName, keyID string) string) {
+	h.keyStatusLookup = fn
+}
+
+// SetQuotaMarkFunc P68: 注入 quota mark func(把 key 标 QUOTA_EXCEEDED)
+// 由 server.go 启动时设置
+func (h *ProviderKeysHandler) SetQuotaMarkFunc(fn func(providerName, keyID string)) {
+	h.quotaMarkFunc = fn
 }
 
 // Register 挂到 r.Group
@@ -141,6 +166,8 @@ func (h *ProviderKeysHandler) RegisterOn(r *gin.RouterGroup) {
 	r.GET("/providers/:name/api-keys", h.list)
 	r.POST("/providers/:name/api-keys", h.create)
 	r.DELETE("/providers/:name/api-keys/:id", h.delete)
+	// P68: 手动 mark key 为 QUOTA_EXCEEDED(调试 / 强制触发 UI 状态)
+	r.POST("/providers/:name/api-keys/:id/mark-quota-exceeded", h.markQuotaExceeded)
 }
 
 func (h *ProviderKeysHandler) list(c *gin.Context) {
@@ -152,7 +179,11 @@ func (h *ProviderKeysHandler) list(c *gin.Context) {
 	}
 	views := make([]ProviderKeyView, 0, len(rows))
 	for _, r := range rows {
-		views = append(views, toProviderKeyView(r))
+		status := ""
+		if h.keyStatusLookup != nil {
+			status = h.keyStatusLookup(providerName, fmt.Sprintf("%d", r.ID))
+		}
+		views = append(views, toProviderKeyView(r, status))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"keys":   views,
@@ -226,7 +257,8 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 	if h.reload != nil {
 		h.reload(providerName)
 	}
-	c.JSON(http.StatusCreated, toProviderKeyView(*k))
+	// 新建的 key 默认 ACTIVE
+	c.JSON(http.StatusCreated, toProviderKeyView(*k, "ACTIVE"))
 }
 
 func (h *ProviderKeysHandler) delete(c *gin.Context) {
@@ -261,6 +293,26 @@ func (h *ProviderKeysHandler) delete(c *gin.Context) {
 		h.reload(providerName)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": id})
+}
+
+// markQuotaExceeded POST /api/v1/providers/:name/api-keys/:id/mark-quota-exceeded
+// P68: 手动把 key 标 QUOTA_EXCEEDED(用来测试 e2e / 调试 UI 状态徽章)。
+// 在生产环境这个 endpoint 主要是给 admin 当作 "force-disable-pending-quota-restore" 工具,
+// 等价于真实的 quota_exceeded 触发但不需要真的耗尽 quota。
+func (h *ProviderKeysHandler) markQuotaExceeded(c *gin.Context) {
+	providerName := c.Param("name")
+	idStr := c.Param("id")
+	var id uint
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_id"})
+		return
+	}
+	if h.quotaMarkFunc == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota_mark_not_wired"})
+		return
+	}
+	h.quotaMarkFunc(providerName, fmt.Sprintf("%d", id))
+	c.JSON(http.StatusOK, gin.H{"marked_quota_exceeded": true})
 }
 
 // BuildProviderPools 从 DB 读所有 provider 的 enabled key,

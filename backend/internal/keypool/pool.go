@@ -22,9 +22,9 @@ type Pool struct {
 	keys         []*Key
 	scheduler    Scheduler
 	// P68: quota restore 回调槽(默认 nil = no-op)。
-	// 注入方是 quotacheck.Manager(启动时通过 SetupQuotaCallbacks),
-	// Pool 不感知 quotacheck 包,避免 import cycle。
-	OnQuotaExceeded func(*Key)
+	// 注入方是 quotacheck.Manager,Pool 不感知 quotacheck 包,避免 import cycle。
+	// 签名带 fromStatus:让 callback 知道状态变之前的值,用于 emit transition metric。
+	OnQuotaExceeded func(*Key, KeyStatus) // 第二参数:状态变之前的 status
 	OnKeyRestored   func(*Key)
 	OnKeyDisabled   func(*Key)
 }
@@ -224,20 +224,22 @@ func (p *Pool) ReportError(k *Key, errType string) {
 	k.LastErrorAt = now
 	k.UpdatedAt = now
 
-	var quotaCB func(*Key)
+	var quotaCB func(*Key, KeyStatus)
+	var fromStatus KeyStatus
 	switch errType {
 	case "auth", "invalid_request":
 		k.Status = KeyStatusDisabled
 	case "quota_exceeded":
 		// P68: 配额耗尽(402 / 429 quota / 403 quota) — 标 QUOTA_EXCEEDED
 		// 让 quotacheck.Manager 探测恢复后调 RestoreQuota 回到 ACTIVE
+		fromStatus = k.Status
 		p.markQuotaExceededLocked(k, now)
 		quotaCB = p.OnQuotaExceeded
 	}
 	p.mu.Unlock() // 提前释放锁,回调里再调 Pool 不会死锁
 
 	if quotaCB != nil {
-		quotaCB(k)
+		quotaCB(k, fromStatus)
 	}
 }
 
@@ -255,12 +257,13 @@ func (p *Pool) markQuotaExceededLocked(k *Key, now time.Time) {
 func (p *Pool) ReportQuotaExceeded(k *Key) {
 	p.mu.Lock()
 	now := time.Now()
+	fromStatus := k.Status
 	p.markQuotaExceededLocked(k, now)
 	cb := p.OnQuotaExceeded
-	p.mu.Unlock() // 提前释放锁,回调里再调 Pool 不会死锁
+	p.mu.Unlock()
 
 	if cb != nil {
-		cb(k)
+		cb(k, fromStatus)
 	}
 }
 

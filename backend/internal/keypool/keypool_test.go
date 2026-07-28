@@ -307,7 +307,7 @@ func TestPool_QuotaExceededIsNotDisabled(t *testing.T) {
 
 	// 装回调,验证会 fire
 	called := false
-	pool.OnQuotaExceeded = func(k *Key) { called = true }
+	pool.OnQuotaExceeded = func(k *Key, _ KeyStatus) { called = true }
 
 	pool.ReportError(keys[0], "quota_exceeded")
 	k := keys[0]

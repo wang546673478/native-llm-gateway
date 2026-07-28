@@ -169,7 +169,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		HTTPTimeout:         cfg.KeyPool.QuotaHTTPTimeout,
 		UserAgent:           cfg.KeyPool.QuotaUserAgent,
 	}
-	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, quotaCfg)
+	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
 
 	return &Server{
 		cfg:      cfg,
@@ -500,6 +500,32 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 
 	// P30: Provider API keys 管理(给已插件化的 Provider 加上游 LLM key)
 	pkHandler := auth.NewProviderKeysHandler(s.db, s.ReloadProviderPool)
+	// P68: 注入 status lookup,让 list endpoint 返回 key 运行时状态
+	pkHandler.SetKeyStatusLookup(func(providerName, keyID string) string {
+		pool, ok := s.pools[providerName]
+		if !ok {
+			return ""
+		}
+		for _, k := range pool.KeyPtrs() {
+			if k.ID == keyID {
+				return string(k.Status)
+			}
+		}
+		return ""
+	})
+	// P68: 注入 quota mark func(手动把 key 标 QUOTA_EXCEEDED)
+	pkHandler.SetQuotaMarkFunc(func(providerName, keyID string) {
+		pool, ok := s.pools[providerName]
+		if !ok {
+			return
+		}
+		for _, k := range pool.KeyPtrs() {
+			if k.ID == keyID {
+				pool.ReportQuotaExceeded(k)
+				return
+			}
+		}
+	})
 	pkHandler.RegisterOn(r.Group("/api/v1"))
 
 	// P5: 真代理接入
@@ -616,6 +642,10 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		if s.router != nil {
 			s.router.SetPool(providerName, pool)
 		}
+		// P68: reload 后的新 pool 需重新注入 quota callback(否则 manager 监听不到)
+		if s.quotaM != nil {
+			s.quotaM.ReinjectCallback(providerName, pool)
+		}
 		return
 	}
 	// 全量重建
@@ -629,6 +659,10 @@ func (s *Server) ReloadProviderPool(providerName string) {
 			if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
 				setter.SetPool(pool)
 			}
+		}
+		// P68: 同上 — reload 全量时每个新 pool 都要注入 callback
+		if s.quotaM != nil {
+			s.quotaM.ReinjectCallback(name, pool)
 		}
 	}
 	s.logger.Info("all provider pools reloaded", zap.Int("providers", len(s.pools)))

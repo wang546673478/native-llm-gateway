@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 )
 
 // providerLookup 窄接口,Server.New 构造一个满足接口的对象传入
@@ -93,11 +94,12 @@ func (r *PoolsRef) Get() map[string]*keypool.Pool {
 
 // Manager 主管理器
 type Manager struct {
-	logger *zap.Logger
-	cfg    ManagerConfig
-	pools  *PoolsRef
-	prov   providerLookup
-	sched  *Scheduler
+	logger    *zap.Logger
+	cfg       ManagerConfig
+	pools     *PoolsRef
+	prov      providerLookup
+	sched     *Scheduler
+	metricsC  *metrics.Collector // 可选,nil 时 skip metrics emit
 
 	// 测试可注入
 	now   func() time.Time
@@ -107,7 +109,8 @@ type Manager struct {
 
 // NewManager 构造 Manager
 // prov 用 StaticProviderLookup 包一下传入
-func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, cfg ManagerConfig) *Manager {
+// metricsC 可传 nil(测试 / 单测场景),nil 时不 emit
+func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, metricsC *metrics.Collector, cfg ManagerConfig) *Manager {
 	if cfg.ProbeInitialDelay <= 0 {
 		cfg.ProbeInitialDelay = 5 * time.Minute
 	}
@@ -132,28 +135,33 @@ func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, cfg Ma
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = "native-llm-gateway/quota-restore-1.0"
 	}
-	return &Manager{
-		logger: logger,
-		cfg:    cfg,
-		pools:  pools,
-		prov:   prov,
-		sched:  NewScheduler(),
-		now:    time.Now,
-		rand:   rand.New(rand.NewSource(time.Now().UnixNano())),
+	m := &Manager{
+		logger:   logger,
+		cfg:      cfg,
+		pools:    pools,
+		prov:     prov,
+		sched:    NewScheduler(),
+		metricsC: metricsC,
+		now:      time.Now,
+		rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+	// P68: 立即注入 callback — 即使 Manager.Start 还没跑(worker ticker 没起),
+	// pool 事件(OnQuotaExceeded)也能 fire 并入堆。Start 调 rescanExisting 时
+	// 会复用这些状态。修复一个 race:RegisterRoutes 早于 Server.Run,期间
+	// mark-quota-exceeded 端点如果被调用,callback 不会丢失事件。
+	m.injectCallbacks()
+	return m
 }
 
 // Start 启动 polling + probe goroutines
-// 注入回调到所有 Pool,扫描已有的 QUOTA_EXCEEDED key
+// 注意: callback 已经在 NewManager 时注入,这里不再 inject(避免重复 log)
 func (m *Manager) Start(ctx context.Context) {
 	if !m.cfg.Enabled {
 		m.logger.Info("quotacheck.Manager disabled by config")
 		return
 	}
 
-	// 注入回调
-	m.injectCallbacks()
-	// 冷启动:扫描现有 QUOTA_EXCEEDED keys
+	// 冷启动:扫描现有 QUOTA_EXCEEDED keys(把已经在 QUOTA_EXCEEDED 状态的入堆)
 	m.rescanExisting()
 
 	go m.pollLoop(ctx)
@@ -168,26 +176,51 @@ func (m *Manager) Start(ctx context.Context) {
 // 也会在 ReloadProviderPool 后再次调用
 func (m *Manager) injectCallbacks() {
 	for name, pool := range m.pools.Get() {
-		providerName := name
-		p := pool
-		p.OnQuotaExceeded = func(k *keypool.Key) {
-			m.handleQuotaExceeded(providerName, k)
-		}
-		p.OnKeyRestored = func(k *keypool.Key) {
-			m.logger.Info("key restored from quota_exceeded",
+		m.injectOneCallback(name, pool)
+	}
+	m.metricsSetPending(m.sched.pendingCount())
+}
+
+// injectOneCallback P68: 给单个 pool 注入 callback + 把 QUOTA_EXCEEDED 状态
+// 重新入堆(用于 ReloadProviderPool 后)
+// callback 签名:OnQuotaExceeded(*Key, KeyStatus) — 第二参数是状态变之前的 status
+// 用来 emit transition metric(from → to)
+func (m *Manager) injectOneCallback(providerName string, p *keypool.Pool) {
+	p.OnQuotaExceeded = func(k *keypool.Key, fromStatus keypool.KeyStatus) {
+		m.handleQuotaExceeded(providerName, k, fromStatus)
+	}
+	p.OnKeyRestored = func(k *keypool.Key) {
+		m.logger.Info("key restored from quota_exceeded",
+			zap.String("provider", providerName),
+			zap.String("key_id", k.ID),
+			zap.String("tier", k.BillingSource),
+		)
+	}
+	p.OnKeyDisabled = func(k *keypool.Key) {
+		m.logger.Info("key disabled after quota probe",
+			zap.String("provider", providerName),
+			zap.String("key_id", k.ID),
+			zap.Int("attempts", k.QuotaProbeAttempts),
+		)
+	}
+	// 把已经是 QUOTA_EXCEEDED 的 key 重新入堆(防止 reload 丢失状态)
+	for _, k := range p.KeyPtrs() {
+		if k.Status == keypool.KeyStatusQuotaExceeded {
+			m.logger.Info("reinjecting quota_exceeded key after pool reload",
 				zap.String("provider", providerName),
 				zap.String("key_id", k.ID),
-				zap.String("tier", k.BillingSource),
 			)
-		}
-		p.OnKeyDisabled = func(k *keypool.Key) {
-			m.logger.Info("key disabled after quota probe",
-				zap.String("provider", providerName),
-				zap.String("key_id", k.ID),
-				zap.Int("attempts", k.QuotaProbeAttempts),
-			)
+			// reload 路径下 fromStatus 已经是 QUOTA_EXCEEDED — manager 内部会跳过 metric
+			m.handleQuotaExceeded(providerName, k, keypool.KeyStatusQuotaExceeded)
 		}
 	}
+}
+
+// ReinjectCallback P68: Server.ReloadProviderPool 替换 pool 后调这个
+// 把 callback 重新注入到新 pool + 重新入堆已有 QUOTA_EXCEEDED 的 key
+func (m *Manager) ReinjectCallback(providerName string, p *keypool.Pool) {
+	m.injectOneCallback(providerName, p)
+	m.metricsSetPending(m.sched.pendingCount())
 }
 
 // rescanExisting 冷启动:把已有 QUOTA_EXCEEDED 的 key 立即入堆
@@ -199,16 +232,25 @@ func (m *Manager) rescanExisting() {
 					zap.String("provider", name),
 					zap.String("key_id", k.ID),
 				)
-				m.handleQuotaExceeded(name, k)
+				// 冷启动: fromStatus 已经是 QUOTA_EXCEEDED — manager 内部会跳过 emit
+				m.handleQuotaExceeded(name, k, keypool.KeyStatusQuotaExceeded)
 			}
 		}
 	}
 }
 
 // handleQuotaExceeded 回调 — 把 key 入堆,首次延迟 = ProbeInitialDelay
-func (m *Manager) handleQuotaExceeded(providerName string, k *keypool.Key) {
+// 同时 emit transition metric(从 fromStatus → QUOTA_EXCEEDED)
+// fromStatus 来自 pool callback(状态变之前的值),不是当前 k.Status
+func (m *Manager) handleQuotaExceeded(providerName string, k *keypool.Key, fromStatus keypool.KeyStatus) {
+	if fromStatus != keypool.KeyStatusQuotaExceeded {
+		// 真发生了 transition(从 active/cooling/disabled → quota_exceeded)
+		m.metricsTransition(providerName, string(fromStatus), string(keypool.KeyStatusQuotaExceeded))
+	}
+	// 已经在 QUOTA_EXCEEDED(冷启动 rescan / ReinjectCallback)就不重复 emit
 	nextAt := m.now().Add(m.jitter(m.cfg.ProbeInitialDelay, m.cfg.ProbeJitterPct))
 	m.sched.scheduleKey(providerName, k.ID, nextAt, m.cfg.ProbeInitialDelay, 0)
+	m.metricsSetPending(m.sched.pendingCount())
 }
 
 // handleProbeResult 探测完成后的状态机
@@ -228,6 +270,7 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 	if k == nil {
 		return
 	}
+	fromStatus := string(k.Status)
 
 	switch result {
 	case ResultRestored:
@@ -236,6 +279,7 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 			zap.String("key_id", keyID),
 		)
 		pool.RestoreQuota(k)
+		m.metricsTransition(providerName, fromStatus, string(keypool.KeyStatusActive))
 		// 探测成功,从堆里移除
 		m.sched.removeKey(providerName, keyID)
 
@@ -248,6 +292,7 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 				zap.Int("attempts", attempts),
 			)
 			pool.MarkDisabledAfterQuota(k)
+			m.metricsTransition(providerName, fromStatus, string(keypool.KeyStatusDisabled))
 			m.sched.removeKey(providerName, keyID)
 			return
 		}
@@ -262,6 +307,7 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 			zap.String("key_id", keyID),
 		)
 		pool.MarkDisabledAfterQuota(k)
+		m.metricsTransition(providerName, fromStatus, string(keypool.KeyStatusDisabled))
 		m.sched.removeKey(providerName, keyID)
 
 	case ResultTransportError:
@@ -270,6 +316,38 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 		nextAt := m.now().Add(m.jitter(backoff, m.cfg.ProbeJitterPct))
 		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, k.QuotaProbeAttempts)
 	}
+}
+
+// metricsTransition 安全的 metrics 写入(metricsC 可能为 nil)
+func (m *Manager) metricsTransition(provider, from, to string) {
+	if m.metricsC == nil {
+		return
+	}
+	m.metricsC.IncQuotaKeyTransition(provider, from, to)
+}
+
+// metricsProbeInc IncQuotaProbe,m nil 时 no-op
+func (m *Manager) metricsProbeInc(provider, result string) {
+	if m.metricsC == nil {
+		return
+	}
+	m.metricsC.IncQuotaProbe(provider, result)
+}
+
+// metricsPollInc IncQuotaPoll,m nil 时 no-op
+func (m *Manager) metricsPollInc(provider, result string) {
+	if m.metricsC == nil {
+		return
+	}
+	m.metricsC.IncQuotaPoll(provider, result)
+}
+
+// metricsSetPending n 可为 0
+func (m *Manager) metricsSetPending(n int) {
+	if m.metricsC == nil {
+		return
+	}
+	m.metricsC.SetQuotaPendingProbes(n)
 }
 
 // backoff 第 n 次失败的延迟:initial * 2^(n-1),capped at max
@@ -325,6 +403,8 @@ func (m *Manager) probeLoop(ctx context.Context) {
 func (m *Manager) drainDueProbes(ctx context.Context) {
 	now := m.now()
 	items := m.sched.popDueItems(now)
+	// 每次 pop 后更新 pending gauge(注意:这里是 pop 后的剩余值)
+	defer m.metricsSetPending(m.sched.pendingCount())
 	for _, it := range items {
 		m.runProbe(ctx, it)
 	}
@@ -359,13 +439,15 @@ func (m *Manager) runProbe(ctx context.Context, it *probeItem) {
 		bal, err := balancer.FetchBalance(ctx, baseURL, k)
 		if err != nil {
 			m.logger.Debug("balance fetch err", zap.String("provider", it.keyProvider), zap.Error(err))
+			m.metricsPollInc(it.keyProvider, "transport_error")
 			m.handleProbeResult(it.keyProvider, it.keyID, ResultTransportError)
 			return
 		}
 		if bal.HasQuota {
+			m.metricsPollInc(it.keyProvider, "restored")
 			m.handleProbeResult(it.keyProvider, it.keyID, ResultRestored)
 		} else {
-			// balance == 0 → still exhausted
+			m.metricsPollInc(it.keyProvider, "still_exhausted")
 			m.handleProbeResult(it.keyProvider, it.keyID, ResultStillExhausted)
 		}
 		return
@@ -388,6 +470,17 @@ func (m *Manager) runProbe(ctx context.Context, it *probeItem) {
 	}
 	baseURL := m.prov.EndpointFor(it.keyProvider)
 	result := prober.Probe(ctx, baseURL, k)
+	// 记录 probe 结果
+	switch result {
+	case ResultRestored:
+		m.metricsProbeInc(it.keyProvider, "restored")
+	case ResultStillExhausted:
+		m.metricsProbeInc(it.keyProvider, "still_exhausted")
+	case ResultAuthFailed:
+		m.metricsProbeInc(it.keyProvider, "auth_failed")
+	case ResultTransportError:
+		m.metricsProbeInc(it.keyProvider, "transport_error")
+	}
 	m.handleProbeResult(it.keyProvider, it.keyID, result)
 }
 
