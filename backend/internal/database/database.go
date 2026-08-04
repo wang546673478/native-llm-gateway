@@ -90,6 +90,30 @@ func Migrate(db *gorm.DB) error {
 	if err := migrateProviderToProviders(db); err != nil {
 		return fmt.Errorf("data migrate: %w", err)
 	}
+	// P-provider-vendor: 协议变体并入厂商名,并标协议
+	if err := migrateProviderVendorKeys(db); err != nil {
+		return fmt.Errorf("vendor key migrate: %w", err)
+	}
+	return nil
+}
+
+// migrateProviderVendorKeys P-provider-vendor: 把协议变体注册名下的 key 并入厂商名,并标协议
+//   - deepseek-anthropic 行 → provider_name='deepseek', protocols='anthropic'
+//   - minimax-openai 行     → provider_name='minimax',  protocols='openai'
+//
+// 主条目(deepseek/minimax)的 key 不标协议 — 保持空 = 全部协议(物理上同一 key 两端点通用,
+// 且避免每次重启把用户新加的全协议 key 覆盖成单协议 — 用户 2026-08-04 裁决)。
+// 幂等:变体注册名迁移后不再存在,重复执行影响 0 行,无副作用。
+func migrateProviderVendorKeys(db *gorm.DB) error {
+	stmts := []string{
+		`UPDATE provider_api_keys SET provider_name='deepseek', protocols='anthropic' WHERE provider_name='deepseek-anthropic'`,
+		`UPDATE provider_api_keys SET provider_name='minimax', protocols='openai' WHERE provider_name='minimax-openai'`,
+	}
+	for _, s := range stmts {
+		if err := db.Exec(s).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

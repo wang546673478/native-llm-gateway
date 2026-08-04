@@ -47,6 +47,8 @@ type Key struct {
 	LastPolledAt time.Time
 	// P-quota-display: 上次 poll 的数值类型("percent"/"currency"/"")— 前端按此渲染单位
 	QuotaKind string
+	// P-provider-vendor: 该 key 可用的协议列表(逗号分隔,空 = 全部);从 DB ProviderAPIKey.Protocols 读入
+	Protocols string
 }
 
 // IsUsable 在给定时间点判断 Key 是否可用于调度

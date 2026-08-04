@@ -66,9 +66,12 @@ type ProviderAPIKey struct {
 	Enabled bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`
 	// P48: 单 key 的计费来源(token_plan / api / free)
 	// 默认 api(向后兼容);创建时如果不指定,可用 provider 的 billing_source 作默认值
-	BillingSource string    `gorm:"column:billing_source;default:'api'" json:"billing_source"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	BillingSource string `gorm:"column:billing_source;default:'api'" json:"billing_source"`
+	// P-provider-vendor: key 可用的协议列表,逗号分隔("openai,anthropic");空 = 全部协议
+	// 同一把 key 物理上两个协议端点都能用,protocols 只是用户限制语义
+	Protocols string    `gorm:"column:protocols;default:''" json:"protocols"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // TableName
