@@ -97,37 +97,90 @@
             </n-descriptions-item>
           </n-descriptions>
 
-          <n-space align="center">
-            <n-h4>请求体 ({{ formatSize(detail.metadata.req_body_size) }})</n-h4>
-            <n-tag v-if="detail.req_body_trunc" type="warning" size="small">已截断</n-tag>
+          <!-- P-training: 可读 / 原始切换 -->
+          <n-space align="center" style="margin-bottom: 8px">
+            <n-radio-group v-model:value="viewMode" size="small">
+              <n-radio-button value="readable">人类可读</n-radio-button>
+              <n-radio-button value="raw">原始 JSON</n-radio-button>
+            </n-radio-group>
           </n-space>
-          <n-card embedded>
-            <n-input
-              type="textarea"
-              :value="detail.req_body || '— 不可用 —'"
-              :autosize="{ minRows: 4, maxRows: 16 }"
-              readonly
-            />
-            <n-button size="tiny" style="margin-top: 4px" @click="copy(detail.req_body)">
-              复制
-            </n-button>
-          </n-card>
 
-          <n-space align="center">
-            <n-h4>响应体 ({{ formatSize(detail.metadata.resp_body_size) }})</n-h4>
-            <n-tag v-if="detail.resp_body_trunc" type="warning" size="small">已截断</n-tag>
-          </n-space>
-          <n-card embedded>
-            <n-input
-              type="textarea"
-              :value="detail.resp_body || '— 不可用 —'"
-              :autosize="{ minRows: 4, maxRows: 16 }"
-              readonly
-            />
-            <n-button size="tiny" style="margin-top: 4px" @click="copy(detail.resp_body)">
-              复制
-            </n-button>
-          </n-card>
+          <template v-if="viewMode === 'readable'">
+            <n-space align="center">
+              <n-h4>请求 ({{ formatSize(detail.metadata.req_body_size) }})</n-h4>
+              <n-tag v-if="detail.req_body_trunc" type="warning" size="small">已截断</n-tag>
+            </n-space>
+            <n-card embedded size="small" style="margin-bottom: 16px">
+              <template v-if="reqParsed">
+                <n-space style="margin-bottom: 8px">
+                  <n-tag type="info" size="small">model: {{ reqParsed.model ?? '—' }}</n-tag>
+                  <n-tag v-if="reqParsed.stream" size="small">stream</n-tag>
+                  <n-tag v-if="reqParsed.max_tokens" size="small">max_tokens: {{ reqParsed.max_tokens }}</n-tag>
+                </n-space>
+                <div v-if="reqMessages.length === 0" class="msg-content dim">
+                  (消息列表为空或格式未识别 — 切原始 JSON 查看)
+                </div>
+                <div v-for="(m, i) in reqMessages" :key="i" class="msg-block">
+                  <div class="msg-role" :class="`role-${m.role ?? 'unknown'}`">
+                    {{ roleLabel(m.role) }}
+                  </div>
+                  <div class="msg-content">{{ msgText(m) }}</div>
+                </div>
+              </template>
+              <n-text v-else depth="3">{{ detail.req_body || '— 不可用 —' }}</n-text>
+            </n-card>
+
+            <n-space align="center">
+              <n-h4>响应 ({{ formatSize(detail.metadata.resp_body_size) }})</n-h4>
+              <n-tag v-if="detail.resp_body_trunc" type="warning" size="small">已截断</n-tag>
+            </n-space>
+            <n-card embedded size="small">
+              <template v-if="respParsed">
+                <div v-if="respText" class="msg-content" style="white-space: pre-wrap">
+                  {{ respText }}
+                </div>
+                <div v-if="respUsage" class="resp-usage">{{ respUsage }}</div>
+                <n-text v-if="!respText && !respUsage" depth="3" style="font-size: 12px">
+                  (响应无可读内容 — 切原始 JSON 查看)
+                </n-text>
+              </template>
+              <n-text v-else depth="3">{{ detail.resp_body || '— 不可用 —' }}</n-text>
+            </n-card>
+          </template>
+
+          <template v-else>
+            <n-space align="center">
+              <n-h4>请求体 ({{ formatSize(detail.metadata.req_body_size) }})</n-h4>
+              <n-tag v-if="detail.req_body_trunc" type="warning" size="small">已截断</n-tag>
+            </n-space>
+            <n-card embedded>
+              <n-input
+                type="textarea"
+                :value="detail.req_body || '— 不可用 —'"
+                :autosize="{ minRows: 4, maxRows: 16 }"
+                readonly
+              />
+              <n-button size="tiny" style="margin-top: 4px" @click="copy(detail.req_body)">
+                复制
+              </n-button>
+            </n-card>
+
+            <n-space align="center">
+              <n-h4>响应体 ({{ formatSize(detail.metadata.resp_body_size) }})</n-h4>
+              <n-tag v-if="detail.resp_body_trunc" type="warning" size="small">已截断</n-tag>
+            </n-space>
+            <n-card embedded>
+              <n-input
+                type="textarea"
+                :value="detail.resp_body || '— 不可用 —'"
+                :autosize="{ minRows: 4, maxRows: 16 }"
+                readonly
+              />
+              <n-button size="tiny" style="margin-top: 4px" @click="copy(detail.resp_body)">
+                复制
+              </n-button>
+            </n-card>
+          </template>
         </div>
       </n-drawer-content>
     </n-drawer>
@@ -135,7 +188,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
 import {
   NButton,
   NCard,
@@ -147,6 +200,8 @@ import {
   NH3,
   NH4,
   NInput,
+  NRadioButton,
+  NRadioGroup,
   NSelect,
   NSpace,
   NSpin,
@@ -195,6 +250,93 @@ const statusOptions = [
 
 const drawerVisible = ref(false)
 const detail = ref<AccessLogDetailResp | null>(null)
+// P-training: 详情视图模式 — 人类可读(默认)/ 原始 JSON
+const viewMode = ref<'readable' | 'raw'>('readable')
+
+// ---- 人类可读渲染:请求/响应 body 解析 ----
+interface MsgLike {
+  role?: string
+  content?: string | Array<Record<string, any>>
+}
+
+function parseBody(s: string | undefined): Record<string, any> | null {
+  if (!s) return null
+  try {
+    return JSON.parse(s)
+  } catch {
+    return null
+  }
+}
+
+const reqParsed = computed(() => parseBody(detail.value?.req_body))
+const respParsed = computed(() => parseBody(detail.value?.resp_body))
+
+// 请求消息列表(OpenAI / Anthropic 都是 messages 数组)
+const reqMessages = computed<MsgLike[]>(() => {
+  const msgs = reqParsed.value?.messages
+  return Array.isArray(msgs) ? (msgs as MsgLike[]) : []
+})
+
+const roleLabel = (role: string | undefined): string => {
+  switch (role) {
+    case 'user': return '用户'
+    case 'assistant': return '助手'
+    case 'system': return '系统'
+    case 'tool': return '工具'
+    default: return role ?? '—'
+  }
+}
+
+// 消息内容块 → 文本(content 可能是字符串或块数组:thinking/tool_use/tool_result)
+function msgText(m: MsgLike): string {
+  const c = m.content
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    return c.map(b => {
+      if (b.type === 'text') return b.text ?? ''
+      if (b.type === 'thinking') return `[思考] ${b.thinking ?? ''}`
+      if (b.type === 'tool_use') return `[工具调用] ${b.name}(${JSON.stringify(b.input ?? {})})`
+      if (b.type === 'tool_result') return `[工具结果] ${JSON.stringify(b.content ?? '')}`
+      return JSON.stringify(b)
+    }).filter(Boolean).join('\n')
+  }
+  return c ? JSON.stringify(c) : ''
+}
+
+// 响应文本(Anthropic content[] / OpenAI choices[0].message / Gemini parts)
+const respText = computed<string>(() => {
+  const r = respParsed.value
+  if (!r) return ''
+  if (Array.isArray(r.content)) {
+    return r.content.map((b: any) => {
+      if (b.type === 'text') return b.text ?? ''
+      if (b.type === 'thinking') return `[思考] ${b.thinking ?? ''}`
+      return JSON.stringify(b)
+    }).filter(Boolean).join('\n')
+  }
+  const msg = r.choices?.[0]?.message
+  if (msg) return typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '')
+  const parts = r.candidates?.[0]?.content?.parts
+  if (parts) return parts.map((p: any) => p.text ?? '').filter(Boolean).join('\n')
+  if (r.base_resp) return `[上游错误 ${r.base_resp.status_code}] ${r.base_resp.status_msg ?? ''}`
+  return ''
+})
+
+// 响应 usage(Anthropic / OpenAI 两种结构)
+const respUsage = computed<string>(() => {
+  const r = respParsed.value
+  if (!r) return ''
+  const u = r.usage
+  if (!u) return ''
+  const parts: string[] = []
+  if (u.input_tokens !== undefined) parts.push(`输入 ${u.input_tokens}`)
+  if (u.output_tokens !== undefined) parts.push(`输出 ${u.output_tokens}`)
+  if (u.prompt_tokens !== undefined) parts.push(`输入 ${u.prompt_tokens}`)
+  if (u.completion_tokens !== undefined) parts.push(`输出 ${u.completion_tokens}`)
+  if (u.cache_read_input_tokens !== undefined) parts.push(`缓存读 ${u.cache_read_input_tokens}`)
+  if (u.cache_creation_input_tokens !== undefined) parts.push(`缓存写 ${u.cache_creation_input_tokens}`)
+  return parts.join(' · ')
+})
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -372,3 +514,50 @@ onMounted(() => {
   loadProviderModelOptions()
 })
 </script>
+
+<style scoped>
+/* P-training: 详情抽屉人类可读渲染 */
+.msg-block {
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  background: rgba(128, 128, 128, 0.05);
+}
+.msg-role {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.role-user {
+  color: #2080f0;
+}
+.role-assistant {
+  color: #18a058;
+}
+.role-system {
+  color: #999;
+}
+.role-tool {
+  color: #f0a020;
+}
+.msg-content {
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.msg-content.dim {
+  color: #999;
+  font-size: 12px;
+}
+.resp-usage {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(128, 128, 128, 0.3);
+  font-size: 12px;
+  color: #999;
+}
+</style>
