@@ -3,7 +3,9 @@
 package provider
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +20,55 @@ const (
 	ProtocolAnthropic Protocol = "anthropic"
 	ProtocolGoogle    Protocol = "google"
 )
+
+// MiniMax base_resp 错误识别(P-quota-minimax)
+// MiniMax 的错误经常藏在 HTTP 200 的 body 里:{"base_resp":{"status_code":1008,...}},
+// 只看 HTTP 状态码会把它当成功响应透传。两个协议基座(openai/anthropic)的
+// SendRequest / SendStreamRequest 都在返回成功前调 ParseMiniMaxBaseResp;
+// 非 MiniMax 响应没有 base_resp 字段,检查为 no-op。
+
+// MiniMax 配额耗尽错误码:1008 = 余额不足,2056 = 超出 Token Plan 限制
+func IsMiniMaxQuotaCode(code int) bool {
+	return code == 1008 || code == 2056
+}
+
+// ParseMiniMaxStreamBaseResp 流式场景解析 base_resp 错误(peek 到的前几行):
+// MiniMax 可能直接发 JSON 错误体(非 SSE),也可能用 SSE 帧包装
+// (event:/data: 前缀行)。两种都解析;无 base_resp → (0,"")
+func ParseMiniMaxStreamBaseResp(peeked []byte) (int, string) {
+	if code, msg := ParseMiniMaxBaseResp(peeked); code != 0 {
+		return code, msg
+	}
+	for _, line := range bytes.Split(peeked, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[5:])
+		if code, msg := ParseMiniMaxBaseResp(payload); code != 0 {
+			return code, msg
+		}
+	}
+	return 0, ""
+}
+
+// ParseMiniMaxBaseResp 解析 body 里的 base_resp 错误。
+// 返回 (status_code, status_msg);body 无 base_resp 或 status_code==0 返回 (0,"")
+func ParseMiniMaxBaseResp(body []byte) (int, string) {
+	var parsed struct {
+		BaseResp *struct {
+			StatusCode int    `json:"status_code"`
+			StatusMsg  string `json:"status_msg"`
+		} `json:"base_resp"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return 0, ""
+	}
+	if parsed.BaseResp == nil || parsed.BaseResp.StatusCode == 0 {
+		return 0, ""
+	}
+	return parsed.BaseResp.StatusCode, parsed.BaseResp.StatusMsg
+}
 
 // ParseProtocol 解析协议字符串,失败返回 error
 func ParseProtocol(s string) (Protocol, error) {

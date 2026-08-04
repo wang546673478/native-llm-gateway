@@ -94,6 +94,19 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
 	}
 
+	// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
+	// 下面 >= 400 分支看不到它。1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded,
+	// 触发 failover 到下一 provider + key 标记 QUOTA_EXCEEDED;其他非零 → server_error
+	if code, msg := provider.ParseMiniMaxBaseResp(body); code != 0 {
+		errType := provider.ErrorTypeServerError
+		if provider.IsMiniMaxQuotaCode(code) {
+			errType = provider.ErrorTypeQuotaExceeded
+		}
+		b.cfg.Pool.ReportError(key, string(errType))
+		return nil, b.newError(httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), body)
+	}
+
 	if httpResp.StatusCode >= 400 {
 		// P49: 带 body 检测 quota
 		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
@@ -192,6 +205,31 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
 	}
 
+	// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
+	// base_resp 错误。peek 前两行解析:确认是 base_resp 错误 → 在客户端收到
+	// 任何字节前直接失败(failover 还来得及);否则把 peeked 行接回 reader 正常流式
+	reader := bufio.NewReader(httpResp.Body)
+	var peeked []byte
+	for i := 0; i < 2; i++ {
+		line, err := reader.ReadBytes('\n')
+		peeked = append(peeked, line...)
+		if err != nil {
+			break
+		}
+	}
+	if code, msg := provider.ParseMiniMaxStreamBaseResp(peeked); code != 0 {
+		httpResp.Body.Close()
+		errType := provider.ErrorTypeServerError
+		if provider.IsMiniMaxQuotaCode(code) {
+			errType = provider.ErrorTypeQuotaExceeded
+		}
+		b.cfg.Pool.ReportError(key, string(errType))
+		return nil, nil, b.newError(httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
+	}
+	// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
+	streamReader := io.MultiReader(bytes.NewReader(peeked), reader)
+
 	b.cfg.Pool.ReportSuccess(key)
 
 	ch := make(chan *provider.StreamChunk, 16)
@@ -225,7 +263,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			close(ch)
 		}()
 		defer httpResp.Body.Close()
-		reader := bufio.NewReader(httpResp.Body)
+		reader := bufio.NewReader(streamReader)
 
 		// Anthropic SSE: 每行以 event: / data: 开头,空行分隔事件
 		// 把整段当作一个 SSE 事件转发(保留原格式)

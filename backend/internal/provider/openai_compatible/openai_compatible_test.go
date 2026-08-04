@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -500,5 +501,84 @@ func TestStreamUsageInjectedByDefault(t *testing.T) {
 
 	if !bytes.Contains(gotBody, []byte(`"include_usage":true`)) {
 		t.Errorf("expected stream_options.include_usage=true by default, got body: %s", gotBody)
+	}
+}
+
+// TestSendRequest_MiniMaxBaseRespQuota P-quota-minimax:
+// MiniMax 余额不足时返回 HTTP 200 + body {"base_resp":{"status_code":1008}}。
+// 网关必须识别为 quota_exceeded(failover 到下一 provider)+ key 标 QUOTA_EXCEEDED,
+// 而不是当成功响应透传
+func TestSendRequest_MiniMaxBaseRespQuota(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	resp, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","messages":[]}`),
+	})
+	if resp != nil {
+		t.Fatalf("resp should be nil for base_resp error, got %+v", resp)
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeQuotaExceeded {
+		t.Errorf("error type = %q, want quota_exceeded", pe.ErrorType)
+	}
+	// key 应该被标记 QUOTA_EXCEEDED → 下一次请求跳过,推进到下一 provider
+	if got := pool.Status().QuotaExceededKeys; got != 1 {
+		t.Errorf("quota_exceeded keys = %d, want 1", got)
+	}
+}
+
+// TestSendStreamRequest_MiniMaxBaseRespQuota P-quota-minimax:
+// 流式场景 MiniMax 也可能 HTTP 200 + SSE 帧里的 base_resp 错误。
+// SendStreamRequest 必须在客户端收到任何字节前返回错误(此时 failover 还来得及)
+func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("event: error\ndata: {\"base_resp\":{\"status_code\":2056,\"status_msg\":\"plan limit\"}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","stream":true}`),
+	})
+	if err == nil {
+		t.Fatal("expected base_resp error from stream request")
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeQuotaExceeded {
+		t.Errorf("error type = %q, want quota_exceeded", pe.ErrorType)
+	}
+	if resp != nil {
+		t.Errorf("resp should be nil, got %+v", resp)
+	}
+	if ch != nil {
+		// 不应产生任何 chunk(错误在转发前拦截)
+		if c := <-ch; c != nil {
+			t.Errorf("unexpected chunk: %+v", c)
+		}
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 1 {
+		t.Errorf("quota_exceeded keys = %d, want 1", got)
 	}
 }

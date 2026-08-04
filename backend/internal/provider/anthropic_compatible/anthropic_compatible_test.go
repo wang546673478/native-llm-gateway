@@ -1,8 +1,16 @@
 package anthropic_compatible
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
 // TestParseAnthropicUsage_Model P65: 验证 Anthropic 响应顶层 model 字段被抽到 Usage.Model
@@ -90,3 +98,85 @@ func TestExtractAnthropicStreamUsage_MessageDelta(t *testing.T) {
 
 // silence unused imports for parallel test
 var _ = json.Unmarshal
+
+// P-quota-minimax: MiniMax base_resp 错误识别(HTTP 200 + body 错误 → ProviderError)
+// MiniMax 是唯一走 anthropic_compatible 且有 base_resp 错误体的 provider
+
+func newTestPool(t *testing.T) *keypool.Pool {
+	t.Helper()
+	now := time.Now()
+	return keypool.NewPool("test", []*keypool.Key{{
+		ID: "k1", ProviderName: "test", Name: "k1", Key: "sk-test",
+		Status: keypool.KeyStatusActive, CreatedAt: now, UpdatedAt: now,
+	}}, nil, keypool.Config{})
+}
+
+func TestSendRequest_MiniMaxBaseRespQuota(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	resp, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[]}`),
+	})
+	if resp != nil {
+		t.Fatalf("resp should be nil for base_resp error, got %+v", resp)
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeQuotaExceeded {
+		t.Errorf("error type = %q, want quota_exceeded", pe.ErrorType)
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 1 {
+		t.Errorf("quota_exceeded keys = %d, want 1", got)
+	}
+}
+
+func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("event: error\ndata: {\"base_resp\":{\"status_code\":2056,\"status_msg\":\"plan limit\"}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[],"stream":true}`),
+	})
+	if err == nil {
+		t.Fatal("expected base_resp error from stream request")
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeQuotaExceeded {
+		t.Errorf("error type = %q, want quota_exceeded", pe.ErrorType)
+	}
+	if resp != nil {
+		t.Errorf("resp should be nil, got %+v", resp)
+	}
+	if ch != nil {
+		if c := <-ch; c != nil {
+			t.Errorf("unexpected chunk: %+v", c)
+		}
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 1 {
+		t.Errorf("quota_exceeded keys = %d, want 1", got)
+	}
+}
