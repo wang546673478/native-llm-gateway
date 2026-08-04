@@ -129,8 +129,8 @@ const billingSourceOptions = [
 ]
 
 // Task 10: balance column — tier-relative colour tier.
-// warn_pct default 10 (matches backend WarnThresholdPct).
-const warnThresholdPct = 10
+// 后端 default = 10;启动时拉 /api/v1/config/quota 拿当前生效值。
+const warnThresholdPct = ref(10)
 
 // Same provider & billing_source → max Remaining across all polled rows
 // in the tier.  Polled rows are those with last_polled_at set.
@@ -215,7 +215,7 @@ const columns: DataTableColumns<ProviderKeyView> = [
       if (!row.last_polled_at) {
         return h('span', { style: { color: '#999' } }, '未轮询')
       }
-      const colour = balanceColour(row, tierMaxForRow(row), warnThresholdPct)
+      const colour = balanceColour(row, tierMaxForRow(row), warnThresholdPct.value)
       const map: Record<string, string> = {
         green:  '#18a058',
         yellow: '#f0a020',
@@ -264,6 +264,16 @@ async function load() {
       })
     )
     keys.value = allKeys.flat()
+    // P-quota-balance: 拿后端当前生效的 warn_threshold_pct。
+    // 失败就保留 ref(10),不影响列表渲染。
+    try {
+      const q = await api.quotaConfig()
+      if (q && typeof q.warn_threshold_pct === 'number' && q.warn_threshold_pct > 0) {
+        warnThresholdPct.value = q.warn_threshold_pct
+      }
+    } catch (e) {
+      // ignore — fallback to default
+    }
   } catch (e: any) {
     message.error('加载失败: ' + (e.message ?? e))
   } finally {

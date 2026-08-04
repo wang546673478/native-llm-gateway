@@ -13,6 +13,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 	"github.com/wang546673478/native-llm-gateway/internal/usage"
 )
@@ -37,6 +38,7 @@ type Admin struct {
 	Aliases     map[string]router.AliasConfig
 	Keys        []GatewayKeyInfo
 	AccessLog   *accesslog.Recorder // P67: 接入日志 Recorder(可能为 no-op)
+	QuotaMgr    *quotacheck.Manager  // P68/P-quota-balance: quota 恢复 worker(nil 时前端拿到 default)
 }
 
 // NewAdmin 构造 Admin(caller 端负责注入依赖)。
@@ -53,6 +55,7 @@ func NewAdmin(
 	aliases map[string]router.AliasConfig,
 	keys []GatewayKeyInfo,
 	accessLogR *accesslog.Recorder,
+	quotaMgr *quotacheck.Manager,
 ) *Admin {
 	return &Admin{
 		Manager:   mgr,
@@ -64,6 +67,7 @@ func NewAdmin(
 		Aliases:   aliases,
 		Keys:      keys,
 		AccessLog: accessLogR,
+		QuotaMgr:  quotaMgr,
 	}
 }
 
@@ -91,6 +95,9 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/access-logs", a.listAccessLogs)
 	r.GET("/access-logs/stats", a.accessLogStats)
 	r.GET("/access-logs/:id/detail", a.getAccessLogDetail)
+	// P68 / P-quota-balance: 暴露 quota runtime config(目前只含 warn_threshold_pct)
+	// 给前端 ProviderKeys.vue 用,避免硬编码颜色阈值。
+	r.GET("/config/quota", a.getQuotaConfig)
 }
 
 // listRegisteredProviders GET /api/v1/providers/registered
@@ -625,5 +632,22 @@ func (a *Admin) accessLogStats(c *gin.Context) {
 		"total_24h":   total,
 		"errors_24h":  errs,
 		"active_keys": activeKeys,
+	})
+}
+
+// getQuotaConfig GET /api/v1/config/quota
+//
+// 返回 quota manager 的 runtime config 中需要前端知道的字段(目前只有
+// warn_threshold_pct)。QuotaMgr 为 nil 时返回兜底默认值 10,与
+// quotacheck.DefaultManagerConfig / NewManager 的兜底值保持一致。
+//
+// 设计:只读,不做 hot-reload 入口 — 前端想改阈值改 config.yaml 重启即可。
+func (a *Admin) getQuotaConfig(c *gin.Context) {
+	pct := 10
+	if a.QuotaMgr != nil {
+		pct = a.QuotaMgr.WarnThresholdPct()
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"warn_threshold_pct": pct,
 	})
 }

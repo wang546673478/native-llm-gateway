@@ -622,6 +622,13 @@ func (m *Manager) Stop() {
 	m.logger.Info("quotacheck.Manager stopped")
 }
 
+// WarnThresholdPct P-quota-balance: 返回当前生效的 warn_threshold_pct,供
+// admin handler 暴露给前端(避免前端硬编码颜色阈值)。无锁读 — int 读取
+// 在 Go 内存模型里是 atomic,容忍偶尔读到旧值。
+func (m *Manager) WarnThresholdPct() int {
+	return m.cfg.WarnThresholdPct
+}
+
 // Reload 接受新 cfg — 翻转 enabled 时 stop + 重新 Start(worker goroutine 重建)
 // 其他 config 字段(interval, max attempts, backoff)生效于下次 Start。
 // 注意:Start 接受 ctx 来自 Server.Run 顶层,Reload 没法拿 — 所以这里用 background

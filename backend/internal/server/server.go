@@ -484,6 +484,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		toRouterAliases(s.cfg.Routing.Aliases, s.cfg.Routing.Chains),
 		gkInfos,
 		s.accessR, // P67: 接入日志 Recorder(可能为 no-op)
+		s.quotaM,  // P68 / P-quota-balance: quota 恢复 worker(可能为 nil)
 	)
 	admin.Register(r.Group("/api/v1"))
 
