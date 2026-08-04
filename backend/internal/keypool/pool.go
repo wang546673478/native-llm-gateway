@@ -5,6 +5,7 @@ package keypool
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,16 +69,17 @@ func BuildPoolFromStrings(providerName string, plainKeys []string, cfg Config) *
 	return NewPool(providerName, keys, nil, cfg)
 }
 
-// Acquire 获取一个可用的 Key
-//  1. 遍历 keys,若 COOLING 且 cooling_until < now,自动恢复为 ACTIVE
-//  2. 按 tier 降级顺序尝试:token_plan → api → free
-//  3. 若没有可用,返回 ErrNoAvailableKey
-//
-// P64: 这里保留 tier 降级是作为"无 tier 信息的旧 caller"的兼容入口
+// Acquire P64: 这里保留 tier 降级是作为"无 tier 信息的旧 caller"的兼容入口
 // 新调用方应明确用 AcquireFromTier
 func (p *Pool) Acquire() (*Key, error) {
+	return p.AcquireForProtocol("")
+}
+
+// AcquireForProtocol P-provider-vendor: 按请求协议取 key(带 tier 降级)
+// proto 为空 = 不过滤;非空时只取 Protocols 为空或包含该协议的 key
+func (p *Pool) AcquireForProtocol(proto string) (*Key, error) {
 	for _, tier := range []string{"token_plan", "api", "free"} {
-		k, err := p.AcquireFromTier(tier, nil)
+		k, err := p.AcquireFromTier(tier, nil, proto)
 		if err == nil {
 			return k, nil
 		}
@@ -90,7 +92,7 @@ func (p *Pool) Acquire() (*Key, error) {
 // 非空 → 只从 ID 在这个集合里的 key 里挑
 func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
 	if len(allowedIDs) == 0 {
-		return p.Acquire()
+		return p.AcquireForProtocol("")
 	}
 	// 转成 map 加速 lookup
 	set := make(map[uint]struct{}, len(allowedIDs))
@@ -98,7 +100,7 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
 		set[id] = struct{}{}
 	}
 	for _, tier := range []string{"token_plan", "api", "free"} {
-		k, err := p.AcquireFromTier(tier, set)
+		k, err := p.AcquireFromTier(tier, set, "")
 		if err == nil {
 			return k, nil
 		}
@@ -110,7 +112,7 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
 // tier ∈ {"token_plan", "api", "free"};空字符串按 "api" 兜底
 // allowedIDSet nil = 不限 ID;非 nil = 只从 ID 在集合里的 key 里挑
 // 该 tier 桶为空时直接返回 ErrNoAvailableKey,让 Router 推进到下一档候选
-func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}) (*Key, error) {
+func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}, proto string) (*Key, error) {
 	if tier == "" {
 		tier = "api" // 兜底
 	}
@@ -142,6 +144,17 @@ func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}) (*Ke
 		}
 		usable = append(usable, k)
 	}
+
+	// P-provider-vendor: 协议过滤 — Key.Protocols 为空 = 所有协议可用;非空 = 仅列出的协议
+	if proto != "" {
+		filtered := usable[:0]
+		for _, k := range usable {
+			if k.Protocols == "" || containsProtocol(k.Protocols, proto) {
+				filtered = append(filtered, k)
+			}
+		}
+		usable = filtered
+	}
 	if len(usable) == 0 {
 		return nil, ErrNoAvailableKey
 	}
@@ -169,6 +182,16 @@ func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}) (*Ke
 		return nil, ErrNoAvailableKey
 	}
 	return p.scheduler.Select(bucket)
+}
+
+// containsProtocol 判断逗号分隔的协议列表是否包含指定协议
+func containsProtocol(list, proto string) bool {
+	for _, p := range strings.Split(list, ",") {
+		if strings.TrimSpace(p) == proto {
+			return true
+		}
+	}
+	return false
 }
 
 // parseKeyIDUint 把 Key.ID (格式 "<provider>-key-<N>" 或纯数字字符串) 转 uint

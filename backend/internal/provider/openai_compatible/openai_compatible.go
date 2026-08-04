@@ -78,7 +78,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			Message:      "keypool not configured",
 		}
 	}
-	key, err := b.cfg.Pool.Acquire()
+	key, err := b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
 	if err != nil {
 		return nil, &provider.ProviderError{
 			ProviderName: b.cfg.Name,
@@ -180,7 +180,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			Message:      "keypool not configured",
 		}
 	}
-	key, err := b.cfg.Pool.Acquire()
+	key, err := b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
 	if err != nil {
 		return nil, nil, &provider.ProviderError{
 			ProviderName: b.cfg.Name,
@@ -324,7 +324,7 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 		return err
 	}
 	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.Acquire(); err == nil {
+		if k, err := b.cfg.Pool.AcquireForProtocol("openai"); err == nil { // P-provider-vendor: 按本包协议过滤
 			req.Header.Set("Authorization", "Bearer "+k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
 		}

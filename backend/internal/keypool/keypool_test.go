@@ -213,7 +213,7 @@ func TestAcquireFromTier_OnlyRequestedTier(t *testing.T) {
 	keys := newTestKeysWithTiers([]string{"token_plan", "api"})
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 
-	k, err := pool.AcquireFromTier("api", nil)
+	k, err := pool.AcquireFromTier("api", nil, "")
 	if err != nil {
 		t.Fatalf("AcquireFromTier(api): %v", err)
 	}
@@ -221,7 +221,7 @@ func TestAcquireFromTier_OnlyRequestedTier(t *testing.T) {
 		t.Errorf("got tier %s, want api", k.BillingSource)
 	}
 
-	k, err = pool.AcquireFromTier("token_plan", nil)
+	k, err = pool.AcquireFromTier("token_plan", nil, "")
 	if err != nil {
 		t.Fatalf("AcquireFromTier(token_plan): %v", err)
 	}
@@ -235,7 +235,7 @@ func TestAcquireFromTier_EmptyBucketErr(t *testing.T) {
 	keys := newTestKeysWithTiers([]string{"token_plan"})
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 
-	_, err := pool.AcquireFromTier("api", nil)
+	_, err := pool.AcquireFromTier("api", nil, "")
 	if !errors.Is(err, ErrNoAvailableKey) {
 		t.Errorf("expected ErrNoAvailableKey, got %v", err)
 	}
@@ -266,6 +266,41 @@ func TestAcquire_BackwardCompatibleTierFallback(t *testing.T) {
 	}
 }
 
+func TestAcquireForProtocol(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "1", Name: "openai-only", Key: "k1", Status: KeyStatusActive, BillingSource: "api", Protocols: "openai", CreatedAt: now, UpdatedAt: now},
+		{ID: "2", Name: "all", Key: "k2", Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+		{ID: "3", Name: "anthropic-only", Key: "k3", Status: KeyStatusActive, BillingSource: "api", Protocols: "anthropic", CreatedAt: now, UpdatedAt: now},
+	}
+	pool := NewPool("p", keys, nil, Config{})
+
+	// anthropic 请求:只能拿到 "all"(Protocols="" 匹配任何)
+	k, err := pool.AcquireForProtocol("anthropic")
+	if err != nil {
+		t.Fatalf("acquire anthropic: %v", err)
+	}
+	if k.Name != "all" {
+		t.Fatalf("anthropic request got key %q, want all", k.Name)
+	}
+
+	// openai 请求:可从 openai-only 或 all 中取
+	k2, err := pool.AcquireForProtocol("openai")
+	if err != nil {
+		t.Fatalf("acquire openai: %v", err)
+	}
+	if k2.Name != "openai-only" && k2.Name != "all" {
+		t.Fatalf("openai request got key %q, want openai-only or all", k2.Name)
+	}
+
+	// 空 proto = 不过滤,三个都能取
+	k3, err := pool.Acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	_ = k3
+}
+
 func TestAcquireFromTier_AllowedIDFilter(t *testing.T) {
 	// P34 + P64: 指定 tier + ID 白名单
 	now := time.Now()
@@ -285,7 +320,7 @@ func TestAcquireFromTier_AllowedIDFilter(t *testing.T) {
 
 	// 只允许 ID=100 的 token_plan key
 	set := map[uint]struct{}{100: {}}
-	k, err := pool.AcquireFromTier("token_plan", set)
+	k, err := pool.AcquireFromTier("token_plan", set, "")
 	if err != nil {
 		t.Fatalf("AcquireFromTier: %v", err)
 	}
@@ -294,7 +329,7 @@ func TestAcquireFromTier_AllowedIDFilter(t *testing.T) {
 	}
 
 	// ID=300 是 api,白名单只有 100 → api 桶空
-	_, err = pool.AcquireFromTier("api", set)
+	_, err = pool.AcquireFromTier("api", set, "")
 	if !errors.Is(err, ErrNoAvailableKey) {
 		t.Errorf("expected ErrNoAvailableKey, got %v", err)
 	}
@@ -348,7 +383,7 @@ func TestPool_RestoreQuotaMakesUsable(t *testing.T) {
 	}
 
 	// Acquire 应该能拿到
-	got, err := pool.AcquireFromTier("api", nil)
+	got, err := pool.AcquireFromTier("api", nil, "")
 	if err != nil {
 		t.Fatalf("AcquireFromTier: %v", err)
 	}
@@ -368,7 +403,7 @@ func TestPool_AcquireSkipsQuotaExceededButCanReturnAfterRestore(t *testing.T) {
 	// 跑 5 次 Acquire,k1 永远不出现
 	seen := map[string]int{}
 	for i := 0; i < 5; i++ {
-		got, err := pool.AcquireFromTier("api", nil)
+		got, err := pool.AcquireFromTier("api", nil, "")
 		if err != nil {
 			t.Fatalf("Acquire #%d: %v", i, err)
 		}
@@ -381,7 +416,7 @@ func TestPool_AcquireSkipsQuotaExceededButCanReturnAfterRestore(t *testing.T) {
 	// Restore 后再跑 9 次,k1 应出现至少一次
 	pool.RestoreQuota(keys[0])
 	for i := 0; i < 9; i++ {
-		got, err := pool.AcquireFromTier("api", nil)
+		got, err := pool.AcquireFromTier("api", nil, "")
 		if err != nil {
 			t.Fatalf("Acquire after restore #%d: %v", i, err)
 		}
@@ -437,7 +472,7 @@ func TestAcquireFromTier_TokenPlanSortsByRemainingDesc(t *testing.T) {
 	keys := []*Key{mk("k-low", 0.3), mk("k-high", 12.5), mk("k-mid", 8.0)}
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 
-	k, err := pool.AcquireFromTier("token_plan", nil)
+	k, err := pool.AcquireFromTier("token_plan", nil, "")
 	if err != nil {
 		t.Fatalf("AcquireFromTier: %v", err)
 	}
@@ -463,7 +498,7 @@ func TestAcquireFromTier_TokenPlanStableWhenEqualRemaining(t *testing.T) {
 	// 三次取 key 应该是 first, second, third(稳定排序保留相对顺序)
 	want := []string{"first", "second", "third"}
 	for i, w := range want {
-		k, err := pool.AcquireFromTier("token_plan", nil)
+		k, err := pool.AcquireFromTier("token_plan", nil, "")
 		if err != nil {
 			t.Fatalf("AcquireFromTier #%d: %v", i, err)
 		}
@@ -490,7 +525,7 @@ func TestAcquireFromTier_ApiTierNotSorted(t *testing.T) {
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 
 	for _, want := range []string{"a", "b", "c", "a"} {
-		k, err := pool.AcquireFromTier("api", nil)
+		k, err := pool.AcquireFromTier("api", nil, "")
 		if err != nil {
 			t.Fatalf("AcquireFromTier(api): %v", err)
 		}

@@ -57,7 +57,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	if b.cfg.Pool == nil {
 		return nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
 	}
-	key, err := b.cfg.Pool.Acquire()
+	key, err := b.cfg.Pool.AcquireForProtocol("google")
 	if err != nil {
 		return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 	}
@@ -121,7 +121,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if b.cfg.Pool == nil {
 		return nil, nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
 	}
-	key, err := b.cfg.Pool.Acquire()
+	key, err := b.cfg.Pool.AcquireForProtocol("google")
 	if err != nil {
 		return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 	}
@@ -215,7 +215,7 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 		return err
 	}
 	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.Acquire(); err == nil {
+		if k, err := b.cfg.Pool.AcquireForProtocol("google"); err == nil {
 			req.Header.Set("x-goog-api-key", k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
 		}

@@ -275,9 +275,10 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 				for _, id := range it.providerKeyIDs {
 					idSet[id] = struct{}{}
 				}
-				k, err = pool.AcquireFromTier(c.Tier, idSet)
+				// P-provider-vendor: 按请求协议过滤 key(Protocols 为空 = 不过滤)
+				k, err = pool.AcquireFromTier(c.Tier, idSet, string(pv.Protocol()))
 			} else {
-				k, err = pool.AcquireFromTier(c.Tier, nil)
+				k, err = pool.AcquireFromTier(c.Tier, nil, string(pv.Protocol()))
 			}
 			if err != nil {
 				continue
