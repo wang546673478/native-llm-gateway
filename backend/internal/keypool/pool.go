@@ -321,6 +321,9 @@ type PoolStatus struct {
 	CoolingKeys       int    `json:"cooling_keys"`
 	DisabledKeys      int    `json:"disabled_keys"`
 	QuotaExceededKeys int    `json:"quota_exceeded_keys"` // P68
+	// P-quota-balance: 上游 quota polling 的聚合指标
+	QuotaPolledKeys int     `json:"quota_polled_keys"` // 至少 poll 过一次的 key 数
+	QuotaKnownSum   float64 `json:"quota_known_sum"`   // 已 poll 的 key 的 Remaining 之和
 }
 
 // Status 池状态摘要
@@ -339,6 +342,12 @@ func (p *Pool) Status() PoolStatus {
 			s.DisabledKeys++
 		case KeyStatusQuotaExceeded:
 			s.QuotaExceededKeys++
+		}
+	}
+	for _, k := range p.keys {
+		if !k.LastPolledAt.IsZero() {
+			s.QuotaPolledKeys++
+			s.QuotaKnownSum += k.Remaining
 		}
 	}
 	return s

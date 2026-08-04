@@ -499,3 +499,34 @@ func TestAcquireFromTier_ApiTierNotSorted(t *testing.T) {
 		}
 	}
 }
+
+func TestPool_StatusIncludesQuotaSummary(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-2 * time.Minute)
+	mk := func(id string, status KeyStatus, remaining float64, polled bool) *Key {
+		k := &Key{
+			ID: id, ProviderName: "test", Name: id, Key: "sk",
+			Status: status, Remaining: remaining,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if polled {
+			k.LastPolledAt = past
+		}
+		return k
+	}
+	keys := []*Key{
+		mk("a", KeyStatusActive, 10.0, true),
+		mk("b", KeyStatusActive, 5.5, true),
+		mk("c", KeyStatusActive, 0, false),   // 还没 poll 过
+		mk("d", KeyStatusDisabled, 99, true), // 已 DISABLED,仍要算
+	}
+	pool := NewPool("test", keys, nil, Config{})
+
+	st := pool.Status()
+	if st.QuotaPolledKeys != 3 {
+		t.Errorf("QuotaPolledKeys = %d, want 3", st.QuotaPolledKeys)
+	}
+	if st.QuotaKnownSum != 10.0+5.5+99 {
+		t.Errorf("QuotaKnownSum = %v, want 114.5", st.QuotaKnownSum)
+	}
+}
