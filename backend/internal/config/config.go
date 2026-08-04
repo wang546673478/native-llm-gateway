@@ -106,6 +106,10 @@ type Provider struct {
 	Models         []ProviderModel   `mapstructure:"models"`
 	Keys           []ProviderKey     `mapstructure:"keys"`
 	CircuitBreaker CircuitBreakerCfg `mapstructure:"circuit_breaker"`
+	// DefaultModel P-catch-all: catch_all 自动模式(catch_all: {})下,
+	// 该 provider 用哪个模型承接未知模型名的请求。
+	// 空 = 取 models 列表第一个声明。其他路由路径不涉及此字段
+	DefaultModel string `mapstructure:"default_model"`
 	// BillingSource 计费来源(P47)
 	//   - "token_plan": 包月套餐(如 minimax token plan),优先路由,quota 用完自动 failover
 	//   - "api":        按 token 计费(deepseek/openai/anthropic 等)— 默认
@@ -259,6 +263,13 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{}
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	// P-catch-all: `catch_all: {}`(空规则 = 自动模式)在 viper 里会解成 nil,
+	// 但「配置了 catch_all」本身是有效语义 — 空规则 = 所有 provider 自动参与。
+	// 显式补一个空 AliasRule,与「没写 catch_all」(nil = 不兜底)区分开
+	if v.IsSet("routing.catch_all") && cfg.Routing.CatchAll == nil {
+		cfg.Routing.CatchAll = &AliasRule{}
 	}
 
 	if err := cfg.validate(); err != nil {

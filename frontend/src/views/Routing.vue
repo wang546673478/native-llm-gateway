@@ -8,14 +8,27 @@
     >
       <n-space align="center" style="margin-bottom: 12px">
         <n-tag type="warning">兜底路由 catch_all</n-tag>
-        <n-tag type="info">策略: {{ data.catch_all.Strategy }}</n-tag>
-        <n-tag>{{ data.catch_all.Providers.length }} 个候选</n-tag>
-        <n-text depth="3" style="font-size: 12px">
-          客户端发任何 alias 表外且无 provider 声明的 model 名时按此路由,
-          仍按 token_plan → api → free 计费
-        </n-text>
+        <!-- 空 providers = 自动模式:所有 provider 参与,无路由表 -->
+        <template v-if="data.catch_all.Providers.length === 0">
+          <n-tag type="success">自动模式</n-tag>
+          <n-text depth="3" style="font-size: 12px">
+            所有 enabled provider 参与(按请求路径选协议面),每个 provider 用其
+            默认模型(default_model 或第一个声明),token_plan → api → free 计费。
+            加 provider + key 即自动进链
+          </n-text>
+        </template>
+        <template v-else>
+          <n-tag type="info">策略: {{ data.catch_all.Strategy }}</n-tag>
+          <n-tag>{{ data.catch_all.Providers.length }} 个候选</n-tag>
+        </template>
       </n-space>
-      <n-data-table :columns="columns" :data="data.catch_all.Providers" :bordered="false" :pagination="false" />
+      <n-data-table
+        v-if="data.catch_all.Providers.length > 0"
+        :columns="columns"
+        :data="data.catch_all.Providers"
+        :bordered="false"
+        :pagination="false"
+      />
     </n-card>
 
     <n-card

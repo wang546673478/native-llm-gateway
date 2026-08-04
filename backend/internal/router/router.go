@@ -114,15 +114,53 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 		// alias 没注册 → 自动发现:从所有 enabled provider 中找声明该 model 的
 		iter, err := r.routeDirectModelWithOpts(ctx, req.Model, req, o)
 		// P-catch-all: 自动发现失败(未知 model 名)且配了 catch_all → 按兜底规则路由。
-		// 这样任意 agent 发任意模型名都能走通,无需为每个名字配 alias
+		// 这样任意 agent 发任意模型名都能走通,无需为每个名字配 alias。
+		// 空规则(catch_all: {}) = 自动模式:所有 provider 参与,见 routeCatchAllAuto
 		if err != nil && r.catchAll != nil {
 			r.logger.Debug("no direct model route, using catch_all",
 				zap.String("model", req.Model))
+			if len(r.catchAll.Providers) == 0 && r.catchAll.TargetModel == "" {
+				return r.routeCatchAllAuto(ctx, req.Model, req, o)
+			}
 			return r.routeAliasRule(ctx, *r.catchAll, req.Model, req, o)
 		}
 		return iter, err
 	}
 	return r.routeAliasRule(ctx, rule, req.Model, req, o)
+}
+
+// routeCatchAllAuto P-catch-all 自动模式(catch_all: {}):
+// 所有 enabled provider 都参与,按请求路径协议过滤 + 健康过滤,
+// 每个 provider 用它的默认模型(显式 default_model 或第一个声明)承接请求。
+// tier 计费自动(token_plan → api → free);没 key / 全不可用的 provider 由
+// AcquireFromTier 自然跳过。加新 provider + key 即自动进链 — 无路由表可维护
+func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
+	reqProto := detectProtocol(req.Path)
+	var routes []ProviderRoute
+	for name, p := range r.manager.GetAll() {
+		if reqProto != "" && p.Protocol() != reqProto {
+			continue
+		}
+		if r.healthStatus[name] {
+			continue
+		}
+		model := r.manager.DefaultModelFor(name)
+		if model == "" {
+			continue
+		}
+		routes = append(routes, ProviderRoute{Name: name, Model: model})
+	}
+	if len(routes) == 0 {
+		return nil, ErrNoRoute
+	}
+	keyCandidates := buildKeyCandidates(routes, r.pools)
+	return &RouteIterator{
+		alias:          aliasName,
+		candidates:     keyCandidates,
+		pools:          r.pools,
+		manager:        r.manager,
+		providerKeyIDs: o.ProviderKeyIDs,
+	}, nil
 }
 
 // routeAliasRule 走一条 alias 规则(长格式显式 providers 或短格式 TargetModel)。

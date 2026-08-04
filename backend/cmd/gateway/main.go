@@ -174,6 +174,8 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 			APIKeys:    keys,
 			// P47: 计费来源,默认 api(没标就当 api)
 			BillingSource: defaultStr(p.BillingSource, "api"),
+			// P-catch-all: 默认模型(catch_all 自动模式用)
+			DefaultModel: p.DefaultModel,
 			Circuit: provider.ManagerCircuitConfig{
 				FailureThreshold: p.CircuitBreaker.FailureThreshold,
 				FailureWindow:    p.CircuitBreaker.FailureWindow,

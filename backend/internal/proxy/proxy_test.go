@@ -187,9 +187,11 @@ func TestProxy_NonStream_PassesThroughBodyAndAuth(t *testing.T) {
 		t.Errorf("response body missing: %s", w.Body.String())
 	}
 
-	// Provider 应该收到原始 body(未改写)
-	if string(p.gotBody) != body {
-		t.Errorf("body modified!\n  got:  %s\n  want: %s", p.gotBody, body)
+	// P-catch-all: body 里的 model 按路由结果重写为真实模型名(deepseek-chat),
+	// 上游收到解析后的名字而非 alias 名 — 严格校验的 provider(如 DeepSeek)才能正常工作
+	wantBody := `{"messages":[{"content":"hello","role":"user"}],"model":"deepseek-chat"}`
+	if string(p.gotBody) != wantBody {
+		t.Errorf("body modified!\n  got:  %s\n  want: %s", p.gotBody, wantBody)
 	}
 	// Auth header 应该是 Bearer sk-fake
 	if p.gotAuth != "Bearer sk-fake" {

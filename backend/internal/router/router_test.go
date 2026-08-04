@@ -317,6 +317,88 @@ func TestRouter_CatchAllAbsent(t *testing.T) {
 	}
 }
 
+// TestRouter_CatchAllAuto P-catch-all 自动模式(catch_all: {}):
+// 所有 enabled provider 都参与,协议面按请求路径过滤,默认模型取第一个声明,
+// tier 计费 token_plan 优先;无 key 的 provider 自然跳过
+func TestRouter_CatchAllAuto(t *testing.T) {
+	now := time.Now()
+	mkPool := func(bs string) *keypool.Pool {
+		return keypool.NewPool("p", []*keypool.Key{{
+			ID: "1", ProviderName: "p", Name: "k1", Key: "sk",
+			Status: keypool.KeyStatusActive, BillingSource: bs,
+			CreatedAt: now, UpdatedAt: now,
+		}}, nil, keypool.Config{})
+	}
+	tokenPlanPool := mkPool("token_plan")
+	apiPool := mkPool("api")
+	noKeyPool := keypool.NewPool("p", nil, nil, keypool.Config{})
+
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "minimax", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+		&fakeProvider{name: "deepseek-anthropic", proto: provider.ProtocolAnthropic, models: []string{"deepseek-v4-flash"}},
+		&fakeProvider{name: "deepseek", proto: provider.ProtocolOpenAI, models: []string{"deepseek-v4-flash"}},
+		&fakeProvider{name: "qwen", proto: provider.ProtocolOpenAI, models: []string{"qwen-plus"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, map[string]*keypool.Pool{
+		"minimax":            tokenPlanPool,
+		"deepseek-anthropic": apiPool,
+		"deepseek":           apiPool,
+		"qwen":               noKeyPool, // 无 key → 自然跳过
+	}, Config{
+		Aliases:  map[string]AliasConfig{},
+		CatchAll: &AliasConfig{Alias: "*"}, // 空规则 = 自动模式
+	})
+
+	// anthropic 面:只留 anthropic 面 provider,token_plan 桶排最前
+	req := &provider.Request{Model: "whatever-model", Path: "/v1/messages"}
+	it, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "minimax" || res.ModelID != "MiniMax-M3" {
+		t.Errorf("first = %s/%s, want minimax/MiniMax-M3(token_plan 优先)",
+			res.ProviderName, res.ModelID)
+	}
+
+	// openai 面:deepseek(有 api key)命中;qwen(无 key)跳过
+	req2 := &provider.Request{Model: "gpt-5", Path: "/v1/chat/completions"}
+	it2, err := r.Route(context.Background(), req2)
+	if err != nil {
+		t.Fatalf("Route (openai): %v", err)
+	}
+	res2, err := it2.Next()
+	if err != nil {
+		t.Fatalf("Next (openai): %v", err)
+	}
+	if res2.ProviderName != "deepseek" || res2.ModelID != "deepseek-v4-flash" {
+		t.Errorf("openai face = %s/%s, want deepseek/deepseek-v4-flash",
+			res2.ProviderName, res2.ModelID)
+	}
+
+	// 默认模型缺省 = 第一个声明(M2),无需显式 default_model
+	mgr2 := newFakeManager(t,
+		&fakeProvider{name: "minimax", proto: provider.ProtocolAnthropic, models: []string{"M2", "M3"}},
+	)
+	r2 := NewRouter(zap.NewNop(), mgr2, map[string]*keypool.Pool{
+		"minimax": tokenPlanPool,
+	}, Config{Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"}})
+	it3, err := r2.Route(context.Background(), &provider.Request{Model: "x", Path: "/v1/messages"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res3, err := it3.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res3.ModelID != "M2" {
+		t.Errorf("default model = %q, want M2(第一个声明)", res3.ModelID)
+	}
+}
+
 // silence unused if scheduler/test funcs trimmed
 
 // === P64 buildKeyCandidates 单元测试 ===

@@ -294,8 +294,11 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 	}
 	for name, p := range cfg.Providers {
 		proto, _ := provider.ParseProtocol(p.Protocol)
+		// P-catch-all: ReloadPricing 需要 models 列表算默认模型(显式 default_model 优先)
+		models := make([]string, 0, len(p.Models))
 		modelCosts := make(map[string]provider.ModelCost, len(p.Models))
 		for _, m := range p.Models {
+			models = append(models, m.ID)
 			modelCosts[m.ID] = provider.ModelCost{
 				CostPer1kInput:         m.CostPer1kInput,
 				CostPer1kOutput:        m.CostPer1kOutput,
@@ -308,11 +311,13 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 			Endpoint:   p.Endpoint,
 			Protocol:   proto,
 			Timeout:    p.Timeout,
-			Models:     nil, // ReloadPricing 不需要 models 列表
+			Models:     models, // P-catch-all: ReloadPricing 需要 models 列表算默认模型
 			ModelCosts: modelCosts,
 			APIKeys:    nil,
 			// P47: 计费来源 — 热重载时也带上
 			BillingSource: defaultBillingSource(p.BillingSource),
+			// P-catch-all: 默认模型 — 热重载时同步
+			DefaultModel: p.DefaultModel,
 		}
 	}
 	return mcfg

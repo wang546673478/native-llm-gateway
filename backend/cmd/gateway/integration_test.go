@@ -175,8 +175,11 @@ func TestE2E_NonStream_ThroughGateway(t *testing.T) {
 	if trace != "e2e-trace-001" {
 		t.Errorf("upstream trace = %q, want e2e-trace-001", trace)
 	}
-	if string(sentBody) != body {
-		t.Errorf("upstream got modified body:\n  got:  %s\n  want: %s", sentBody, body)
+	// P-catch-all: model 按路由结果重写为真实模型名(deepseek-chat),
+	// 上游收到解析后的名字而非 alias 名
+	wantBody := `{"messages":[{"content":"hi","role":"user"}],"model":"deepseek-chat"}`
+	if string(sentBody) != wantBody {
+		t.Errorf("upstream got modified body:\n  got:  %s\n  want: %s", sentBody, wantBody)
 	}
 }
 

@@ -32,6 +32,9 @@ type ManagerProviderConfig struct {
 	ModelCosts map[string]ModelCost
 	// P47: 计费来源 — token_plan / api / free
 	BillingSource string
+	// P-catch-all: catch_all 自动模式下该 provider 承接未知模型名的默认模型。
+	// 空 = 取 Models 第一个
+	DefaultModel string
 }
 
 // ModelCost 单个 model 的定价
@@ -68,6 +71,9 @@ type Manager struct {
 	// P47: billingSource 映射 provider name → "token_plan" / "api" / "free"
 	// LoadFromConfig / Reload 时填充
 	billingSources map[string]string
+	// P-catch-all: provider name → 默认模型(catch_all 自动模式用)。
+	// LoadFromConfig / ReloadPricing 时填充;热重载同步
+	defaultModels map[string]string
 }
 
 // NewManager 构造 Manager
@@ -78,6 +84,7 @@ func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 		providers:      make(map[string]Provider),
 		pricing:        make(map[string]ModelCost),
 		billingSources: make(map[string]string),
+		defaultModels:  make(map[string]string),
 	}
 }
 
@@ -117,6 +124,12 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			bs = "api"
 		}
 		m.billingSources[name] = bs
+		// P-catch-all: 默认模型 — 显式配置优先,否则第一个声明
+		dm := pcfg.DefaultModel
+		if dm == "" && len(pcfg.Models) > 0 {
+			dm = pcfg.Models[0]
+		}
+		m.defaultModels[name] = dm
 
 		p, err := m.registry.Create(name, factoryCfg)
 		if err != nil {
@@ -242,6 +255,7 @@ func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 	defer m.mu.Unlock()
 	m.pricing = make(map[string]ModelCost)
 	m.billingSources = make(map[string]string)
+	m.defaultModels = make(map[string]string)
 	for name, pcfg := range cfg.Providers {
 		for modelID, cost := range pcfg.ModelCosts {
 			m.pricing[pricingKey(name, modelID)] = cost
@@ -251,8 +265,22 @@ func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 			bs = "api"
 		}
 		m.billingSources[name] = bs
+		// P-catch-all: 默认模型与 pricing 同频热重载
+		dm := pcfg.DefaultModel
+		if dm == "" && len(pcfg.Models) > 0 {
+			dm = pcfg.Models[0]
+		}
+		m.defaultModels[name] = dm
 	}
 	m.logger.Info("pricing reloaded", zap.Int("entries", len(m.pricing)))
+}
+
+// DefaultModelFor P-catch-all: 返回 provider 承接未知模型名的默认模型
+// (显式 default_model 优先,否则第一个声明)。空 = 该 provider 没有可用默认模型
+func (m *Manager) DefaultModelFor(name string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.defaultModels[name]
 }
 
 // Close 关闭所有 Provider
