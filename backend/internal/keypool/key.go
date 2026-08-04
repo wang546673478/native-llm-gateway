@@ -42,6 +42,9 @@ type Key struct {
 	QuotaExceededSince time.Time
 	// P68: 探测次数(成功 Restore 时 reset 为 0;max attempts 触发 DISABLED)
 	QuotaProbeAttempts int
+	// P-quota-balance: 上游 quota polling 写入的余额快照与时间戳(runtime, 不落 DB)
+	Remaining    float64
+	LastPolledAt time.Time
 }
 
 // IsUsable 在给定时间点判断 Key 是否可用于调度

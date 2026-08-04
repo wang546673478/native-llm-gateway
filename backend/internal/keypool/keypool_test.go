@@ -411,3 +411,13 @@ func TestPool_StatusCountsQuotaExceeded(t *testing.T) {
 		t.Errorf("ActiveKeys = %d, want 0", s.ActiveKeys)
 	}
 }
+
+func TestKey_RemainingAndLastPolledAt_DefaultZero(t *testing.T) {
+	k := &Key{ID: "k", ProviderName: "test"}
+	if k.Remaining != 0 {
+		t.Errorf("Remaining default = %v, want 0", k.Remaining)
+	}
+	if !k.LastPolledAt.IsZero() {
+		t.Errorf("LastPolledAt default = %v, want zero", k.LastPolledAt)
+	}
+}
