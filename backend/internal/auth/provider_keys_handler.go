@@ -15,6 +15,7 @@ import (
 
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
 // ProviderKeyStore ProviderAPIKey 仓库
@@ -250,6 +251,10 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing_provider_name"})
 		return
 	}
+	// P-provider-vendor: 存储名归一为 vendor — 共享 pool 按 vendor 名读 DB,
+	// 直接 API 用变体名(deepseek-anthropic)创建会静默失效(池读不到)。
+	// 归一后 ReloadProviderPool(vendor) 会把 key 放进共享 pool 参与路由/poll。
+	providerName = provider.Default().VendorFor(providerName)
 	var req createProviderKeyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "detail": err.Error()})

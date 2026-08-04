@@ -270,9 +270,9 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 			Status:        keypool.KeyStatusActive,
 			BillingSource: bs, // P48: 单 key 计费 tier,Pool.Acquire 按此排序
 			// P-provider-vendor: key 可用协议列表(空 = 全部),取 key 时按请求协议过滤
-			Protocols:     row.Protocols,
-			CreatedAt:     row.CreatedAt,
-			UpdatedAt:     row.UpdatedAt,
+			Protocols: row.Protocols,
+			CreatedAt: row.CreatedAt,
+			UpdatedAt: row.UpdatedAt,
 		})
 	}
 	logger.Info("keypool built from DB",
@@ -682,7 +682,7 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		}
 		// 建一次 pool(vendor 名),重指该 vendor 的所有注册名
 		pool := buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger)
-		for _, name := range names {
+		for i, name := range names {
 			s.pools[name] = pool
 			if pv, ok := s.manager.Get(name); ok {
 				if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
@@ -692,7 +692,10 @@ func (s *Server) ReloadProviderPool(providerName string) {
 			if s.router != nil {
 				s.router.SetPool(name, pool)
 			}
-			if s.quotaM != nil {
+			// P-provider-vendor: 共享 pool 每 vendor 只注入一次 quota callback —
+			// 多个注册名指向同一 pool,每个名字都调会把 callback 绑定两次且
+			// QUOTA_EXCEEDED key 双份入堆(双倍探测/提前 DISABLE)
+			if s.quotaM != nil && i == 0 {
 				s.quotaM.ReinjectCallback(name, pool)
 			}
 		}
@@ -701,6 +704,8 @@ func (s *Server) ReloadProviderPool(providerName string) {
 	}
 	// 全量重建 — 按 vendor 分组,每组建一次 pool 重指该 vendor 所有注册名
 	vendorPools := make(map[string]*keypool.Pool)
+	// P-provider-vendor: 共享 pool 的 quota callback 每 pool 只注入一次(见单分支注释)
+	injectedPools := make(map[*keypool.Pool]bool)
 	for name, p := range s.cfg.Providers {
 		if !p.Enabled {
 			continue
@@ -717,7 +722,8 @@ func (s *Server) ReloadProviderPool(providerName string) {
 				setter.SetPool(pool)
 			}
 		}
-		if s.quotaM != nil {
+		if s.quotaM != nil && !injectedPools[pool] {
+			injectedPools[pool] = true
 			s.quotaM.ReinjectCallback(name, pool)
 		}
 	}

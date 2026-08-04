@@ -199,8 +199,16 @@ func (m *Manager) Start(ctx context.Context) {
 
 // injectCallbacks 给所有 Pool 设置 OnQuotaExceeded
 // 也会在 ReloadProviderPool 后再次调用
+// P-provider-vendor: 同一 vendor 共享 pool 后,多个注册名(deepseek / deepseek-anthropic)
+// 指向同一 *Pool — 按 pool 指针去重,只注入一次 callback,避免 QUOTA_EXCEEDED key
+// 以两个名字各入堆一次(双倍探测 / QuotaProbeAttempts 双倍增长提前 DISABLE)。
 func (m *Manager) injectCallbacks() {
+	seen := make(map[*keypool.Pool]bool)
 	for name, pool := range m.pools.Get() {
+		if seen[pool] {
+			continue
+		}
+		seen[pool] = true
 		m.injectOneCallback(name, pool)
 	}
 	m.metricsSetPending(m.sched.pendingCount())
@@ -249,8 +257,15 @@ func (m *Manager) ReinjectCallback(providerName string, p *keypool.Pool) {
 }
 
 // rescanExisting 冷启动:把已有 QUOTA_EXCEEDED 的 key 立即入堆
+// P-provider-vendor: 与 injectCallbacks 相同模式 — 共享 pool 按指针去重,
+// 同一把 QUOTA_EXCEEDED key 只会以一个名字入堆一次。
 func (m *Manager) rescanExisting() {
+	seen := make(map[*keypool.Pool]bool)
 	for name, pool := range m.pools.Get() {
+		if seen[pool] {
+			continue
+		}
+		seen[pool] = true
 		for _, k := range pool.KeyPtrs() {
 			if k.Status == keypool.KeyStatusQuotaExceeded {
 				m.logger.Info("cold-start: scheduling existing quota_exceeded key",

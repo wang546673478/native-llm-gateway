@@ -3,6 +3,7 @@ package handler
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -181,9 +182,18 @@ func (a *Admin) listProviders(c *gin.Context) {
 		}
 	}
 
+	// P-provider-vendor: 确定性排序 — byVendor/Names 来自 Go map 迭代,顺序随机;
+	// 不排序则前端 ProviderKeys.vue 取 names[0] 时 ~50% 概率是变体名(deepseek-anthropic),
+	// 导致按变体名创建 key 存到共享 pool 读不到的行(静默失效)。
+	sort.Strings(order)
 	out := make([]gin.H, 0, len(order))
 	for _, vendor := range order {
 		v := byVendor[vendor]
+		// 每个 entry 的 Names 也确定性排序(vendor 名排最前?不 — 按 name 字符串排序,
+		// 保证 names[0] 稳定;vendor 名(deepseek)恒小于变体名(deepseek-anthropic))
+		sort.Slice(v.Names, func(i, j int) bool {
+			return v.Names[i]["name"].(string) < v.Names[j]["name"].(string)
+		})
 		// models 并集去重
 		seen := make(map[string]bool, len(v.Models))
 		models := make([]string, 0, len(v.Models))

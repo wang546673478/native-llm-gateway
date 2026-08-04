@@ -90,9 +90,10 @@ func (p *Pool) AcquireForProtocol(proto string) (*Key, error) {
 // AcquireFromIDs P34: 从指定 ID 子集里挑 Key(Gateway Key 绑定了 ProviderKeyIDs 时用)
 // allowedIDs 为 nil/空 → 等价 Acquire(用全部 keys)
 // 非空 → 只从 ID 在这个集合里的 key 里挑
-func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
+// P-provider-vendor: proto 透传给 AcquireFromTier(协议过滤;空 = 不过滤)
+func (p *Pool) AcquireFromIDs(allowedIDs []uint, proto string) (*Key, error) {
 	if len(allowedIDs) == 0 {
-		return p.AcquireForProtocol("")
+		return p.AcquireForProtocol(proto)
 	}
 	// 转成 map 加速 lookup
 	set := make(map[uint]struct{}, len(allowedIDs))
@@ -100,7 +101,7 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint) (*Key, error) {
 		set[id] = struct{}{}
 	}
 	for _, tier := range []string{"token_plan", "api", "free"} {
-		k, err := p.AcquireFromTier(tier, set, "")
+		k, err := p.AcquireFromTier(tier, set, proto)
 		if err == nil {
 			return k, nil
 		}
