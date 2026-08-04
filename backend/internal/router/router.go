@@ -111,20 +111,20 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 	}
 	rule, ok := r.aliases[req.Model]
 	if !ok {
-		// alias 没注册 → 自动发现:从所有 enabled provider 中找声明该 model 的
-		iter, err := r.routeDirectModelWithOpts(ctx, req.Model, req, o)
-		// P-catch-all: 自动发现失败(未知 model 名)且配了 catch_all → 按兜底规则路由。
-		// 这样任意 agent 发任意模型名都能走通,无需为每个名字配 alias。
-		// 空规则(catch_all: {}) = 自动模式:所有 provider 参与,见 routeCatchAllAuto
-		if err != nil && r.catchAll != nil {
-			r.logger.Debug("no direct model route, using catch_all",
+		// P-catch-all: 配了 catch_all → 一律走兜底链,客户端模型名只是标签,
+		// 不参与路由决策 — 真实模型名也不直连声明它的 provider。
+		// 路由只按「请求路径选协议面 + tier 计费(token_plan → api → free)」,
+		// 链上能用哪些模型由 gateway key 白名单细化。空规则 = 自动模式
+		if r.catchAll != nil {
+			r.logger.Debug("catch_all chain (client model name ignored)",
 				zap.String("model", req.Model))
 			if len(r.catchAll.Providers) == 0 && r.catchAll.TargetModel == "" {
 				return r.routeCatchAllAuto(ctx, req.Model, req, o)
 			}
 			return r.routeAliasRule(ctx, *r.catchAll, req.Model, req, o)
 		}
-		return iter, err
+		// 无 catch_all(旧行为):自动发现真实 model 名
+		return r.routeDirectModelWithOpts(ctx, req.Model, req, o)
 	}
 	return r.routeAliasRule(ctx, rule, req.Model, req, o)
 }

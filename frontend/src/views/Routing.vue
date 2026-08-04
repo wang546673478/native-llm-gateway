@@ -6,10 +6,10 @@
         <n-space align="center" style="margin-bottom: 12px">
           <n-tag type="success">自动模式</n-tag>
           <n-text depth="3" style="font-size: 12px">
-            无路由表:客户端发任何 alias 表外且无 provider 声明的 model 名,所有
-            enabled provider 自动参与(按请求路径选协议面),每个 provider 用其默认
-            模型(default_model 或第一个声明),token_plan → api → free 计费。
-            加 provider + key 即自动进链。
+            无路由表:客户端发任何 model 名都一律走这条链(名字只是标签),
+            所有 enabled provider 自动参与(按请求路径选协议面),每个 provider
+            用其默认模型承接,token_plan → api → free 计费;链上能用哪些模型
+            由 gateway key 白名单细化。加 provider + key 即自动进链。
           </n-text>
         </n-space>
         <n-data-table

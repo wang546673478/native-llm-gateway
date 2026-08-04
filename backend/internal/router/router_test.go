@@ -266,7 +266,7 @@ func TestRouter_CatchAllLongForm(t *testing.T) {
 		t.Errorf("alias = %s, want minimax(catch_all 不应覆盖 alias)", resAlias.ProviderName)
 	}
 
-	// 真实 model 名照常直连,catch_all 不拦截
+	// 真实 model 名也走 catch_all 链(客户端模型名只是标签,qwen 不在链上被跳过)
 	reqReal := &provider.Request{Model: "qwen-plus", Path: "/v1/chat/completions"}
 	itReal, err := r.Route(context.Background(), reqReal)
 	if err != nil {
@@ -276,8 +276,8 @@ func TestRouter_CatchAllLongForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Next (real): %v", err)
 	}
-	if resReal.ProviderName != "qwen" {
-		t.Errorf("real model = %s, want qwen(catch_all 不应拦截真实 model)", resReal.ProviderName)
+	if resReal.ProviderName != "deepseek" {
+		t.Errorf("real model = %s, want deepseek(catch_all 链,不直连声明者)", resReal.ProviderName)
 	}
 }
 
@@ -377,6 +377,22 @@ func TestRouter_CatchAllAuto(t *testing.T) {
 	if res2.ProviderName != "deepseek" || res2.ModelID != "deepseek-v4-flash" {
 		t.Errorf("openai face = %s/%s, want deepseek/deepseek-v4-flash",
 			res2.ProviderName, res2.ModelID)
+	}
+
+	// 真实 model 名(qwen 声明过 qwen-plus)也走链,不直连 qwen —
+	// 客户端模型名只是标签,路由只按协议面 + tier
+	reqReal := &provider.Request{Model: "qwen-plus", Path: "/v1/messages"}
+	itReal, err := r.Route(context.Background(), reqReal)
+	if err != nil {
+		t.Fatalf("Route real model: %v", err)
+	}
+	resReal, err := itReal.Next()
+	if err != nil {
+		t.Fatalf("Next (real): %v", err)
+	}
+	if resReal.ProviderName != "minimax" || resReal.ModelID != "MiniMax-M3" {
+		t.Errorf("real model via chain = %s/%s, want minimax/MiniMax-M3(token_plan 优先)",
+			resReal.ProviderName, resReal.ModelID)
 	}
 
 	// 默认模型缺省 = 第一个声明(M2),无需显式 default_model
