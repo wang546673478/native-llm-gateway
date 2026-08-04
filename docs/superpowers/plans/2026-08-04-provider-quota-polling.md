@@ -1198,7 +1198,8 @@ Expected: identifies the column list. Open the file.
 In the Vue `<script setup>`, add:
 
 ```typescript
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import type { ProviderKey } from '@/api'   // adjust if the type lives elsewhere
 
 // 同 provider 同 tier 内,所有已轮询 key 的 Remaining 的最大值
 function tierMaxFor(keys: ProviderKey[], tier: string): number {
@@ -1218,20 +1219,29 @@ function balanceColour(k: ProviderKey, tierMax: number, warnPct: number): 'green
   if (k.remaining >= threshold) return 'green'
   return 'yellow'
 }
+
+// Tier-relative max for the row being rendered.
+// Adapt to whichever prop/store your component receives the list from.
+const allKeys = computed<ProviderKey[]>(() => /* source-of-truth list, e.g. store.keys or props.keys */ [])
+
+function tierMaxForRow(row: ProviderKey): number {
+  return tierMaxFor(allKeys.value, row.billing_source || '')
+}
 ```
 
 Inside the template column definition for the new column:
 
 ```vue
 <template #default="{ row }">
-  <n-tag v-if="row.last_polled_at" :type="balanceColour(row, tierMaxFor(row.tier || ''), warnThresholdPct)">
+  <n-tag v-if="row.last_polled_at"
+         :type="balanceColour(row, tierMaxForRow(row), warnThresholdPct)">
     ¥{{ row.remaining.toFixed(2) }}
   </n-tag>
   <span v-else class="text-gray-400">未轮询</span>
 </template>
 ```
 
-(Replace the actual column-type binding with whatever styling convention the file uses — confirm via reading the existing columns in the file first.)
+(Read the existing columns in the file first to match the file's prop/store layout and styling convention.)
 
 - [ ] **Step 3: Build**
 
