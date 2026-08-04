@@ -77,7 +77,9 @@
             <div class="bs-stats">
               <div class="bs-row big">
                 <span class="bs-key">可用额度</span>
-                <span class="bs-val">¥{{ row.quota_known_sum.toFixed(2) }}</span>
+                <span class="bs-val">
+                  {{ row.quota_kind === 'percent' ? '—' : `¥${row.quota_known_sum.toFixed(2)}` }}
+                </span>
               </div>
             </div>
           </div>
