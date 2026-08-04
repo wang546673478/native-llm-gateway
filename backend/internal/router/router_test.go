@@ -365,7 +365,8 @@ func TestRouter_CatchAllAuto_WhitelistSelect(t *testing.T) {
 		t.Error("expected ErrNoRoute when whitelist matches no declared model")
 	}
 
-	// 不带白名单(或通配)→ 用默认模型(第一个声明)
+	// 不带白名单(或通配)→ 用默认模型(第一个声明);
+	// 同 tier 内 provider 顺序是 map 迭代随机的,两个默认模型都合法
 	it3, err := r.Route(context.Background(),
 		&provider.Request{Model: "x", Path: "/v1/chat/completions"})
 	if err != nil {
@@ -375,8 +376,8 @@ func TestRouter_CatchAllAuto_WhitelistSelect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Next: %v", err)
 	}
-	if res3.ModelID != "deepseek-v4-flash" {
-		t.Errorf("no whitelist = %s, want deepseek-v4-flash(默认模型)", res3.ModelID)
+	if res3.ModelID != "deepseek-v4-flash" && res3.ModelID != "MiniMax-M3" {
+		t.Errorf("no whitelist = %s, want 默认模型(deepseek-v4-flash 或 MiniMax-M3)", res3.ModelID)
 	}
 }
 

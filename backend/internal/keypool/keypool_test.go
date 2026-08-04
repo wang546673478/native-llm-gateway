@@ -129,6 +129,27 @@ func TestPool_ReportErrorDisablesOnAuth(t *testing.T) {
 	}
 }
 
+// TestPool_ReportErrorInvalidRequestKeepsKeyActive P-invalid-req:
+// 上游 400(invalid_request)通常是请求内容问题(agent 回带其他厂商的
+// thinking 块等),不是 key 有问题 — 只计数,不禁用。
+// 禁用会把整条链打死且无恢复路径,一次坏请求不应让 provider 永久下线
+func TestPool_ReportErrorInvalidRequestKeepsKeyActive(t *testing.T) {
+	keys := newTestKeys(1)
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	pool.ReportError(keys[0], "invalid_request")
+	if keys[0].Status != KeyStatusActive {
+		t.Errorf("after invalid_request: status = %q, want ACTIVE(不禁用)", keys[0].Status)
+	}
+	if keys[0].ErrorCount != 1 {
+		t.Errorf("error count = %d, want 1(仍计数)", keys[0].ErrorCount)
+	}
+	// key 仍可取
+	if _, err := pool.Acquire(); err != nil {
+		t.Errorf("Acquire after invalid_request: %v, want 可用", err)
+	}
+}
+
 func TestPool_RoundRobinDistributes(t *testing.T) {
 	keys := newTestKeys(3)
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})

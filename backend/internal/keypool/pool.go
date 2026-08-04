@@ -263,8 +263,13 @@ func (p *Pool) ReportError(k *Key, errType string) {
 	var quotaCB func(*Key, KeyStatus)
 	var fromStatus KeyStatus
 	switch errType {
-	case "auth", "invalid_request":
+	case "auth":
+		// 上游 401/403-auth:key 本身有问题 → 禁用(无自动恢复,需重建)
 		k.Status = KeyStatusDisabled
+	case "invalid_request":
+		// P-invalid-req: 上游 400 通常是「这个请求内容它不支持」(agent 回带的
+		// 其他厂商 thinking 块、tool 格式差异等),不是 key 有问题 —
+		// 只计数,不禁用。禁用会把整条链打死且无恢复路径
 	case "quota_exceeded":
 		// P68: 配额耗尽(402 / 429 quota / 403 quota) — 标 QUOTA_EXCEEDED
 		// 让 quotacheck.Manager 探测恢复后调 RestoreQuota 回到 ACTIVE
