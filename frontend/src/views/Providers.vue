@@ -10,29 +10,33 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { h, onMounted, ref } from 'vue'
 import { NDataTable, NSpin, NTag } from 'naive-ui'
-import { api, type ProviderInfo } from '../api/client'
+import { api, type VendorInfo } from '../api/client'
 
-const providers = ref<ProviderInfo[]>([])
+// P-provider-vendor: 一行 = 一个厂商(vendor),names 列出该厂商的全部注册名(协议面)
+const providers = ref<VendorInfo[]>([])
 const loading = ref(true)
 
 const columns = [
-  { title: 'Name', key: 'name' },
+  { title: 'Name', key: 'vendor' },
   {
     title: 'Protocol',
     key: 'protocol',
-    render: (row: ProviderInfo) => h(NTag, { type: 'info', size: 'small' }, () => row.protocol),
+    render: (row: VendorInfo) =>
+      row.names.map(n =>
+        h(NTag, { type: 'info', size: 'small', style: { marginRight: '4px' } }, () => n.protocol),
+      ),
   },
   {
     title: 'Models',
     key: 'models',
-    render: (row: ProviderInfo) => row.models.join(', '),
+    render: (row: VendorInfo) => row.models.join(', '),
   },
   {
     title: 'Key Pool',
     key: 'key_pool',
-    render: (row: ProviderInfo) => {
+    render: (row: VendorInfo) => {
       const kp = row.key_pool
       if (!kp) return '—'
       return `${kp.active_keys}/${kp.total_keys} active, ${kp.cooling_keys} cooling, ${kp.disabled_keys} disabled`
@@ -41,7 +45,7 @@ const columns = [
   {
     title: 'Circuit Breaker',
     key: 'circuit_breaker',
-    render: (row: ProviderInfo) => {
+    render: (row: VendorInfo) => {
       const cb = row.circuit_breaker
       if (!cb) return '—'
       const type = cb.state === 'CLOSED' ? 'success' : cb.state === 'OPEN' ? 'error' : 'warning'
@@ -50,13 +54,11 @@ const columns = [
   },
 ]
 
-import { h } from 'vue'
-
 onMounted(async () => {
   loading.value = true
   try {
     const resp = await api.providers()
-    providers.value = resp.providers
+    providers.value = resp.vendors
   } finally {
     loading.value = false
   }

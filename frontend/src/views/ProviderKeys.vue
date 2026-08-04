@@ -20,13 +20,18 @@
       :mask-closable="false"
     >
       <n-form ref="formRef" :model="form" :rules="rules" label-placement="top">
-        <n-form-item label="Provider" path="provider_name">
+        <!-- P-provider-vendor: 两级选择 — 厂商 → 协议(默认全勾 = 全部) -->
+        <n-form-item label="厂商" path="vendor">
           <n-select
-            v-model:value="form.provider_name"
-            :options="providerOptions"
-            placeholder="选择 Provider"
+            v-model:value="form.vendor"
+            :options="vendorOptions"
+            placeholder="选择厂商"
             :disabled="editing"
+            @update:value="() => { form.protocols = protocolOptions.map(o => o.value) }"
           />
+        </n-form-item>
+        <n-form-item label="协议(不选 = 全部)" path="protocols">
+          <n-select v-model:value="form.protocols" multiple :options="protocolOptions" placeholder="默认全勾" />
         </n-form-item>
         <n-form-item label="名称(可空,自动生成)" path="name">
           <n-input v-model:value="form.name" placeholder="如 prod-key-1,留空自动" />
@@ -73,7 +78,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
-import { api } from '../api/client'
+import { api, type VendorInfo } from '../api/client'
 
 interface ProviderKeyView {
   id: number
@@ -91,15 +96,12 @@ interface ProviderKeyView {
   last_polled_at: string | null
   // P-quota-display: 数值类型 — "percent" / "currency" / ""(空按 currency)
   quota_kind: 'percent' | 'currency' | ''
-}
-
-interface ProviderInfo {
-  name: string
-  protocol: string
+  // P-provider-vendor: 该 key 允许的协议面(逗号分隔,空 = 全部)
+  protocols: string
 }
 
 const keys = ref<ProviderKeyView[]>([])
-const providers = ref<ProviderInfo[]>([])
+const providers = ref<VendorInfo[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const modalVisible = ref(false)
@@ -107,7 +109,11 @@ const editing = ref(false)
 const message = useMessage()
 
 const form = ref({
+  // P-provider-vendor: 提交目标 = 选中 vendor 的第一个注册名(pool 共享,任意协议面可写)
   provider_name: '',
+  // P-provider-vendor: 新增 — 厂商 + 勾选的协议(空数组 = 全部)
+  vendor: '',
+  protocols: [] as string[],
   name: '',
   key: '',
   enabled: true,
@@ -116,13 +122,24 @@ const form = ref({
 })
 
 const rules = {
-  provider_name: { required: true, message: '选择 Provider', trigger: 'blur' },
+  vendor: { required: true, message: '选择厂商', trigger: 'blur' },
   key: { required: true, message: 'Key 必填', trigger: 'blur' },
 }
 
-const providerOptions = computed(() =>
-  providers.value.map(p => ({ label: `${p.name} (${p.protocol})`, value: p.name }))
+// P-provider-vendor: 两级下拉 — 厂商 → 协议面
+const vendorOptions = computed(() =>
+  providers.value.map(v => ({ label: v.vendor, value: v.vendor }))
 )
+const protocolOptions = computed(() => {
+  const v = providers.value.find(p => p.vendor === form.value.vendor)
+  if (!v) return []
+  return v.names.map(n => ({ label: n.protocol, value: n.protocol }))
+})
+// 提交目标 provider_name = vendor 的第一个注册名(协议面任意,pool 共享)
+const targetProviderName = computed(() => {
+  const v = providers.value.find(p => p.vendor === form.value.vendor)
+  return v?.names[0]?.name ?? ''
+})
 
 const billingSourceOptions = [
   { label: '💰 按量计费 (api)', value: 'api' },
@@ -258,16 +275,15 @@ const columns: DataTableColumns<ProviderKeyView> = [
 async function load() {
   loading.value = true
   try {
-    // 一次性加载 provider 列表 + keys(对每个 provider 都拉一次 key)
+    // P-provider-vendor: 厂商聚合列表 → 按 vendor.names 展开,循环拉每个注册名的 api-keys
+    // (同 vendor 的多注册名共享同一 key 池,列表天然按 provider_name 相邻)
     const provResp = await api.providers()
-    providers.value = provResp.providers
-    // 后端 /api/v1/providers 不返回 loaded 字段,默认所有列出来的 provider 都是 loaded 的
-    // (不列出的 provider 是没启用的)
-    const list = provResp.providers || []
+    providers.value = provResp.vendors
+    const allNames = (provResp.vendors || []).flatMap(v => v.names.map(n => n.name))
     const allKeys = await Promise.all(
-      list.map(async p => {
+      allNames.map(async name => {
         try {
-          const r = await axios.get<{ keys: ProviderKeyView[] }>(`/api/v1/providers/${encodeURIComponent(p.name)}/api-keys`)
+          const r = await axios.get<{ keys: ProviderKeyView[] }>(`/api/v1/providers/${encodeURIComponent(name)}/api-keys`)
           return r.data.keys || []
         } catch (e) {
           return []
@@ -295,7 +311,9 @@ async function load() {
 function openCreate() {
   editing.value = false
   form.value = {
-    provider_name: providers.value[0]?.name ?? '',
+    provider_name: targetProviderName.value,
+    vendor: providers.value[0]?.vendor ?? '',
+    protocols: providers.value[0]?.names.map(n => n.protocol) ?? [],
     name: '',
     key: '',
     enabled: true,
@@ -305,23 +323,35 @@ function openCreate() {
 }
 
 async function save() {
-  if (!form.value.provider_name) {
-    message.error('选择 Provider')
+  if (!form.value.vendor) {
+    message.error('选择厂商')
     return
   }
   if (!form.value.key) {
     message.error('Key 必填')
     return
   }
+  const target = targetProviderName.value
+  if (!target) {
+    message.error('厂商无可用注册名')
+    return
+  }
   saving.value = true
   try {
+    // P-provider-vendor: 一把 key 存一条(厂商级一份),protocols 标勾选的协议;
+    // 全勾 → 空(全部);勾选子集 → 逗号分隔。pool 共享,另一协议面的请求同样能取到
+    const allProtocols = protocolOptions.value.map(o => o.value)
+    const isAll =
+      form.value.protocols.length === allProtocols.length &&
+      allProtocols.every(p => form.value.protocols.includes(p))
     await axios.post(
-      `/api/v1/providers/${encodeURIComponent(form.value.provider_name)}/api-keys`,
+      `/api/v1/providers/${encodeURIComponent(target)}/api-keys`,
       {
         name: form.value.name,
         key: form.value.key,
         enabled: form.value.enabled,
         billing_source: form.value.billing_source,
+        protocols: isAll ? '' : form.value.protocols.join(','),
       },
     )
     message.success('已添加')

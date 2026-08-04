@@ -6,27 +6,36 @@ const client = axios.create({
   timeout: 10_000,
 })
 
-export interface ProviderInfo {
+// P-provider-vendor: /providers 按 vendor 聚合 — 一个厂商多个注册名(协议面)
+export interface ProviderNameInfo {
   name: string
   protocol: string
-  models: string[]
-  loaded?: boolean
-  key_pool?: {
-    provider_name: string
-    total_keys: number
-    active_keys: number
-    cooling_keys: number
-    disabled_keys: number
-  }
-  circuit_breaker?: {
-    name: string
-    state: string
-    failures_in_window: number
-  }
 }
 
-export interface ProvidersResp {
-  providers: ProviderInfo[]
+export interface KeyPoolStatus {
+  provider_name: string
+  total_keys: number
+  active_keys: number
+  cooling_keys: number
+  disabled_keys: number
+}
+
+export interface CircuitBreakerInfo {
+  name: string
+  state: string
+  failures_in_window: number
+}
+
+export interface VendorInfo {
+  vendor: string
+  names: ProviderNameInfo[]
+  models: string[]
+  key_pool?: KeyPoolStatus | null
+  circuit_breaker?: CircuitBreakerInfo | null
+}
+
+export interface ProvidersResponse {
+  vendors: VendorInfo[]
   count: number
 }
 
@@ -181,10 +190,20 @@ export interface ModelProviderRow {
 }
 
 export const api = {
-  providers: () => client.get<ProvidersResp>('/providers').then(r => r.data),
+  providers: () => client.get<ProvidersResponse>('/providers').then(r => r.data),
   providersRegistered: () =>
     client.get<RegisteredProvidersResp>('/providers/registered').then(r => r.data),
-  provider: (name: string) => client.get<ProviderInfo>(`/providers/${name}`).then(r => r.data),
+  // GET /providers/:name — 单注册名详情(无前端消费方,保留类型对齐后端)
+  provider: (name: string) =>
+    client
+      .get<{
+        name: string
+        protocol: string
+        models: string[]
+        key_pool?: KeyPoolStatus
+        circuit_breaker?: CircuitBreakerInfo
+      }>(`/providers/${name}`)
+      .then(r => r.data),
   routing: () => client.get<RoutingResp>('/routing').then(r => r.data),
   keys: {
     list: () => client.get<KeysResp>('/keys').then(r => r.data),
