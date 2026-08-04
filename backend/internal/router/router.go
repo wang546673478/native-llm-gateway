@@ -46,12 +46,23 @@ type RouteOption func(*routeOpts)
 
 type routeOpts struct {
 	ProviderKeyIDs []uint
+	// P-catch-all: gateway key 白名单 — catch_all 自动模式用它选择候选模型
+	AllowedModels []string
 }
 
 // WithProviderKeyIDs 让路由从指定 ProviderKeyIDs 子集里挑凭证
 func WithProviderKeyIDs(ids []uint) RouteOption {
 	return func(o *routeOpts) {
 		o.ProviderKeyIDs = ids
+	}
+}
+
+// WithAllowedModels P-catch-all: 把 gateway key 的白名单传给路由。
+// catch_all 自动模式据此选择候选模型:provider 声明过白名单里的模型就用
+// 白名单模型,否则该 provider 不参与。空/nil = 不参与选择(用默认模型)
+func WithAllowedModels(models []string) RouteOption {
+	return func(o *routeOpts) {
+		o.AllowedModels = models
 	}
 }
 
@@ -132,6 +143,10 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 // routeCatchAllAuto P-catch-all 自动模式(catch_all: {}):
 // 所有 enabled provider 都参与,按请求路径协议过滤 + 健康过滤,
 // 每个 provider 用它的默认模型(显式 default_model 或第一个声明)承接请求。
+// P-whitelist-select: 带 key 白名单时,白名单同时参与候选模型选择 —
+// provider 声明过白名单里的模型就用白名单模型(按白名单顺序),
+// 声明里没有白名单模型的 provider 不参与。这样 key 允许的模型就是
+// 链上实际服务的模型,而不是「白名单只排除、路由目标对不上」。
 // tier 计费自动(token_plan → api → free);没 key / 全不可用的 provider 由
 // AcquireFromTier 自然跳过。加新 provider + key 即自动进链 — 无路由表可维护
 func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
@@ -145,6 +160,20 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 			continue
 		}
 		model := r.manager.DefaultModelFor(name)
+		// P-whitelist-select: 白名单参与选择(非空且非通配)
+		if len(o.AllowedModels) > 0 && !sliceContains(o.AllowedModels, "*") {
+			picked := ""
+			for _, am := range o.AllowedModels {
+				if sliceContains(p.Models(), am) {
+					picked = am
+					break
+				}
+			}
+			if picked == "" {
+				continue // 该 provider 声明的模型都不在白名单 → 不参与
+			}
+			model = picked
+		}
 		if model == "" {
 			continue
 		}
@@ -161,6 +190,16 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
+}
+
+// sliceContains 简单 contains helper(避免引入 slices 依赖的版本问题)
+func sliceContains(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 // routeAliasRule 走一条 alias 规则(长格式显式 providers 或短格式 TargetModel)。

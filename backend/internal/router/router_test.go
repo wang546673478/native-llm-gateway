@@ -305,6 +305,81 @@ func TestRouter_CatchAllShortForm(t *testing.T) {
 	}
 }
 
+// TestRouter_CatchAllAuto_WhitelistSelect P-whitelist-select:
+// 白名单参与候选模型选择 — provider 声明过白名单里的模型就用白名单模型
+// (按白名单顺序),声明里没有白名单模型的 provider 不参与
+func TestRouter_CatchAllAuto_WhitelistSelect(t *testing.T) {
+	now := time.Now()
+	mkPool := func() *keypool.Pool {
+		return keypool.NewPool("p", []*keypool.Key{{
+			ID: "1", ProviderName: "p", Name: "k1", Key: "sk",
+			Status: keypool.KeyStatusActive, BillingSource: "api",
+			CreatedAt: now, UpdatedAt: now,
+		}}, nil, keypool.Config{})
+	}
+
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "deepseek", proto: provider.ProtocolOpenAI, models: []string{"deepseek-v4-flash", "deepseek-v4-pro"}},
+		&fakeProvider{name: "minimax-openai", proto: provider.ProtocolOpenAI, models: []string{"MiniMax-M3"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, map[string]*keypool.Pool{
+		"deepseek":       mkPool(),
+		"minimax-openai": mkPool(),
+	}, Config{Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"}})
+
+	// 白名单 [deepseek-v4-pro]:deepseek 候选用 v4-pro(声明过),minimax 不参与
+	it, err := r.Route(context.Background(),
+		&provider.Request{Model: "claude-opus-5", Path: "/v1/chat/completions"},
+		WithAllowedModels([]string{"deepseek-v4-pro"}))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "deepseek" || res.ModelID != "deepseek-v4-pro" {
+		t.Errorf("whitelist-select = %s/%s, want deepseek/deepseek-v4-pro",
+			res.ProviderName, res.ModelID)
+	}
+
+	// 白名单 [MiniMax-M3, deepseek-v4-pro]:两个 provider 都按白名单模型参与
+	it2, err := r.Route(context.Background(),
+		&provider.Request{Model: "claude-opus-5", Path: "/v1/chat/completions"},
+		WithAllowedModels([]string{"MiniMax-M3", "deepseek-v4-pro"}))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res2, err := it2.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res2.ModelID != "MiniMax-M3" && res2.ModelID != "deepseek-v4-pro" {
+		t.Errorf("whitelist-select = %s, want MiniMax-M3 或 deepseek-v4-pro", res2.ModelID)
+	}
+
+	// 白名单里没有 provider 声明过的模型 → ErrNoRoute
+	if _, err := r.Route(context.Background(),
+		&provider.Request{Model: "x", Path: "/v1/chat/completions"},
+		WithAllowedModels([]string{"does-not-exist"})); err == nil {
+		t.Error("expected ErrNoRoute when whitelist matches no declared model")
+	}
+
+	// 不带白名单(或通配)→ 用默认模型(第一个声明)
+	it3, err := r.Route(context.Background(),
+		&provider.Request{Model: "x", Path: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res3, err := it3.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res3.ModelID != "deepseek-v4-flash" {
+		t.Errorf("no whitelist = %s, want deepseek-v4-flash(默认模型)", res3.ModelID)
+	}
+}
+
 // TestRouter_CatchAllAbsent P-catch-all: 没配 catch_all 时未知 model 照旧 ErrNoRoute
 func TestRouter_CatchAllAbsent(t *testing.T) {
 	mgr := newFakeManager(t,

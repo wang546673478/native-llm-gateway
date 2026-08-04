@@ -261,8 +261,15 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	// 4. 路由(failover iterator) — P34: 把 GatewayKey 绑定的 ProviderKeyIDs 传给 Router
 	var routeOpts []router.RouteOption
 	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok && len(gk.ProviderKeyIDs) > 0 {
-			routeOpts = append(routeOpts, router.WithProviderKeyIDs(gk.ProviderKeyIDs))
+		if gk, ok := gkVal.(*auth.GatewayKey); ok {
+			if len(gk.ProviderKeyIDs) > 0 {
+				routeOpts = append(routeOpts, router.WithProviderKeyIDs(gk.ProviderKeyIDs))
+			}
+			// P-whitelist-select: 白名单参与 catch_all 自动模式的候选模型选择 —
+			// key 允许的模型就是链上实际服务的模型(通配 * 不参与选择)
+			if len(gk.AllowedModels) > 0 && !(len(gk.AllowedModels) == 1 && gk.AllowedModels[0] == "*") {
+				routeOpts = append(routeOpts, router.WithAllowedModels(gk.AllowedModels))
+			}
 		}
 	}
 	iter, err := e.router.Route(ctx, req, routeOpts...)
