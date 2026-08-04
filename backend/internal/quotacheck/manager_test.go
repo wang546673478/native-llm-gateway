@@ -421,3 +421,42 @@ func TestPollAllBalancers_HasQuotaFalseOnActivePushedToQuotaExceeded(t *testing.
 		t.Errorf("Status after poll = %s, want QUOTA_EXCEEDED", got)
 	}
 }
+
+func TestPollAllBalancers_DedupSharedPool(t *testing.T) {
+	// P-provider-vendor: deepseek / deepseek-anthropic 共享同一 pool →
+	// 轮询按 pool 指针去重,balance 查询每轮只发生一次
+	pool := newTestPool(t) // 1 个 api tier key
+	m := &Manager{
+		logger: zap.NewNop(),
+		cfg:    DefaultManagerConfig(),
+		pools: NewPoolsRef(map[string]*keypool.Pool{
+			"deepseek":           pool,
+			"deepseek-anthropic": pool,
+		}),
+		prov: &fakeProviderLookup{endpoints: map[string]string{
+			"deepseek":           "http://x",
+			"deepseek-anthropic": "http://y",
+		}},
+		sched: NewScheduler(),
+		now:   time.Now,
+	}
+
+	b := &stubBalancer{balance: Balance{HasQuota: true, Raw: 50, Kind: "currency"}}
+	originalReg := balancerRegistry["deepseek"]
+	RegisterBalancer("deepseek", b)
+	RegisterBalancer("deepseek-anthropic", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["deepseek"] = originalReg
+		} else {
+			delete(balancerRegistry, "deepseek")
+		}
+		delete(balancerRegistry, "deepseek-anthropic")
+	})
+
+	m.pollAllBalancers(context.Background())
+
+	if got := atomic.LoadInt32(&b.calls); got != 1 {
+		t.Fatalf("balancer calls = %d, want 1 (shared pool dedup)", got)
+	}
+}

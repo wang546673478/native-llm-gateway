@@ -220,11 +220,20 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
 	}
 	store := auth.NewProviderKeyStore(db)
+	// P-provider-vendor: 同一 vendor 的多个注册名(如 deepseek / deepseek-anthropic)
+	// 共享同一个 pool — key 厂商级一份,协议由 key 的 Protocols 标记过滤
+	vendorPools := make(map[string]*keypool.Pool)
 	for name, p := range cfg.Providers {
 		if !p.Enabled {
 			continue
 		}
-		out[name] = buildOnePool(context.Background(), name, sched, poolCfg, store, logger)
+		vendor := provider.Default().VendorFor(name)
+		pool, ok := vendorPools[vendor]
+		if !ok {
+			pool = buildOnePool(context.Background(), vendor, sched, poolCfg, store, logger)
+			vendorPools[vendor] = pool
+		}
+		out[name] = pool
 	}
 	return out
 }
@@ -260,6 +269,8 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 			Key:           row.KeyHash,
 			Status:        keypool.KeyStatusActive,
 			BillingSource: bs, // P48: 单 key 计费 tier,Pool.Acquire 按此排序
+			// P-provider-vendor: key 可用协议列表(空 = 全部),取 key 时按请求协议过滤
+			Protocols:     row.Protocols,
 			CreatedAt:     row.CreatedAt,
 			UpdatedAt:     row.UpdatedAt,
 		})

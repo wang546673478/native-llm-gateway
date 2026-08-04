@@ -557,7 +557,14 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 			m.logger.Error("pollAllBalancers panic", zap.Any("err", r))
 		}
 	}()
+	// P-provider-vendor: 同一 vendor 共享 pool 后,两个注册名指向同一 *Pool,
+	// 按 pool 指针去重,避免每轮重复 poll 同一批 key 的余额
+	seen := make(map[*keypool.Pool]bool)
 	for providerName, pool := range m.pools.Get() {
+		if seen[pool] {
+			continue
+		}
+		seen[pool] = true
 		balancer := LookupBalancer(providerName)
 		if balancer == nil {
 			continue
