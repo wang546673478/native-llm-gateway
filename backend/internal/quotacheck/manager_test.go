@@ -4,6 +4,7 @@ package quotacheck
 import (
 	"context"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -298,4 +299,108 @@ func TestManager_MetricsNilSafe(t *testing.T) {
 	m.handleQuotaExceeded("test", keys[0], keypool.KeyStatusActive)
 	m.handleProbeResult("test", "1", ResultRestored)
 	m.handleProbeResult("test", "1", ResultStillExhausted)
+}
+
+// fakeBalancer records the call order of FetchBalance
+type fakeBalancer struct {
+	calls []string            // 记录被调用的 key ID
+	bal   Balance             // 所有 key 都返同一个 Balance
+	err   error
+}
+
+func (f *fakeBalancer) FetchBalance(_ context.Context, _ string, k *keypool.Key) (Balance, error) {
+	f.calls = append(f.calls, k.ID)
+	return f.bal, f.err
+}
+
+func TestPollAllBalancers_TierBlocked(t *testing.T) {
+	// pool: 2 token_plan + 1 api + 1 free = 4 key
+	// 期望调用顺序:[token_plan × 2, api × 1, free × 1]
+	pool := keypool.NewPool("p", []*keypool.Key{
+		{ID: "free-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "free"},
+		{ID: "tp-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan"},
+		{ID: "tp-2", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan"},
+		{ID: "api-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "api"},
+	}, nil, keypool.Config{})
+
+	b := &fakeBalancer{bal: Balance{HasQuota: true, Raw: 1.0}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+
+	m.pollAllBalancers(context.Background())
+
+	want := []string{"tp-1", "tp-2", "api-1", "free-1"}
+	if !reflect.DeepEqual(b.calls, want) {
+		t.Errorf("calls = %v, want %v (tier-blocked order)", b.calls, want)
+	}
+	// Remaining 应被填入
+	for _, k := range pool.KeyPtrs() {
+		if k.Remaining != 1.0 {
+			t.Errorf("%s Remaining = %v, want 1.0", k.ID, k.Remaining)
+		}
+		if k.LastPolledAt.IsZero() {
+			t.Errorf("%s LastPolledAt not set", k.ID)
+		}
+	}
+}
+
+func TestPollAllBalancers_PolledAllStatusesNotJustQuotaExceeded(t *testing.T) {
+	// 现在 ACTIVE key 也被轮询
+	pool := keypool.NewPool("p", []*keypool.Key{
+		{ID: "active-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan"},
+		{ID: "quota-1", ProviderName: "p", Status: keypool.KeyStatusQuotaExceeded, BillingSource: "token_plan"},
+	}, nil, keypool.Config{})
+
+	b := &fakeBalancer{bal: Balance{HasQuota: true, Raw: 7.7}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+	m.pollAllBalancers(context.Background())
+
+	if len(b.calls) != 2 {
+		t.Errorf("calls = %d, want 2 (both ACTIVE and QUOTA_EXCEEDED should be polled)", len(b.calls))
+	}
+}
+
+func TestPollAllBalancers_HasQuotaFalseOnActivePushedToQuotaExceeded(t *testing.T) {
+	// HasQuota=false 且 Status=ACTIVE → 自动 ReportQuotaExceeded
+	pool := keypool.NewPool("p", []*keypool.Key{
+		{ID: "active-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan"},
+	}, nil, keypool.Config{})
+
+	b := &fakeBalancer{bal: Balance{HasQuota: false, Raw: 0}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+	m.pollAllBalancers(context.Background())
+
+	got := pool.KeyPtrs()[0].Status
+	if got != keypool.KeyStatusQuotaExceeded {
+		t.Errorf("Status after poll = %s, want QUOTA_EXCEEDED", got)
+	}
 }

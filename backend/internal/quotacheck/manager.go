@@ -534,29 +534,71 @@ func (m *Manager) pollLoop(ctx context.Context) {
 	}
 }
 
+// pollAllBalancers P68 + P-quota-balance:
+//   - 主动轮询所有有 Balancer 的 provider
+//   - 同 provider 内分 tier 块跑:先 token_plan,再 api,最后 free
+//   - 每把 key 写 Remaining + LastPolledAt
+//   - HasQuota=false 且当前 ACTIVE → 走 P68 ReportQuotaExceeded 转移状态
+//   - HasQuota=true 且当前 QUOTA_EXCEEDED → 走 P68 RestoreQuota 恢复
+//   - DISABLED key 跳过,无关
+//   - 每把 key 之间 sleep 1 秒(由 ctx 可中断),不爆上游
 func (m *Manager) pollAllBalancers(ctx context.Context) {
 	for providerName, pool := range m.pools.Get() {
 		balancer := LookupBalancer(providerName)
 		if balancer == nil {
-			continue // 没 Balancer 的不主动 poll
+			continue
 		}
 		baseURL := m.prov.EndpointFor(providerName)
-		for _, k := range pool.KeyPtrs() {
-			if k.Status != keypool.KeyStatusQuotaExceeded {
-				continue
-			}
-			bal, err := balancer.FetchBalance(ctx, baseURL, k)
-			if err != nil {
-				m.logger.Debug("poll balance err", zap.String("provider", providerName), zap.Error(err))
-				continue
-			}
-			if bal.HasQuota {
-				m.logger.Info("poll restored",
-					zap.String("provider", providerName),
-					zap.String("key_id", k.ID),
-					zap.Float64("balance", bal.Raw),
-				)
-				pool.RestoreQuota(k)
+		for _, tier := range []string{"token_plan", "api", "free"} {
+			for _, k := range pool.KeyPtrs() {
+				effective := k.BillingSource
+				if effective == "" {
+					effective = "api"
+				}
+				if effective != tier {
+					continue
+				}
+				if k.Status == keypool.KeyStatusDisabled {
+					continue
+				}
+
+				bal, err := balancer.FetchBalance(ctx, baseURL, k)
+				if err != nil {
+					m.logger.Debug("poll balance err",
+						zap.String("provider", providerName),
+						zap.String("key_id", k.ID),
+						zap.Error(err))
+					m.metricsPollInc(providerName, "transport_error")
+					continue
+				}
+
+				k.Remaining = bal.Raw
+				k.LastPolledAt = time.Now()
+
+				switch {
+				case !bal.HasQuota && k.Status == keypool.KeyStatusActive:
+					m.logger.Info("poll: quota exhausted",
+						zap.String("provider", providerName),
+						zap.String("key_id", k.ID),
+						zap.Float64("remaining", bal.Raw))
+					pool.ReportQuotaExceeded(k)
+					m.metricsPollInc(providerName, "exhausted")
+				case bal.HasQuota && k.Status == keypool.KeyStatusQuotaExceeded:
+					m.logger.Info("poll: quota restored",
+						zap.String("provider", providerName),
+						zap.String("key_id", k.ID),
+						zap.Float64("remaining", bal.Raw))
+					pool.RestoreQuota(k)
+					m.metricsPollInc(providerName, "restored")
+				default:
+					m.metricsPollInc(providerName, "ok")
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
 			}
 		}
 	}
