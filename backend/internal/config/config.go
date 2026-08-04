@@ -190,6 +190,7 @@ type KeyPoolConfig struct {
 	QuotaProbeJitterPct  int           `mapstructure:"quota_probe_jitter_pct"`
 	QuotaProbeMaxAttempts int           `mapstructure:"quota_probe_max_attempts"`
 	QuotaPollInterval    time.Duration `mapstructure:"quota_poll_interval"`
+	QuotaWarnThresholdPct int           `mapstructure:"quota_warn_threshold_pct"`
 	QuotaPollJitterPct   int           `mapstructure:"quota_poll_jitter_pct"`
 	QuotaHTTPTimeout     time.Duration `mapstructure:"quota_http_timeout"`
 	QuotaUserAgent       string        `mapstructure:"quota_user_agent"`

@@ -617,6 +617,7 @@ func (s *Server) Reload(newCfg *config.Config) {
 			ProbeJitterPct:    newCfg.KeyPool.QuotaProbeJitterPct,
 			ProbeMaxAttempts:  newCfg.KeyPool.QuotaProbeMaxAttempts,
 			PollInterval:      newCfg.KeyPool.QuotaPollInterval,
+			WarnThresholdPct:  newCfg.KeyPool.QuotaWarnThresholdPct,
 			PollJitterPct:     newCfg.KeyPool.QuotaPollJitterPct,
 			HTTPTimeout:       newCfg.KeyPool.QuotaHTTPTimeout,
 			UserAgent:         newCfg.KeyPool.QuotaUserAgent,

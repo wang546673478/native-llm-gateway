@@ -49,6 +49,9 @@ type ManagerConfig struct {
 	// 通用
 	HTTPTimeout time.Duration
 	UserAgent   string
+
+	// P-quota-balance: UI 显示余额颜色阈值(同 tier 桶内最大值的百分比);默认 10
+	WarnThresholdPct int
 }
 
 // DefaultManagerConfig 兜底
@@ -63,6 +66,7 @@ func DefaultManagerConfig() ManagerConfig {
 		PollJitterPct:     10,
 		HTTPTimeout:       10 * time.Second,
 		UserAgent:         "native-llm-gateway/quota-restore-1.0",
+		WarnThresholdPct:  10,
 	}
 }
 
@@ -133,6 +137,9 @@ func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, metric
 	}
 	if cfg.PollJitterPct < 0 {
 		cfg.PollJitterPct = 0
+	}
+	if cfg.WarnThresholdPct <= 0 {
+		cfg.WarnThresholdPct = 10
 	}
 	if cfg.HTTPTimeout <= 0 {
 		cfg.HTTPTimeout = 10 * time.Second

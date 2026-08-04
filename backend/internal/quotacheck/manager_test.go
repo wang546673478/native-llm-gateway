@@ -63,6 +63,13 @@ func newTestPool(t *testing.T) *keypool.Pool {
 	return keypool.NewPool("test", keys, nil, keypool.Config{})
 }
 
+func TestManagerConfig_WarnThresholdPctDefault(t *testing.T) {
+	c := DefaultManagerConfig()
+	if c.WarnThresholdPct != 10 {
+		t.Errorf("Default WarnThresholdPct = %d, want 10", c.WarnThresholdPct)
+	}
+}
+
 // Test 1: 探测结果 Restored → pool.RestoreQuota 被调
 func TestManager_ProbeRestoredCallsRestoreQuota(t *testing.T) {
 	keys := []*keypool.Key{

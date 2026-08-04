@@ -499,6 +499,9 @@ keypool:
   max_cooling_count: 5
   health_check_interval: 30s
   key_rotation: "round_robin"
+  quota:
+    poll_interval: 5m
+    warn_threshold_pct: 10
 
 # 超时与重试(P5 阶段真正生效)
 timeouts:
