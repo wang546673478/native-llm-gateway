@@ -56,6 +56,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		Aliases:         toRouterAliases(cfg.Routing.Aliases, cfg.Routing.Chains),
 		DefaultStrategy: cfg.Routing.DefaultStrategy,
 		MaxAttempts:     cfg.Retry.MaxAttempts,
+		CatchAll:        toRouterCatchAll(cfg.Routing.CatchAll, cfg.Routing.Chains),
 	})
 	// P6: Circuit Breaker
 	cm := circuit.NewManager(r)
@@ -363,6 +364,37 @@ func toRouterAliases(in map[string]config.AliasRule, chains map[string][]config.
 	return out
 }
 
+// toRouterCatchAll P-catch-all: 把 routing.catch_all 配置转成 router.AliasConfig。
+// 规则结构与 alias 完全一致(长格式 providers / 短格式 target_model),
+// 与 toRouterAliases 同一套转换逻辑
+func toRouterCatchAll(rule *config.AliasRule, chains map[string][]config.AliasRoute) *router.AliasConfig {
+	if rule == nil {
+		return nil
+	}
+	var src []config.AliasRoute
+	switch {
+	case rule.ChainRef != "":
+		src = chains[rule.ChainRef] // 找不到 → 空,Router 走 auto-discovery
+	case rule.TargetModel != "":
+		// 短格式:src 留空,Router 自动发现声明该 model 的 provider
+		_ = rule.TargetModel
+	default:
+		src = rule.Providers
+	}
+	ps := make([]router.ProviderRoute, 0, len(src))
+	for _, p := range src {
+		ps = append(ps, router.ProviderRoute{
+			Name: p.Name, Model: p.Model, Priority: p.Priority, Weight: p.Weight,
+		})
+	}
+	return &router.AliasConfig{
+		Alias:       "*", // catch-all 的别名占位名(展示用)
+		Strategy:    rule.Strategy,
+		Providers:   ps,
+		TargetModel: rule.TargetModel,
+	}
+}
+
 // Run 启动 HTTP 服务
 func (s *Server) Run(ctx context.Context) error {
 	gin.SetMode(gin.ReleaseMode)
@@ -619,6 +651,8 @@ func (s *Server) Reload(newCfg *config.Config) {
 	}
 	// Router aliases
 	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases, newCfg.Routing.Chains))
+	// P-catch-all: 兜底路由与 aliases 同频热重载
+	s.router.ReloadCatchAll(toRouterCatchAll(newCfg.Routing.CatchAll, newCfg.Routing.Chains))
 
 	// Manager 定价表(cost) — 不需要重建 Provider 实例,只刷 pricing map
 	s.manager.ReloadPricing(toManagerConfigForReload(newCfg, s.pools))

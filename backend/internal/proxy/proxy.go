@@ -389,6 +389,10 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		if result.Key != nil {
 			req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
 		}
+		// P-catch-all: 按当前候选重写 body 的 model 字段(与 tryOneCandidate 同一逻辑)
+		if newBody, ok2 := rewriteModelField(req.Body, result.ModelID); ok2 {
+			req.Body = newBody
+		}
 
 		// 选 Provider 实例
 		pv, ok := e.router.Manager().Get(result.ProviderName)
@@ -867,6 +871,14 @@ func (e *Engine) tryOneCandidate(
 	req.Headers.Set("X-Request-Id", req.TraceID)
 	if result.Key != nil {
 		req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
+	}
+	// P-catch-all: 上游必须收到真实 model 名,不能发客户端原始名。
+	// 长格式 alias / catch_all 的每个候选带各自的目标 model(如 MiniMax-M3 与
+	// deepseek-v4-flash 并存),按当前候选重写 body — 否则 failover 到 DeepSeek
+	// 这类严格校验的 provider 会 400 model_not_found(MiniMax 宽容别名所以一直没暴露)。
+	// 真实 model 直连时 result.ModelID == 客户端名,重写为 no-op
+	if newBody, ok2 := rewriteModelField(req.Body, result.ModelID); ok2 {
+		req.Body = newBody
 	}
 	pv, ok := e.router.Manager().Get(result.ProviderName)
 	if !ok {

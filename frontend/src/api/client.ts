@@ -62,6 +62,8 @@ export interface AliasInfo {
 export interface RoutingResp {
   aliases: Record<string, AliasInfo>
   count: number
+  // P-catch-all: 兜底路由 — 未知模型名按此规则路由(可能为 null = 未配置)
+  catch_all?: AliasInfo | null
 }
 
 export interface GatewayKeyInfo {

@@ -152,6 +152,11 @@ type RoutingConfig struct {
 	// 加新 fallback 时只需要改 chains 里的一处。
 	Chains          map[string][]AliasRoute `mapstructure:"chains"`
 	DefaultStrategy string                  `mapstructure:"default_strategy"`
+	// P-catch-all: 兜底路由 — 客户端发任何 alias 表外且无 provider 声明的 model 名
+	// (如 gpt-5 / 任意新探测名)时,按这条规则路由。任意 agent 任意模型名都能用,
+	// 仍按 tier 计费(token_plan → api → free)。结构同 alias(长格式 providers /
+	// 短格式 target_model);nil = 不兜底
+	CatchAll *AliasRule `mapstructure:"catch_all"`
 }
 
 // AliasRoute 单条路由目标

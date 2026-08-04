@@ -194,6 +194,129 @@ func TestRouter_DirectModelLookup(t *testing.T) {
 	}
 }
 
+// === P-catch-all 兜底路由测试 ===
+
+// TestRouter_CatchAllLongForm P-catch-all:
+// 未知 model 名 + catch_all(长格式 providers)→ 按 catch_all 路由,
+// 协议过滤只留匹配请求路径的面;alias 表命中时 catch_all 不生效
+func TestRouter_CatchAllLongForm(t *testing.T) {
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "minimax", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+		&fakeProvider{name: "deepseek", proto: provider.ProtocolOpenAI, models: []string{"deepseek-v4-flash"}},
+		&fakeProvider{name: "qwen", proto: provider.ProtocolOpenAI, models: []string{"qwen-plus"}},
+	)
+	catchAll := &AliasConfig{
+		Alias:    "*",
+		Strategy: "priority",
+		Providers: []ProviderRoute{
+			{Name: "minimax", Model: "MiniMax-M3", Priority: 1},
+			{Name: "deepseek", Model: "deepseek-v4-flash", Priority: 2},
+		},
+	}
+	r := NewRouter(zap.NewNop(), mgr, nil, Config{
+		Aliases: map[string]AliasConfig{
+			"claude-opus-4-5": {Alias: "claude-opus-4-5", Strategy: "priority", Providers: []ProviderRoute{
+				{Name: "minimax", Model: "MiniMax-M3", Priority: 1},
+			}},
+		},
+		CatchAll: catchAll,
+	})
+
+	// 未知 model 名(openai 面)→ catch_all,协议过滤只留 openai 面
+	req := &provider.Request{Model: "gpt-5", Path: "/v1/chat/completions"}
+	it, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route unknown with catch_all: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "deepseek" || res.ModelID != "deepseek-v4-flash" {
+		t.Errorf("catch_all(openai 面)= %s/%s, want deepseek/deepseek-v4-flash",
+			res.ProviderName, res.ModelID)
+	}
+
+	// 未知 model 名(anthropic 面)→ 只留 anthropic 面
+	reqA := &provider.Request{Model: "gpt-5", Path: "/v1/messages"}
+	itA, err := r.Route(context.Background(), reqA)
+	if err != nil {
+		t.Fatalf("Route unknown (anthropic) with catch_all: %v", err)
+	}
+	resA, err := itA.Next()
+	if err != nil {
+		t.Fatalf("Next (anthropic): %v", err)
+	}
+	if resA.ProviderName != "minimax" || resA.ModelID != "MiniMax-M3" {
+		t.Errorf("catch_all(anthropic 面)= %s/%s, want minimax/MiniMax-M3",
+			resA.ProviderName, resA.ModelID)
+	}
+
+	// alias 表命中时 catch_all 不生效
+	reqAlias := &provider.Request{Model: "claude-opus-4-5", Path: "/v1/messages"}
+	itAlias, err := r.Route(context.Background(), reqAlias)
+	if err != nil {
+		t.Fatalf("Route alias: %v", err)
+	}
+	resAlias, err := itAlias.Next()
+	if err != nil {
+		t.Fatalf("Next (alias): %v", err)
+	}
+	if resAlias.ProviderName != "minimax" {
+		t.Errorf("alias = %s, want minimax(catch_all 不应覆盖 alias)", resAlias.ProviderName)
+	}
+
+	// 真实 model 名照常直连,catch_all 不拦截
+	reqReal := &provider.Request{Model: "qwen-plus", Path: "/v1/chat/completions"}
+	itReal, err := r.Route(context.Background(), reqReal)
+	if err != nil {
+		t.Fatalf("Route real model: %v", err)
+	}
+	resReal, err := itReal.Next()
+	if err != nil {
+		t.Fatalf("Next (real): %v", err)
+	}
+	if resReal.ProviderName != "qwen" {
+		t.Errorf("real model = %s, want qwen(catch_all 不应拦截真实 model)", resReal.ProviderName)
+	}
+}
+
+// TestRouter_CatchAllShortForm P-catch-all:
+// catch_all 用短格式 target_model → 自动发现声明该 model 的 provider
+func TestRouter_CatchAllShortForm(t *testing.T) {
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "p1", proto: provider.ProtocolOpenAI, models: []string{"deepseek-v4-flash"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, nil, Config{
+		Aliases:  map[string]AliasConfig{},
+		CatchAll: &AliasConfig{Alias: "*", TargetModel: "deepseek-v4-flash"},
+	})
+	req := &provider.Request{Model: "o4-mini", Path: "/v1/chat/completions"}
+	it, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "p1" || res.ModelID != "deepseek-v4-flash" {
+		t.Errorf("catch_all(short)= %s/%s, want p1/deepseek-v4-flash", res.ProviderName, res.ModelID)
+	}
+}
+
+// TestRouter_CatchAllAbsent P-catch-all: 没配 catch_all 时未知 model 照旧 ErrNoRoute
+func TestRouter_CatchAllAbsent(t *testing.T) {
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "p1", proto: provider.ProtocolOpenAI, models: []string{"known-model"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, nil, Config{Aliases: map[string]AliasConfig{}})
+	req := &provider.Request{Model: "gpt-5", Path: "/v1/chat/completions"}
+	if _, err := r.Route(context.Background(), req); err == nil {
+		t.Error("expected ErrNoRoute without catch_all")
+	}
+}
+
 // silence unused if scheduler/test funcs trimmed
 
 // === P64 buildKeyCandidates 单元测试 ===

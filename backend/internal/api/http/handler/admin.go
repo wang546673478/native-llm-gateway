@@ -254,7 +254,11 @@ func (a *Admin) listRouting(c *gin.Context) {
 	if aliases == nil {
 		aliases = a.Router.Aliases()
 	}
-	c.JSON(http.StatusOK, gin.H{"aliases": aliases, "count": len(aliases)})
+	c.JSON(http.StatusOK, gin.H{
+		"aliases":   aliases,
+		"count":     len(aliases),
+		"catch_all": a.Router.CatchAllConfig(), // P-catch-all: 兜底规则(可能为 null)
+	})
 }
 
 // queryUsage GET /api/v1/usage?start=&end=&provider=&model=&gateway_key=&limit=&offset=

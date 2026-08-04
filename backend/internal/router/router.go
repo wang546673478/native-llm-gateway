@@ -26,6 +26,10 @@ type Config struct {
 	Aliases         map[string]AliasConfig
 	DefaultStrategy string
 	MaxAttempts     int
+	// P-catch-all: 兜底路由规则 — 客户端发任何 alias 表外且无 provider 声明的
+	// model 名(如 gpt-5 / 任意新探测名)时按此规则路由。nil = 不兜底。
+	// 任意 agent 任意模型名都能用,仍按 tier 计费(token_plan → api → free)
+	CatchAll *AliasConfig
 }
 
 // RouteResult 路由结果:把一个请求锁定到具体的 Provider + Model + Key
@@ -58,6 +62,7 @@ type Router struct {
 	manager      *provider.Manager
 	pools        map[string]*keypool.Pool
 	aliases      map[string]AliasConfig
+	catchAll     *AliasConfig // P-catch-all: 未知 model 名兜底(nil = 不兜底)
 	policies     map[string]policy.Policy
 	cfg          Config
 	healthStatus map[string]bool // P6 接 Circuit Breaker
@@ -76,6 +81,7 @@ func NewRouter(logger *zap.Logger, manager *provider.Manager, pools map[string]*
 		manager:      manager,
 		pools:        pools,
 		aliases:      cfg.Aliases,
+		catchAll:     cfg.CatchAll,
 		cfg:          cfg,
 		healthStatus: make(map[string]bool),
 	}
@@ -106,17 +112,31 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 	rule, ok := r.aliases[req.Model]
 	if !ok {
 		// alias 没注册 → 自动发现:从所有 enabled provider 中找声明该 model 的
-		return r.routeDirectModelWithOpts(ctx, req.Model, req, o)
+		iter, err := r.routeDirectModelWithOpts(ctx, req.Model, req, o)
+		// P-catch-all: 自动发现失败(未知 model 名)且配了 catch_all → 按兜底规则路由。
+		// 这样任意 agent 发任意模型名都能走通,无需为每个名字配 alias
+		if err != nil && r.catchAll != nil {
+			r.logger.Debug("no direct model route, using catch_all",
+				zap.String("model", req.Model))
+			return r.routeAliasRule(ctx, *r.catchAll, req.Model, req, o)
+		}
+		return iter, err
 	}
+	return r.routeAliasRule(ctx, rule, req.Model, req, o)
+}
 
+// routeAliasRule 走一条 alias 规则(长格式显式 providers 或短格式 TargetModel)。
+// catch_all 复用同一路径 — 它的规则结构和 alias 完全一样。
+// aliasName 用于迭代器的归属标注(客户端请求的 model 名)
+func (r *Router) routeAliasRule(ctx context.Context, rule AliasConfig, aliasName string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
 	// P53: alias 注册了但没有显式 providers(chain_ref 解析后为空也算)— 自动发现
 	if len(rule.Providers) == 0 {
 		r.logger.Debug("alias has no explicit providers, auto-discover",
-			zap.String("alias", req.Model))
+			zap.String("alias", aliasName))
 		// 短格式 TargetModel 优先,否则用 alias 名字本身作为 target model id
 		target := rule.TargetModel
 		if target == "" {
-			target = req.Model
+			target = aliasName
 		}
 		return r.routeDirectModelWithOpts(ctx, target, req, o)
 	}
@@ -128,7 +148,7 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 	pol, ok := r.policies[strategy]
 	if !ok {
 		r.logger.Warn("unknown routing strategy, fallback to priority",
-			zap.String("alias", req.Model),
+			zap.String("alias", aliasName),
 			zap.String("strategy", strategy))
 		pol = r.policies["priority"]
 	}
@@ -146,7 +166,7 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 	keyCandidates := buildKeyCandidates(ordered, r.pools)
 
 	return &RouteIterator{
-		alias:          req.Model,
+		alias:          aliasName,
 		candidates:     keyCandidates,
 		pools:          r.pools,
 		manager:        r.manager,
@@ -390,6 +410,26 @@ func (r *Router) ReloadAliases(aliases map[string]AliasConfig) {
 	defer r.mu.Unlock()
 	r.aliases = aliases
 	r.logger.Info("router aliases reloaded", zap.Int("count", len(aliases)))
+}
+
+// ReloadCatchAll P-catch-all: 原子替换兜底路由规则(与 ReloadAliases 同频)
+func (r *Router) ReloadCatchAll(c *AliasConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.catchAll = c
+	r.logger.Info("router catch_all reloaded", zap.Bool("enabled", c != nil))
+}
+
+// CatchAllConfig 返回当前 catch_all 规则的拷贝(供 /routing 端点展示)
+func (r *Router) CatchAllConfig() *AliasConfig {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.catchAll == nil {
+		return nil
+	}
+	c := *r.catchAll
+	c.Providers = append([]ProviderRoute(nil), r.catchAll.Providers...)
+	return &c
 }
 
 // Manager 返回底层 provider.Manager(Proxy 用来查 Provider 实例)
