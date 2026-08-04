@@ -89,6 +89,8 @@ interface ProviderKeyView {
   updated_at: string
   remaining: number
   last_polled_at: string | null
+  // P-quota-display: 数值类型 — "percent" / "currency" / ""(空按 currency)
+  quota_kind: string
 }
 
 interface ProviderInfo {
@@ -206,9 +208,9 @@ const columns: DataTableColumns<ProviderKeyView> = [
   },
   { title: '创建时间', key: 'created_at', width: 200 },
   {
-    // Task 10: 余额 (CNY) — tier-relative colour tier
-    // green/yellow/red/gray based on tier_max and warnThresholdPct.
-    title: '余额 (CNY)',
+    // P-quota-display: 列名"额度";渲染按 quota_kind:
+    //   percent → "43%"(取整);currency/空 → "¥12.34"
+    title: '额度',
     key: 'remaining',
     width: 130,
     render: (row) => {
@@ -222,10 +224,14 @@ const columns: DataTableColumns<ProviderKeyView> = [
         red:    '#d03050',
         gray:   '#999',
       }
+      const text =
+        row.quota_kind === 'percent'
+          ? `${Math.round(row.remaining)}%`
+          : `¥${row.remaining.toFixed(2)}`
       return h(
         'span',
         { style: { color: map[colour] ?? '#999', fontWeight: 500 } },
-        `¥${row.remaining.toFixed(2)}`,
+        text,
       )
     },
   },
