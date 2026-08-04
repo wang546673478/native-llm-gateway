@@ -281,10 +281,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		}
 	}
 
-	// 4.5 白名单 + provider 绑定:探第一个候选,按路由结果的目标模型做白名单校验。
-	// P-catch-all: 客户端发假名(claude-opus-5)会被路由到真实模型(MiniMax-M3),
-	// 白名单必须按路由后的真实模型校验 — 否则 key 配了真实模型名也会被 403。
-	// 迭代器不支持 reset:探针通过的候选直接用 runWithFirstResult 作为第一个开始循环。
+	// 4.5 探针:provider 绑定检查(白名单已移入 tryOneCandidate 逐候选校验,
+	// 入口不再单独拒绝 — 同 tier 乱序下白名单外候选会被跳过继续试白名单内的)。
+	// 迭代器不支持 reset:探针通过的候选直接用 runWithFirstResult 作为第一个开始循环
 	if gkVal, ok := c.Get("gateway_key"); ok {
 		if gk, ok := gkVal.(*auth.GatewayKey); ok {
 			probeResult, probeErr := iter.Next()
@@ -292,60 +291,6 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 				// 没更多候选
 				e.handleAllFailed(c, req, lastErr, traceID)
 				return
-			}
-			// 白名单:按候选的目标模型校验 → 失败时也试 default_model fallback
-			if e.authn != nil {
-				if err := e.authn.CheckAllowed(gk, probeResult.ModelID); err != nil {
-					if fb := e.tryDefaultModelFallback(c, model, req); fb != "" && fb != model {
-						// fallback 成功:重置 iter 用新的 model 重新路由
-						model = fb
-						if entry != nil {
-							entry.FinalModel = fb
-						}
-						e.logger.Info("default_model fallback (whitelist miss)",
-							zap.String("requested_model", req.Model),
-							zap.String("fallback_to", fb),
-							zap.String("trace_id", traceID))
-						iter, err = e.router.Route(ctx, req, routeOpts...)
-						if err != nil {
-							e.logger.Warn("no route after fallback",
-								zap.String("model", model),
-								zap.String("trace_id", traceID),
-								zap.Error(err))
-							writeJSONError(c, http.StatusServiceUnavailable, "no_route",
-								fmt.Sprintf("no available provider for model %q", model))
-							return
-						}
-						probeResult, probeErr = iter.Next()
-						if probeErr != nil {
-							e.handleAllFailed(c, req, lastErr, traceID)
-							return
-						}
-					} else {
-						// 真没 fallback 或 fallback 失败,返回 403
-						e.logger.Warn("model not allowed for key",
-							zap.String("key", gk.Name),
-							zap.String("model", model),
-							zap.String("routed_model", probeResult.ModelID),
-							zap.Strings("allowed", gk.AllowedModels),
-							zap.String("trace_id", traceID),
-						)
-						// P-catch-all: 让 access log 标 model_not_allowed 而非 auth_failed
-						lastErr = &provider.ProviderError{
-							ProviderName: probeResult.ProviderName,
-							StatusCode:   http.StatusForbidden,
-							ErrorType:    provider.ErrorTypeModelNotAllowed,
-							Message:      fmt.Sprintf("key %q does not allow model %q", gk.Name, probeResult.ModelID),
-						}
-						c.JSON(http.StatusForbidden, gin.H{
-							"error": gin.H{
-								"type":    "model_not_allowed",
-								"message": fmt.Sprintf("key %q does not allow model %q (allowed: %v)", gk.Name, probeResult.ModelID, gk.AllowedModels),
-							},
-						})
-						return
-					}
-				}
 			}
 			// P19: provider 绑定检查 — 若 key.Providers 非空,路由结果必须在列表里
 			if len(gk.Providers) > 0 && e.authn != nil {
@@ -687,6 +632,15 @@ func (e *Engine) handleAllFailed(
 		return
 	}
 
+	// P-catch-all: 链上所有候选都被 key 白名单排除 → 403 model_not_allowed。
+	// (ModelNotAllowed 在 IsRetryable 里保持 retryable 让 failover 继续,
+	// 但最终全失败时必须透传 403 而不是 502)
+	if lastErr.ErrorType == provider.ErrorTypeModelNotAllowed {
+		c.Writer.Header().Set("X-Request-Id", traceID)
+		writeJSONError(c, http.StatusForbidden, "model_not_allowed", lastErr.Message)
+		return
+	}
+
 	// invalid_request / auth 等不应 failover 的错误:直接返回 Provider 原始错误
 	if !errorIsRetryable(lastErr) {
 		// 尽量按 Provider 状态码透传 — 但 0 是不合法的(没从 Provider 拿到的)
@@ -885,6 +839,29 @@ func (e *Engine) tryOneCandidate(
 	lastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
 ) bool {
+	// P-catch-all: 白名单按候选逐个校验 — 白名单外的候选像没 key 一样跳过,
+	// 继续试链上其他候选。同 tier 内 provider 顺序不定,不能因第一个候选
+	// 不符就整请求 403;链上全部候选都被排除时由 handleAllFailed 收尾返 403
+	if gkVal, ok := c.Get("gateway_key"); ok {
+		if gk, ok := gkVal.(*auth.GatewayKey); ok && e.authn != nil {
+			if err := e.authn.CheckAllowed(gk, result.ModelID); err != nil {
+				*outProviderName = result.ProviderName
+				*lastErr = &provider.ProviderError{
+					ProviderName: result.ProviderName,
+					StatusCode:   http.StatusForbidden,
+					ErrorType:    provider.ErrorTypeModelNotAllowed,
+					Message:      fmt.Sprintf("key %q does not allow model %q", gk.Name, result.ModelID),
+				}
+				e.logger.Debug("candidate skipped (not in key whitelist)",
+					zap.String("key", gk.Name),
+					zap.String("provider", result.ProviderName),
+					zap.String("model", result.ModelID),
+					zap.Strings("allowed", gk.AllowedModels),
+					zap.String("trace_id", req.TraceID))
+				return false
+			}
+		}
+	}
 	req.Headers.Set("X-Request-Id", req.TraceID)
 	if result.Key != nil {
 		req.Headers.Set("Authorization", "Bearer "+result.Key.Key)

@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
@@ -487,5 +488,89 @@ func TestStreamBuffer_NoLeakAcrossChunks(t *testing.T) {
 	if got := atomic.LoadInt64(&e.streamCnt); got != 0 {
 		t.Errorf("after finalizing all %d acquired slots: streamCnt = %d, want 0 (counter leak!)",
 			capN, got)
+	}
+}
+
+// TestProxy_WhitelistSkipsCandidates P-catch-all:
+// 白名单按候选逐个校验(跳过式)— 第一个候选白名单外 → 跳过继续试白名单内的;
+// 链上全部被排除 → 403 model_not_allowed(不是 502)
+func TestProxy_WhitelistSkipsCandidates(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+
+	pa := &fakeProvider{name: "pa", proto: provider.ProtocolOpenAI, models: []string{"model-a"},
+		respStatus: 200, respBody: `{"id":"a"}`}
+	pb := &fakeProvider{name: "pb", proto: provider.ProtocolOpenAI, models: []string{"model-b"},
+		respStatus: 200, respBody: `{"id":"b"}`}
+
+	reg := provider.NewRegistry()
+	for _, p := range []*fakeProvider{pa, pb} {
+		p := p
+		reg.Register(p.Name(), func(cfg provider.ProviderConfig) (provider.Provider, error) { return p, nil })
+	}
+	mgr := provider.NewManager(reg, zap.NewNop())
+	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
+		Providers: map[string]provider.ManagerProviderConfig{
+			"pa": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-a"}, APIKeys: []string{"sk"}},
+			"pb": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-b"}, APIKeys: []string{"sk"}},
+		},
+	}); err != nil {
+		t.Fatalf("LoadFromConfig: %v", err)
+	}
+	now := time.Now()
+	mkPool := func(name string) *keypool.Pool {
+		return keypool.NewPool(name, []*keypool.Key{{
+			ID: name + "-1", ProviderName: name, Name: "k1", Key: "sk-fake",
+			Status: keypool.KeyStatusActive, CreatedAt: now, UpdatedAt: now,
+		}}, nil, keypool.Config{})
+	}
+	pools := map[string]*keypool.Pool{"pa": mkPool("pa"), "pb": mkPool("pb")}
+
+	r := router.NewRouter(zap.NewNop(), mgr, pools, router.Config{
+		Aliases: map[string]router.AliasConfig{
+			"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+				{Name: "pa", Model: "model-a", Priority: 1},
+				{Name: "pb", Model: "model-b", Priority: 2},
+			}},
+		},
+	})
+
+	doReq := func(allowed []string) *httptest.ResponseRecorder {
+		t.Helper()
+		gk := &auth.GatewayKey{ID: "k1", Name: "test-key", AllowedModels: allowed}
+		authn := auth.New(nil)
+		eng := NewEngine(Config{
+			Router: r, Logger: zap.NewNop(),
+			Usage: NoopUsageRecorder{}, Metrics: NoopMetricsRecorder{}, Breaker: NoopCircuitReporter{},
+			Authenticator: authn,
+		})
+		gr := gin.New()
+		gr.Use(func(c *gin.Context) {
+			c.Set("gateway_key", gk)
+			c.Set("gateway_key_id", gk.ID)
+		})
+		gr.POST("/v1/chat/completions", eng.HandleRequest)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`))
+		w := httptest.NewRecorder()
+		gr.ServeHTTP(w, req)
+		return w
+	}
+
+	// 白名单只含 model-b:pa(model-a)被跳过,请求落到 pb
+	w1 := doReq([]string{"model-b"})
+	if w1.Code != 200 {
+		t.Fatalf("status = %d, want 200(跳过 pa 继续 pb); body = %s", w1.Code, w1.Body.String())
+	}
+	if !strings.Contains(w1.Body.String(), `"id":"b"`) {
+		t.Errorf("response = %s, want pb 的响应(白名单外候选被跳过)", w1.Body.String())
+	}
+
+	// 白名单不含任何候选:全部跳过 → 403 model_not_allowed
+	w2 := doReq([]string{"model-z"})
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), "model_not_allowed") {
+		t.Errorf("body = %s, want type=model_not_allowed", w2.Body.String())
 	}
 }
