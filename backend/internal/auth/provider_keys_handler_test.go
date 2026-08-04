@@ -71,3 +71,35 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+func TestProviderKeyView_IncludesProtocols(t *testing.T) {
+	past := time.Date(2026, 8, 4, 10, 0, 0, 0, time.UTC)
+	view := ProviderKeyView{
+		ID: 1, ProviderName: "deepseek", Name: "k",
+		KeyMasked: "sk-te...est", Enabled: true,
+		Status: "ACTIVE", BillingSource: "api",
+		CreatedAt: past, UpdatedAt: past,
+		Remaining: 7.0, LastPolledAt: &past, QuotaKind: "currency",
+		Protocols: "openai,anthropic",
+	}
+	out, err := json.Marshal(view)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !contains(string(out), `"protocols":"openai,anthropic"`) {
+		t.Errorf("missing protocols field in JSON output: %s", string(out))
+	}
+}
+
+func TestProviderKeyViewFromPool_IncludesProtocols(t *testing.T) {
+	now := time.Now()
+	live := &keypool.Key{Remaining: 43, QuotaKind: "percent", LastPolledAt: now, Protocols: "anthropic"}
+	v := toProviderKeyViewFromPool(dbpkg.ProviderAPIKey{
+		ProviderName: "deepseek", Name: "k", KeyHash: "sk-1234567890", Enabled: true,
+		BillingSource: "api", Protocols: "openai,anthropic", CreatedAt: now, UpdatedAt: now,
+	}, "ACTIVE", live)
+
+	if v.Protocols != "anthropic" {
+		t.Errorf("Protocols = %q, want anthropic (live key pass-through)", v.Protocols)
+	}
+}

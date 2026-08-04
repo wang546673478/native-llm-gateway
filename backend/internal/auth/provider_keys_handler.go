@@ -97,6 +97,8 @@ type ProviderKeyView struct {
 	LastPolledAt *time.Time `json:"last_polled_at"` // nil 时序列化为 null
 	// P-quota-display: 数值类型("percent"/"currency"/"")— 前端按此渲染单位
 	QuotaKind string `json:"quota_kind"`
+	// P-provider-vendor: key 可用协议列表(逗号分隔,空 = 全部)
+	Protocols string `json:"protocols"`
 }
 
 func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
@@ -111,6 +113,7 @@ func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
 		Enabled:       k.Enabled,
 		Status:        status,
 		BillingSource: k.BillingSource,
+		Protocols:     k.Protocols,
 		CreatedAt:     k.CreatedAt,
 		UpdatedAt:     k.UpdatedAt,
 	}
@@ -124,6 +127,7 @@ func toProviderKeyViewFromPool(k dbpkg.ProviderAPIKey, status string, live *keyp
 	if live != nil {
 		v.Remaining = live.Remaining
 		v.QuotaKind = live.QuotaKind
+		v.Protocols = live.Protocols // P-provider-vendor
 		if !live.LastPolledAt.IsZero() {
 			t := live.LastPolledAt
 			v.LastPolledAt = &t
@@ -236,6 +240,8 @@ type createProviderKeyReq struct {
 	// P48: 创建 key 时指定计费来源(token_plan / api / free)
 	// 默认 "api"(向后兼容);为空时也用 "api"
 	BillingSource string `json:"billing_source"`
+	// P-provider-vendor: 协议限制(逗号分隔,空 = 全部);默认空
+	Protocols string `json:"protocols"`
 }
 
 func (h *ProviderKeysHandler) create(c *gin.Context) {
@@ -285,6 +291,7 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 		KeyHash:       req.Key,
 		Enabled:       enabled,
 		BillingSource: billingSource,
+		Protocols:     strings.TrimSpace(req.Protocols),
 	}
 	if err := h.store.Create(c.Request.Context(), k); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "create_failed", "detail": err.Error()})

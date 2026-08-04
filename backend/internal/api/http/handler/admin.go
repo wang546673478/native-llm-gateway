@@ -144,29 +144,69 @@ func (a *Admin) listRegisteredProviders(c *gin.Context) {
 
 // listProviders GET /api/v1/providers
 // 列出所有 Provider + 状态(KeyPool + Circuit Breaker)
+// P-provider-vendor: 按 vendor 聚合输出 — 同一厂商的多个注册名(deepseek / deepseek-anthropic)
+// 归到同一 vendor 条目下,前端按厂商展示。key_pool / circuit_breaker 取该 vendor 第一个注册名的
+// (共享 pool 时状态相同)。
 func (a *Admin) listProviders(c *gin.Context) {
-	out := make([]gin.H, 0)
+	type vendorEntry struct {
+		Vendor         string
+		Names          []gin.H
+		Models         []string
+		KeyPool        *keypool.PoolStatus
+		CircuitBreaker circuit.Stats
+	}
+	byVendor := make(map[string]*vendorEntry)
+	order := make([]string, 0)
 	for name, p := range a.Manager.GetAll() {
-		info := gin.H{
-			"name":     name,
-			"protocol": string(p.Protocol()),
-			"models":   p.Models(),
+		v := a.Registry.VendorFor(name)
+		entry, ok := byVendor[v]
+		if !ok {
+			entry = &vendorEntry{Vendor: v}
+			byVendor[v] = entry
+			order = append(order, v)
 		}
-		if pool, ok := a.Pools[name]; ok {
-			info["key_pool"] = pool.Status()
+		entry.Names = append(entry.Names, gin.H{"name": name, "protocol": string(p.Protocol())})
+		entry.Models = append(entry.Models, p.Models()...)
+		if pool, ok := a.Pools[name]; ok && entry.KeyPool == nil {
+			st := pool.Status()
+			entry.KeyPool = &st
 		}
-		if a.Breakers != nil {
-			info["circuit_breaker"] = a.Breakers.AllStats()
+		if a.Breakers != nil && entry.CircuitBreaker.Name == "" {
 			for _, s := range a.Breakers.AllStats() {
 				if s.Name == name {
-					info["circuit_breaker"] = s
+					entry.CircuitBreaker = s
 					break
 				}
 			}
 		}
-		out = append(out, info)
 	}
-	c.JSON(http.StatusOK, gin.H{"providers": out, "count": len(out)})
+
+	out := make([]gin.H, 0, len(order))
+	for _, vendor := range order {
+		v := byVendor[vendor]
+		// models 并集去重
+		seen := make(map[string]bool, len(v.Models))
+		models := make([]string, 0, len(v.Models))
+		for _, m := range v.Models {
+			if !seen[m] {
+				seen[m] = true
+				models = append(models, m)
+			}
+		}
+		entry := gin.H{
+			"vendor": v.Vendor,
+			"names":  v.Names,
+			"models": models,
+		}
+		if v.KeyPool != nil {
+			entry["key_pool"] = v.KeyPool
+		}
+		if v.CircuitBreaker.Name != "" {
+			entry["circuit_breaker"] = v.CircuitBreaker
+		}
+		out = append(out, entry)
+	}
+	c.JSON(http.StatusOK, gin.H{"vendors": out, "count": len(out)})
 }
 
 // getProvider GET /api/v1/providers/:name
