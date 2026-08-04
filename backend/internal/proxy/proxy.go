@@ -166,8 +166,10 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		entry.StatusCode = c.Writer.Status()
 		entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr, gatewayValidation)
 		// 无论成功还是失败,只要命中过 provider 就记录 — 成功路径同样需要可观测性(spec §1.2 F2/F5)
+		// P-provider-vendor: 按厂商归一 — 路由侧是注册名(deepseek-anthropic /
+		// minimax-openai 协议面),日志/UI/导出统一显示厂商名,协议面看 protocol 列
 		if lastProviderName != "" {
-			entry.ProviderName = lastProviderName
+			entry.ProviderName = provider.Default().VendorFor(lastProviderName)
 		}
 		entry.LatencyMs = int(time.Since(entry.CreatedAt) / time.Millisecond)
 		if entry.FinalModel == "" {

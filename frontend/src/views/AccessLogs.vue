@@ -439,13 +439,17 @@ async function loadKeyOptions() {
 // 省掉额外去 /providers 拉 key_pool/circuit 信息的开销。
 async function loadProviderModelOptions() {
   try {
-    const resp = await api.providersRegistered()
-    const list = resp.providers ?? []
-    providerOptions.value = list.map(p => ({ label: p.name, value: p.name }))
+    // P-provider-vendor: Provider 过滤按厂商(/providers vendor 聚合),
+    // 日志 provider_name 已归一为厂商名;模型列表仍用 /providers/registered 并集
+    const [provResp, regResp] = await Promise.all([
+      api.providers(),
+      api.providersRegistered().catch(() => ({ providers: [], count: 0 })),
+    ])
+    providerOptions.value = (provResp.vendors ?? []).map(v => ({ label: v.vendor, value: v.vendor }))
     // dedupe models across providers
     const seen = new Set<string>()
     const models: { label: string; value: string }[] = []
-    for (const p of list) {
+    for (const p of regResp.providers ?? []) {
       for (const m of p.models ?? []) {
         if (!seen.has(m)) {
           seen.add(m)
