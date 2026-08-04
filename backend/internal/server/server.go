@@ -608,6 +608,21 @@ func (s *Server) Reload(newCfg *config.Config) {
 		}
 	}
 
+	// P68: quota restore — 把新 cfg 传给 Manager,worker 会按 quota_enabled 启停
+	if s.quotaM != nil {
+		s.quotaM.Reload(quotacheck.ManagerConfig{
+			Enabled:           newCfg.KeyPool.QuotaEnabled,
+			ProbeInitialDelay: newCfg.KeyPool.QuotaProbeInitialDelay,
+			ProbeMaxBackoff:   newCfg.KeyPool.QuotaProbeMaxBackoff,
+			ProbeJitterPct:    newCfg.KeyPool.QuotaProbeJitterPct,
+			ProbeMaxAttempts:  newCfg.KeyPool.QuotaProbeMaxAttempts,
+			PollInterval:      newCfg.KeyPool.QuotaPollInterval,
+			PollJitterPct:     newCfg.KeyPool.QuotaPollJitterPct,
+			HTTPTimeout:       newCfg.KeyPool.QuotaHTTPTimeout,
+			UserAgent:         newCfg.KeyPool.QuotaUserAgent,
+		})
+	}
+
 	s.logger.Info("config reloaded",
 		zap.Int("aliases", len(newCfg.Routing.Aliases)),
 		zap.Int("auth_keys", len(newCfg.Auth.Keys)),

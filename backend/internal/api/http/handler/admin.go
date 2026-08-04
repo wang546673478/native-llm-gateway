@@ -394,19 +394,20 @@ func last24hFilter() accesslog.QueryFilter {
 // 任何不在表内的输入视为"未知",由 caller 决定如何回应(本 handler
 // 选择 400 BadRequest,见 listAccessLogs)。
 var validStatusTokens = map[string]bool{
-	"ok":                   true,
-	"4xx":                  true,
-	"5xx":                  true,
-	"auth_failed":          true,
-	"no_route":             true,
-	"model_not_allowed":    true,
+	"ok":                    true,
+	"4xx":                   true,
+	"5xx":                   true,
+	"auth_failed":           true,
+	"no_route":              true,
+	"model_not_allowed":     true,
 	"key_provider_mismatch": true,
-	"upstream_4xx":         true,
-	"upstream_429":         true,
-	"upstream_5xx":         true,
-	"connection_error":     true,
-	"timeout":              true,
-	"unknown":              true,
+	"upstream_4xx":          true,
+	"upstream_429":          true,
+	"upstream_5xx":          true,
+	"connection_error":      true,
+	"timeout":               true,
+	"client_disconnected":   true,
+	"unknown":               true,
 }
 
 // statusBucketFor 把合法的 status token 翻译成对应的 accesslog.StatusBucket。

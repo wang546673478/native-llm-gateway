@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,7 +92,9 @@ func LoadFromDB(ctx context.Context, db *gorm.DB) ([]GatewayKey, error) {
 	out := make([]GatewayKey, 0, len(rows))
 	for _, k := range rows {
 		out = append(out, GatewayKey{
-			ID:             string(rune(k.ID)),
+			// P: 用 strconv 转换 uint → string,不要用 string(rune()) —
+			// string(rune(10)) 是字符 '\n'(0x0a),不是 "10"!
+			ID:             strconv.FormatUint(uint64(k.ID), 10),
 			Name:           k.Name,
 			KeyHash:        k.KeyHash,
 			Providers:      parseProviders(k.Providers),
@@ -319,7 +322,7 @@ func (h *KeysHandler) reloadAll(ctx context.Context) {
 	keys := make([]GatewayKey, 0, len(rows))
 	for _, k := range rows {
 		keys = append(keys, GatewayKey{
-			ID:             string(rune(k.ID)),
+			ID:             strconv.FormatUint(uint64(k.ID), 10),
 			Name:           k.Name,
 			KeyHash:        k.KeyHash,
 			Providers:      parseProviders(k.Providers),

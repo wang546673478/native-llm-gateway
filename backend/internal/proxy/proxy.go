@@ -153,17 +153,18 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			IsStream:       isStream,
 		}
 	}
-	// 持有供 defer 使用 — entry / providerName / lastErr
+	// 持有供 defer 使用 — entry / providerName / lastErr / gatewayValidation
 	var (
-		lastProviderName string
-		lastErr          *provider.ProviderError
+		lastProviderName  string
+		lastErr           *provider.ProviderError
+		gatewayValidation bool // status=400 是 gateway 自己设的(model 缺失 / 字段类型错),不是 upstream 返的
 	)
 	defer func() {
 		if entry == nil || e.accessLog == nil {
 			return
 		}
 		entry.StatusCode = c.Writer.Status()
-		entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr)
+		entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr, gatewayValidation)
 		// 无论成功还是失败,只要命中过 provider 就记录 — 成功路径同样需要可观测性(spec §1.2 F2/F5)
 		if lastProviderName != "" {
 			entry.ProviderName = lastProviderName
@@ -179,6 +180,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		e.logger.Error("read body", zap.Error(err), zap.String("trace_id", traceID))
+		gatewayValidation = true
 		writeJSONError(c, http.StatusBadRequest, "invalid_request", "failed to read request body")
 		return
 	}
@@ -193,6 +195,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	// 2. 提取 model + stream(body 里的 stream 字段是最终依据 — 客户端说了算)
 	model, bodyStream, err := extractModelAndStream(body)
 	if err != nil || model == "" {
+		gatewayValidation = true
 		writeJSONError(c, http.StatusBadRequest, "invalid_request", "request body must include non-empty 'model' field")
 		return
 	}
@@ -432,12 +435,26 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 //   - statusCode 来自 c.Writer.Status()
 //   - providerEmpty 表示没成功路由到任何 provider (== no_route 场景)
 //   - upstreamErrType: 若最后出错有 provider.ProviderError,传它;否则传 provider.ErrorType("")
-func classifyError(statusCode int, providerEmpty bool, upstreamErrType *provider.ProviderError) string {
+//   - gatewayValidation 标记 status 是 gateway 自己设的(如 400 invalid_request)而不是 upstream 返的
+func classifyError(statusCode int, providerEmpty bool, upstreamErrType *provider.ProviderError, gatewayValidation bool) string {
 	if statusCode == 0 {
 		return "unknown"
 	}
 	if statusCode < 400 {
 		return "ok"
+	}
+	// Gateway 自己的 validate 失败(model 缺失 / messages 不是 array 等)
+	// status=400 + 没真正命中 provider → 标 invalid_request
+	if gatewayValidation && statusCode == http.StatusBadRequest {
+		return "invalid_request"
+	}
+	// Provider 返的 invalid_request(400) — 透传时也是 invalid_request,不是 upstream_4xx
+	if upstreamErrType != nil && upstreamErrType.ErrorType == provider.ErrorTypeInvalidRequest {
+		return "invalid_request"
+	}
+	// Client 断开连接 — 不是 upstream 错误,也不应 trigger failover
+	if upstreamErrType != nil && upstreamErrType.ErrorType == provider.ErrorTypeClientDisconnected {
+		return "client_disconnected"
 	}
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -582,8 +599,18 @@ func (e *Engine) doStream(
 		e.appendStreamChunk(req.TraceID, chunk.Data)
 		// chunk.Data 已经是 SSE data 行的内容(Provider 负责格式化)
 		if _, err := c.Writer.Write(chunk.Data); err != nil {
-			e.logger.Warn("write stream chunk", zap.Error(err))
-			break
+			// 客户端断开 / 写失败 — 立刻 break 但要返 ProviderError 让
+			// caller 知道这不是正常结束,access_log error_type 标 client_disconnected
+			// (非 retryable,不需要 failover 到下一个 provider — 问题在 client)
+			e.logger.Warn("write stream chunk (client likely disconnected)",
+				zap.String("provider", result.ProviderName),
+				zap.Error(err))
+			_ = canFlush
+			return true, nil, &provider.ProviderError{
+				ProviderName: result.ProviderName,
+				ErrorType:    provider.ErrorTypeClientDisconnected,
+				Message:      "client disconnected during stream: " + err.Error(),
+			}
 		}
 		if canFlush {
 			flusher.Flush()
@@ -641,13 +668,23 @@ func (e *Engine) handleAllFailed(
 
 	// invalid_request / auth 等不应 failover 的错误:直接返回 Provider 原始错误
 	if !errorIsRetryable(lastErr) {
-		// 尽量按 Provider 状态码透传
+		// 尽量按 Provider 状态码透传 — 但 0 是不合法的(没从 Provider 拿到的)
+		statusCode := lastErr.StatusCode
+		if statusCode < 100 || statusCode > 599 {
+			// client_disconnected / 没具体 status → 返 499(nginx "client closed request" 标准)
+			// 或 502 gateway error 看语义;client_disconnected → 499 更准确
+			if lastErr.ErrorType == provider.ErrorTypeClientDisconnected {
+				statusCode = 499
+			} else {
+				statusCode = http.StatusBadGateway
+			}
+		}
 		c.Writer.Header().Set("X-Request-Id", traceID)
-		c.Writer.WriteHeader(lastErr.StatusCode)
+		c.Writer.WriteHeader(statusCode)
 		if len(lastErr.RawError) > 0 {
 			c.Writer.Write(lastErr.RawError)
 		} else {
-			writeJSONError(c, lastErr.StatusCode, string(lastErr.ErrorType), lastErr.Message)
+			writeJSONError(c, statusCode, string(lastErr.ErrorType), lastErr.Message)
 		}
 		return
 	}

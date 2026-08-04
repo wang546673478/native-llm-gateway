@@ -49,12 +49,22 @@ func isHopByHop(name string) bool {
 
 // writeJSONError 统一写错误响应(OpenAI 格式,与规格书 9.1 一致)
 func writeJSONError(c *gin.Context, status int, errType, message string) {
-	c.JSON(status, gin.H{
+	// P: error 响应里带 trace_id 字段,让客户端能直接拿来在 access_log 里反查
+	// (X-Request-Id header 同时设了,JSON body 也带一份,方便不读 header 的客户端)
+	traceID := c.GetString("trace_id")
+	body := gin.H{
 		"error": gin.H{
 			"type":    errType,
 			"message": message,
 		},
-	})
+	}
+	if traceID != "" {
+		body["trace_id"] = traceID
+	}
+	if traceID != "" {
+		c.Writer.Header().Set("X-Request-Id", traceID)
+	}
+	c.JSON(status, body)
 }
 
 // writeGatewayError 把 gateway 层面的错误(502 等)按协议格式回客户端

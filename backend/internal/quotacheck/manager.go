@@ -101,6 +101,11 @@ type Manager struct {
 	sched     *Scheduler
 	metricsC  *metrics.Collector // 可选,nil 时 skip metrics emit
 
+	// worker 生命周期 — Reload 时 cancel + 重新 Start
+	workerCtx    context.Context
+	workerCancel context.CancelFunc
+	workerMu     sync.Mutex
+
 	// 测试可注入
 	now   func() time.Time
 	rand  *rand.Rand
@@ -155,7 +160,17 @@ func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, metric
 
 // Start 启动 polling + probe goroutines
 // 注意: callback 已经在 NewManager 时注入,这里不再 inject(避免重复 log)
+// 支持 Reload 重新调用 — 先 cancel 旧 worker 再启新的
 func (m *Manager) Start(ctx context.Context) {
+	m.workerMu.Lock()
+	defer m.workerMu.Unlock()
+
+	// 停旧 worker
+	if m.workerCancel != nil {
+		m.logger.Info("quotacheck: stopping previous worker before Start")
+		m.workerCancel()
+	}
+
 	if !m.cfg.Enabled {
 		m.logger.Info("quotacheck.Manager disabled by config")
 		return
@@ -164,8 +179,11 @@ func (m *Manager) Start(ctx context.Context) {
 	// 冷启动:扫描现有 QUOTA_EXCEEDED keys(把已经在 QUOTA_EXCEEDED 状态的入堆)
 	m.rescanExisting()
 
-	go m.pollLoop(ctx)
-	go m.probeLoop(ctx)
+	workerCtx, cancel := context.WithCancel(ctx)
+	m.workerCtx = workerCtx
+	m.workerCancel = cancel
+	go m.pollLoop(workerCtx)
+	go m.probeLoop(workerCtx)
 	m.logger.Info("quotacheck.Manager started",
 		zap.Duration("probe_initial_delay", m.cfg.ProbeInitialDelay),
 		zap.Duration("poll_interval", m.cfg.PollInterval),
@@ -544,7 +562,40 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 	}
 }
 
-// Stop — 暂时不需要(cancel 通过 ctx 走),保留供未来 graceful shutdown
+// Stop — cancel worker goroutines(等 ctx 结束)
 func (m *Manager) Stop() {
+	m.workerMu.Lock()
+	defer m.workerMu.Unlock()
+	if m.workerCancel != nil {
+		m.workerCancel()
+		m.workerCancel = nil
+	}
 	m.logger.Info("quotacheck.Manager stopped")
+}
+
+// Reload 接受新 cfg — 翻转 enabled 时 stop + 重新 Start(worker goroutine 重建)
+// 其他 config 字段(interval, max attempts, backoff)生效于下次 Start。
+// 注意:Start 接受 ctx 来自 Server.Run 顶层,Reload 没法拿 — 所以这里用 background
+func (m *Manager) Reload(newCfg ManagerConfig) {
+	if newCfg == (ManagerConfig{}) {
+		return // zero value,忽略
+	}
+	prevEnabled := m.cfg.Enabled
+	m.cfg = newCfg
+	if prevEnabled == newCfg.Enabled {
+		// 状态没变,但其他 config 字段(interval/backoff 等)更新 — 现有 worker
+		// 用的旧 ticker 不会立即重读,要等下次 Start 才生效
+		m.logger.Info("quotacheck.Manager reload: enabled unchanged, other fields updated (effective on next Start)",
+			zap.Bool("enabled", newCfg.Enabled),
+		)
+		return
+	}
+	if !newCfg.Enabled {
+		m.logger.Info("quotacheck.Manager reload: disabling")
+		m.Stop()
+		return
+	}
+	m.logger.Info("quotacheck.Manager reload: enabling")
+	// Re-Start:context 用 background(因为 Server.Run 顶层 ctx 已经 cancel 不掉)
+	m.Start(context.Background())
 }

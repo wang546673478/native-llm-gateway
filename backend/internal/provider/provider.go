@@ -109,13 +109,14 @@ type Provider interface {
 type ErrorType string
 
 const (
-	ErrorTypeRateLimit      ErrorType = "rate_limit"
-	ErrorTypeAuth           ErrorType = "auth"
-	ErrorTypeInvalidRequest ErrorType = "invalid_request"
-	ErrorTypeServerError    ErrorType = "server_error"
-	ErrorTypeTimeout        ErrorType = "timeout"
-	ErrorTypeConnection     ErrorType = "connection"
-	ErrorTypeModelNotFound  ErrorType = "model_not_found"
+	ErrorTypeRateLimit         ErrorType = "rate_limit"
+	ErrorTypeAuth              ErrorType = "auth"
+	ErrorTypeInvalidRequest    ErrorType = "invalid_request"
+	ErrorTypeServerError       ErrorType = "server_error"
+	ErrorTypeTimeout           ErrorType = "timeout"
+	ErrorTypeConnection        ErrorType = "connection"
+	ErrorTypeModelNotFound     ErrorType = "model_not_found"
+	ErrorTypeClientDisconnected ErrorType = "client_disconnected" // P: stream 客户端断开,非 retryable
 	// P49: 配额/额度耗尽错误(MiniMax token plan 5h 用完等场景)
 	// 与 auth 不同:quota 用完应该 failover 到下一个 provider(api 计费),
 	// 而 auth 错误说明 key 本身有问题,不该 failover
@@ -148,7 +149,7 @@ func (e *ProviderError) Error() string {
 //   invalid_request 和 model_not_found 仍然不重试(请求/模型本身有问题,换 provider 也没用)
 func (e *ProviderError) IsRetryable() bool {
 	switch e.ErrorType {
-	case ErrorTypeInvalidRequest, ErrorTypeModelNotFound:
+	case ErrorTypeInvalidRequest, ErrorTypeModelNotFound, ErrorTypeClientDisconnected:
 		return false
 	default:
 		return true
