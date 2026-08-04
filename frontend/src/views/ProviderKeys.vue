@@ -128,6 +128,41 @@ const billingSourceOptions = [
   { label: '🎁 免费层 (free)', value: 'free' },
 ]
 
+// Task 10: balance column — tier-relative colour tier.
+// warn_pct default 10 (matches backend WarnThresholdPct).
+const warnThresholdPct = 10
+
+// Same provider & billing_source → max Remaining across all polled rows
+// in the tier.  Polled rows are those with last_polled_at set.
+function tierMaxFor(rows: ProviderKeyView[], tier: string): number {
+  let max = 0
+  for (const r of rows) {
+    if (r.billing_source === tier && r.last_polled_at) {
+      if (r.remaining > max) max = r.remaining
+    }
+  }
+  return max
+}
+
+function balanceColour(
+  row: ProviderKeyView,
+  tierMax: number,
+  warnPct: number,
+): 'green' | 'yellow' | 'red' | 'gray' {
+  if (!row.last_polled_at) return 'gray'
+  if (row.remaining === 0) return 'red'
+  const threshold = (warnPct / 100) * tierMax
+  if (row.remaining >= threshold) return 'green'
+  return 'yellow'
+}
+
+// Source-of-truth list for tier-relativisation (matches backend pool view).
+const allKeys = computed<ProviderKeyView[]>(() => keys.value)
+
+function tierMaxForRow(row: ProviderKeyView): number {
+  return tierMaxFor(allKeys.value, row.billing_source || '')
+}
+
 const columns: DataTableColumns<ProviderKeyView> = [
   { title: 'ID', key: 'id', width: 60 },
   { title: 'Provider', key: 'provider_name', width: 160 },
@@ -166,6 +201,30 @@ const columns: DataTableColumns<ProviderKeyView> = [
     },
   },
   { title: '创建时间', key: 'created_at', width: 200 },
+  {
+    // Task 10: 余额 (CNY) — tier-relative colour tier
+    // green/yellow/red/gray based on tier_max and warnThresholdPct.
+    title: '余额 (CNY)',
+    key: 'remaining',
+    width: 130,
+    render: (row) => {
+      if (!row.last_polled_at) {
+        return h('span', { style: { color: '#999' } }, '未轮询')
+      }
+      const colour = balanceColour(row, tierMaxForRow(row), warnThresholdPct)
+      const map: Record<string, string> = {
+        green:  '#18a058',
+        yellow: '#f0a020',
+        red:    '#d03050',
+        gray:   '#999',
+      }
+      return h(
+        'span',
+        { style: { color: map[colour] ?? '#999', fontWeight: 500 } },
+        `¥${row.remaining.toFixed(2)}`,
+      )
+    },
+  },
   {
     title: '操作',
     key: 'actions',
