@@ -98,7 +98,11 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return quotacheck.Balance{HasQuota: false, Source: "minimax:/v1/token_plan/remains"}, err
+		return quotacheck.Balance{
+			HasQuota: false,
+			Source:   "minimax:/v1/token_plan/remains",
+			Kind:     "percent",
+		}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+k.Key)
 	req.Header.Set("Content-Type", "application/json")
@@ -106,7 +110,11 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return quotacheck.Balance{HasQuota: false, Source: "minimax:/v1/token_plan/remains"}, err
+		return quotacheck.Balance{
+			HasQuota: false,
+			Source:   "minimax:/v1/token_plan/remains",
+			Kind:     "percent",
+		}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -116,18 +124,24 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 			Raw:      0,
 			HasQuota: false,
 			Source:   "minimax:/v1/token_plan/remains",
+			Kind:     "percent",
 		}, fmt.Errorf("minimax quota auth: HTTP %d", resp.StatusCode)
 	}
 	if resp.StatusCode >= 500 {
 		return quotacheck.Balance{
 			HasQuota: false,
 			Source:   "minimax:/v1/token_plan/remains",
+			Kind:     "percent",
 		}, fmt.Errorf("minimax quota http %d", resp.StatusCode)
 	}
 
 	var parsed miniMaxBalanceResp
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return quotacheck.Balance{HasQuota: false, Source: "minimax:/v1/token_plan/remains"}, err
+		return quotacheck.Balance{
+			HasQuota: false,
+			Source:   "minimax:/v1/token_plan/remains",
+			Kind:     "percent",
+		}, err
 	}
 
 	// 鉴权/业务错误承载在 body 里,不是 HTTP status — 这种 case 必须显式返 err
@@ -137,6 +151,7 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 			Raw:      0,
 			HasQuota: false,
 			Source:   "minimax:/v1/token_plan/remains",
+			Kind:     "percent",
 		}, fmt.Errorf("minimax base_resp status_code=%d msg=%s",
 			parsed.BaseResp.StatusCode, parsed.BaseResp.StatusMsg)
 	}
@@ -147,6 +162,7 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 			Raw:      0,
 			HasQuota: false,
 			Source:   "minimax:/v1/token_plan/remains",
+			Kind:     "percent",
 		}, nil
 	}
 
@@ -163,6 +179,7 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 		Raw:      minPct,
 		HasQuota: minPct > 0,
 		Source:   "minimax:/v1/token_plan/remains",
+		Kind:     "percent",
 	}, nil
 }
 

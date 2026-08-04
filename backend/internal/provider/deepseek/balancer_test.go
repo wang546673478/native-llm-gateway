@@ -48,6 +48,9 @@ func TestDeepseekBalancer_ParsesBalance(t *testing.T) {
 	if got.Raw != 110.00 {
 		t.Errorf("Raw = %v, want 110.00", got.Raw)
 	}
+	if got.Kind != "currency" {
+		t.Errorf("Kind = %q, want %q", got.Kind, "currency")
+	}
 }
 
 func TestDeepseekBalancer_MultiCurrencySums(t *testing.T) {

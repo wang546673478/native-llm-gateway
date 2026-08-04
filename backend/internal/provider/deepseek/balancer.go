@@ -77,7 +77,11 @@ func (b *deepseekBalancer) FetchBalance(ctx context.Context, baseURL string, k *
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return quotacheck.Balance{HasQuota: false, Source: "deepseek:/user/balance"}, err
+		return quotacheck.Balance{
+			HasQuota: false,
+			Source:   "deepseek:/user/balance",
+			Kind:     "currency",
+		}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -88,18 +92,24 @@ func (b *deepseekBalancer) FetchBalance(ctx context.Context, baseURL string, k *
 			Raw:      0,
 			HasQuota: false,
 			Source:   "deepseek:/user/balance",
+			Kind:     "currency",
 		}, fmt.Errorf("deepseek balance auth: HTTP %d", resp.StatusCode)
 	}
 	if resp.StatusCode >= 500 {
 		return quotacheck.Balance{
 			HasQuota: false,
 			Source:   "deepseek:/user/balance",
+			Kind:     "currency",
 		}, fmt.Errorf("deepseek balance http %d", resp.StatusCode)
 	}
 
 	var parsed deepseekBalanceResp
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return quotacheck.Balance{HasQuota: false, Source: "deepseek:/user/balance"}, err
+		return quotacheck.Balance{
+			HasQuota: false,
+			Source:   "deepseek:/user/balance",
+			Kind:     "currency",
+		}, err
 	}
 
 	// 汇总所有 currency 的 total_balance(账户可能同时有 CNY + USD)
@@ -116,6 +126,7 @@ func (b *deepseekBalancer) FetchBalance(ctx context.Context, baseURL string, k *
 		Raw:      raw,
 		HasQuota: parsed.IsAvailable && raw > 0,
 		Source:   "deepseek:/user/balance",
+		Kind:     "currency",
 	}, nil
 }
 

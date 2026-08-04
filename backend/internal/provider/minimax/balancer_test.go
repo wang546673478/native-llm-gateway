@@ -69,6 +69,9 @@ func TestMiniMaxBalancer_ParsesRealSchema(t *testing.T) {
 	if !got.HasQuota {
 		t.Errorf("HasQuota = false, want true (Raw=43 > 0)")
 	}
+	if got.Kind != "percent" {
+		t.Errorf("Kind = %q, want %q", got.Kind, "percent")
+	}
 }
 
 func TestMiniMaxBalancer_OneModelExhaustedZeroOutsWhole(t *testing.T) {
