@@ -147,6 +147,15 @@ func hashKey(plain string) string {
 // 任一存在即可,二者都给时以 Authorization 优先。
 // 这让 OpenAI / Anthropic 客户端都能直接对接 Gateway,不需要适配层。
 func (a *Authenticator) Authenticate(r *http.Request) (*GatewayKey, error) {
+	// Authorization 头存在但格式不对(非 Bearer 前缀 / Bearer 后为空)
+	// → 明确报 InvalidFormat,而不是当"缺失头"处理(Basic abc 之前会落到 Missing)
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		const prefix = "Bearer "
+		if !strings.HasPrefix(authHeader, prefix) || strings.TrimSpace(authHeader[len(prefix):]) == "" {
+			return nil, ErrInvalidAuthFormat
+		}
+	}
 	token := extractToken(r)
 	if token == "" {
 		return nil, ErrMissingAuthHeader

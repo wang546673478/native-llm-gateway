@@ -212,6 +212,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	}
 	isStream = bodyStream
 	if entry != nil {
+		// P-stream-flag: entry 在 body 解析前创建,IsStream 当时是零值 —
+		// 解析完 body 后补写真实值(之前日志 stream 列恒为 False)
+		entry.IsStream = isStream
 		entry.RequestedModel = model
 	}
 
