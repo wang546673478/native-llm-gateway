@@ -669,40 +669,54 @@ func (s *Server) ReloadProviderPool(providerName string) {
 	ctx := context.Background()
 
 	if providerName != "" {
-		// 单个 provider 热更新
-		pool := buildOnePool(ctx, providerName, sched, poolCfg, store, s.logger)
-		s.pools[providerName] = pool
-		// 注入到 Provider(让它下次请求用新 Pool)
-		if pv, ok := s.manager.Get(providerName); ok {
-			if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
-				setter.SetPool(pool)
-				s.logger.Info("provider pool reloaded", zap.String("provider", providerName), zap.Int("keys", pool.Size()))
+		vendor := provider.Default().VendorFor(providerName)
+		// 找同 vendor 的所有已加载注册名
+		var names []string
+		for name := range s.manager.GetAll() {
+			if provider.Default().VendorFor(name) == vendor {
+				names = append(names, name)
 			}
 		}
-		// P54: 同时更新 Router 持有的 pool 引用 — 不然 router 用旧 pool
-		// (含已 disable 的 key),新加的 key 永远用不上
-		if s.router != nil {
-			s.router.SetPool(providerName, pool)
+		if len(names) == 0 {
+			names = []string{providerName}
 		}
-		// P68: reload 后的新 pool 需重新注入 quota callback(否则 manager 监听不到)
-		if s.quotaM != nil {
-			s.quotaM.ReinjectCallback(providerName, pool)
+		// 建一次 pool(vendor 名),重指该 vendor 的所有注册名
+		pool := buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger)
+		for _, name := range names {
+			s.pools[name] = pool
+			if pv, ok := s.manager.Get(name); ok {
+				if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
+					setter.SetPool(pool)
+				}
+			}
+			if s.router != nil {
+				s.router.SetPool(name, pool)
+			}
+			if s.quotaM != nil {
+				s.quotaM.ReinjectCallback(name, pool)
+			}
 		}
+		s.logger.Info("provider pool reloaded", zap.String("vendor", vendor), zap.Int("keys", pool.Size()), zap.Strings("names", names))
 		return
 	}
-	// 全量重建
+	// 全量重建 — 按 vendor 分组,每组建一次 pool 重指该 vendor 所有注册名
+	vendorPools := make(map[string]*keypool.Pool)
 	for name, p := range s.cfg.Providers {
 		if !p.Enabled {
 			continue
 		}
-		pool := buildOnePool(ctx, name, sched, poolCfg, store, s.logger)
+		vendor := provider.Default().VendorFor(name)
+		pool, ok := vendorPools[vendor]
+		if !ok {
+			pool = buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger)
+			vendorPools[vendor] = pool
+		}
 		s.pools[name] = pool
 		if pv, ok := s.manager.Get(name); ok {
 			if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
 				setter.SetPool(pool)
 			}
 		}
-		// P68: 同上 — reload 全量时每个新 pool 都要注入 callback
 		if s.quotaM != nil {
 			s.quotaM.ReinjectCallback(name, pool)
 		}
