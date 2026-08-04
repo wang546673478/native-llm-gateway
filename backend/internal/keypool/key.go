@@ -45,6 +45,8 @@ type Key struct {
 	// P-quota-balance: 上游 quota polling 写入的余额快照与时间戳(runtime, 不落 DB)
 	Remaining    float64
 	LastPolledAt time.Time
+	// P-quota-display: 上次 poll 的数值类型("percent"/"currency"/"")— 前端按此渲染单位
+	QuotaKind string
 }
 
 // IsUsable 在给定时间点判断 Key 是否可用于调度

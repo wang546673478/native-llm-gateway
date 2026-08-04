@@ -47,9 +47,11 @@ type Balancer interface {
 
 // Balance 余额查询结果
 type Balance struct {
-	Raw      float64 // 解析出的余额数值(单位由 source 决定)
+	Raw      float64 // 解析出的余额数值(单位由 Kind 决定)
 	HasQuota bool    // true 表示余额 > 0,key 可用
 	Source   string  // "deepseek:/user/balance" 之类,用于日志/metrics
+	// P-quota-display: 数值类型 — "percent" | "currency";空 = 兼容旧行为(按 currency)
+	Kind string
 }
 
 // global registry — provider 包在 init() 里 Register

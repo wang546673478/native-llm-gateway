@@ -587,6 +587,7 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				}
 
 				k.Remaining = bal.Raw
+				k.QuotaKind = bal.Kind
 				k.LastPolledAt = time.Now()
 
 				switch {

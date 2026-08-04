@@ -330,7 +330,7 @@ func TestPollAllBalancers_TierBlocked(t *testing.T) {
 		{ID: "api-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "api"},
 	}, nil, keypool.Config{})
 
-	b := &fakeBalancer{bal: Balance{HasQuota: true, Raw: 1.0}}
+	b := &fakeBalancer{bal: Balance{HasQuota: true, Raw: 1.0, Kind: "percent"}}
 	originalReg := balancerRegistry["p"]
 	RegisterBalancer("p", b)
 	t.Cleanup(func() {
@@ -356,6 +356,10 @@ func TestPollAllBalancers_TierBlocked(t *testing.T) {
 		}
 		if k.LastPolledAt.IsZero() {
 			t.Errorf("%s LastPolledAt not set", k.ID)
+		}
+		// P-quota-display: QuotaKind 应随 poll 写入(pipeline: balancer → Key)
+		if k.QuotaKind != "percent" {
+			t.Errorf("%s QuotaKind = %q, want %q", k.ID, k.QuotaKind, "percent")
 		}
 	}
 }
