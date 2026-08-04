@@ -40,6 +40,12 @@
 //     单位是百分比(0-100),UI 颜色阈值 10% 直接可用。
 //   - HasQuota = is_available(base_resp.status_code==0) && Raw > 0。
 //   - model_remains 为空(账户无可用模型)视作 Raw=0、HasQuota=false。
+//
+// 官方文档(2026-08-04 调研):无公开余额/套餐额度查询 REST API —
+// 余额与 Token Plan 用量只能在 Web 控制台查看;API 侧只能靠错误码被动感知:
+//   base_resp.status_code = 1008(余额不足)/ 2056(超出 Token Plan 限制)
+// 本 balancer 使用的 https://www.minimaxi.com/v1/token_plan/remains 为未文档化端点,
+// 实测有效(2026-08-04),官方不保证稳定性;如失效,可降级为错误码驱动。
 
 package minimax
 

@@ -20,6 +20,14 @@
 // 修:按官方 schema 重写,所有金额从 string 解析成 float;按 currency 汇总
 // 出 Raw(同时支持 CNY + USD 账户的情况,sum 两个 currency 的 total_balance,
 // HasQuota 用 is_available 判定)。
+//
+// 官方余额 API(2026-08-04 文档):
+//
+//	GET https://api.deepseek.com/user/balance
+//	- 响应 balance_infos[]:每项 {currency: "CNY"|"USD", total_balance/granted_balance/topped_up_balance}
+//	- 注意:金额字段是 STRING 类型,不是数字;balance_infos 是对象数组
+//	- 鉴权失败 401;余额不足(调用时)402;限流 429(并发维度:pro 500 / flash 2500,账号粒度)
+//	- 峰谷定价预告:高峰(北京 9-12 / 14-18 点)2 倍价,未生效
 package deepseek
 
 import (

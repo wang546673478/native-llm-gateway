@@ -269,11 +269,38 @@ func TestParseOpenAIUsage_DeepSeekExtensions(t *testing.T) {
 	if u.PromptTokens != 100 {
 		t.Errorf("PromptTokens = %d, want 100", u.PromptTokens)
 	}
+	// P-provider-vendor: cached_tokens 缺省 0 时,CacheReadTokens = prompt_cache_hit_tokens
+	if u.CacheReadTokens != 80 {
+		t.Errorf("CacheReadTokens = %d, want 80 (prompt_cache_hit_tokens)", u.CacheReadTokens)
+	}
 	if u.RawUsage["prompt_cache_hit_tokens"] != 80 {
 		t.Errorf("prompt_cache_hit_tokens in RawUsage = %v, want 80", u.RawUsage["prompt_cache_hit_tokens"])
 	}
 	if u.RawUsage["reasoning_tokens"] != 30 {
 		t.Errorf("reasoning_tokens in RawUsage = %v, want 30", u.RawUsage["reasoning_tokens"])
+	}
+}
+
+func TestParseOpenAIUsage_MiniMaxCachedTokens(t *testing.T) {
+	// P-provider-vendor: OpenAI 标准 prompt_tokens_details.cached_tokens(MiniMax 等)
+	body := []byte(`{
+		"model": "MiniMax-M3",
+		"usage": {
+			"prompt_tokens": 1200,
+			"completion_tokens": 300,
+			"total_tokens": 1500,
+			"prompt_tokens_details": {"cached_tokens": 800}
+		}
+	}`)
+	u := parseOpenAIUsage(body)
+	if u == nil {
+		t.Fatal("parseOpenAIUsage returned nil")
+	}
+	if u.CacheReadTokens != 800 {
+		t.Fatalf("CacheReadTokens = %d, want 800", u.CacheReadTokens)
+	}
+	if u.PromptTokens != 1200 {
+		t.Fatalf("PromptTokens = %d, want 1200", u.PromptTokens)
 	}
 }
 

@@ -364,16 +364,24 @@ func (b *Base) SetPool(p *keypool.Pool) {
 //   - prompt_cache_hit_tokens / prompt_cache_miss_tokens (cache 命中/未命中)
 //   - completion_tokens_details.reasoning_tokens (思考模式消耗)
 //
+// P-provider-vendor: OpenAI 标准缓存字段(MiniMax / OpenAI 官方 / qwen 等):
+//   - prompt_tokens_details.cached_tokens — 与 DeepSeek 风格并存,CacheReadTokens = 两者之和
+//
 // 这些字段记在 RawUsage 里,Gateway 用作可选的精细计费输入。
 func parseOpenAIUsage(body []byte) *provider.Usage {
 	var resp struct {
 		Model string `json:"model"`
 		Usage *struct {
-			PromptTokens            int `json:"prompt_tokens"`
-			CompletionTokens        int `json:"completion_tokens"`
-			TotalTokens             int `json:"total_tokens"`
-			PromptCacheHitTokens    int `json:"prompt_cache_hit_tokens"`
-			PromptCacheMissTokens   int `json:"prompt_cache_miss_tokens"`
+			PromptTokens          int `json:"prompt_tokens"`
+			CompletionTokens      int `json:"completion_tokens"`
+			TotalTokens           int `json:"total_tokens"`
+			PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
+			// P-provider-vendor: OpenAI 标准缓存字段(MiniMax / OpenAI 官方 / qwen 等)
+			// 与 DeepSeek 风格 prompt_cache_hit_tokens 并存,二者都算 CacheReadTokens
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 			CompletionTokensDetails *struct {
 				ReasoningTokens int `json:"reasoning_tokens"`
 			} `json:"completion_tokens_details"`
@@ -388,12 +396,18 @@ func parseOpenAIUsage(body []byte) *provider.Usage {
 		reasoningTokens = resp.Usage.CompletionTokensDetails.ReasoningTokens
 	}
 
+	cachedTokens := 0
+	if resp.Usage.PromptTokensDetails != nil {
+		cachedTokens = resp.Usage.PromptTokensDetails.CachedTokens
+	}
+
 	raw := map[string]interface{}{
 		"prompt_tokens":            resp.Usage.PromptTokens,
 		"completion_tokens":        resp.Usage.CompletionTokens,
 		"total_tokens":             resp.Usage.TotalTokens,
 		"prompt_cache_hit_tokens":  resp.Usage.PromptCacheHitTokens,
 		"prompt_cache_miss_tokens": resp.Usage.PromptCacheMissTokens,
+		"cached_tokens":            cachedTokens,
 		"reasoning_tokens":         reasoningTokens,
 	}
 
@@ -404,8 +418,9 @@ func parseOpenAIUsage(body []byte) *provider.Usage {
 		TotalTokens:      resp.Usage.TotalTokens,
 		// P40: DeepSeek 的 cache 模型 — prompt_cache_hit_tokens 视为 cache read,
 		// prompt_cache_miss_tokens 已经包含在 PromptTokens 里(完整输入)
-		// DeepSeek 不区分 cache_creation 和 cache_miss,所以这里 CacheCreationTokens = 0
-		CacheReadTokens:     resp.Usage.PromptCacheHitTokens,
+		// P-provider-vendor: OpenAI 标准 cached_tokens(MiniMax 等)同样按缓存价计费,
+		// 与 DeepSeek 风格并存相加
+		CacheReadTokens:     resp.Usage.PromptCacheHitTokens + cachedTokens,
 		CacheCreationTokens: 0,
 		RawUsage:            raw,
 	}
