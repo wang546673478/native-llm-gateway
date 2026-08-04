@@ -231,7 +231,7 @@ deepseek / minimax 包 header 注释补全(排查时的权威参考):
 - `ProviderInfo` 加 `vendor: string`、`protocols: string[]`(后端返回)
 - `ProviderKeyView` 加 `protocols: string`
 
-### 5.2 `backend/internal/api/http/handler/admin.go` — `listRegisteredProviders`
+### 5.2 `backend/internal/api/http/handler/admin.go` — `listProviders`(GET /api/v1/providers)
 
 返回结构固定为按 vendor 维度(前端两页一起改,无需向后兼容):
 
@@ -244,13 +244,17 @@ deepseek / minimax 包 header 注释补全(排查时的权威参考):
         {"name": "deepseek",         "protocol": "openai"},
         {"name": "deepseek-anthropic","protocol": "anthropic"}
       ],
-      "models": ["deepseek-v4-flash", "deepseek-v4-pro"]
+      "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+      "key_pool": {...},
+      "circuit_breaker": {...}
     }
   ]
 }
 ```
 
-聚合规则:按 vendor 分组;`names` 为该 vendor 下全部已注册注册名及其协议;`models` 为该 vendor 下各注册名模型列表的并集(去重)。单协议厂商(如 qwen)vendor = name,`names` 单元素。
+聚合规则:按 vendor 分组(`vendor = a.Registry.VendorFor(name)`);`names` 为该 vendor 下全部已加载注册名及其协议;`models` 为并集去重;`key_pool` / `circuit_breaker` 取该 vendor 第一个注册名的(共享 pool 时状态相同)。单协议厂商(如 qwen)vendor = name,`names` 单元素。
+
+**`listRegisteredProviders`(GET /api/v1/providers/registered)保持原样不动** — AccessLogs.vue 仍按平铺 `providers` 结构消费。
 
 ### 5.3 `frontend/src/views/Providers.vue`
 
@@ -259,8 +263,9 @@ deepseek / minimax 包 header 注释补全(排查时的权威参考):
 
 ### 5.4 `frontend/src/views/ProviderKeys.vue`
 
-- 添加表单:`Provider` 下拉改为两级 — 厂商下拉(唯一 vendor)→ 协议多选(默认全勾,来自该 vendor 的 names 列表)→ 填 key;提交时把 (vendor, 勾选协议) 映射为具体注册名:全勾且 vendor 双协议 → 创建两条(openai/anthropic 各一,同一把 key 两行,标对应协议);单协议 → 一条
-- 列表:Provider 列按 vendor 分组显示(分组标题 = vendor,行内仍显示注册名以便区分协议)
+- 添加表单:`Provider` 下拉改为两级 — 厂商下拉(唯一 vendor)→ 协议多选(默认全勾,来自该 vendor 的 names 列表)→ 填 key
+- **提交:一把 key 创建一条(厂商级一份)** — 目标注册名 = 该 vendor 的第一个注册名(pool 共享,另一协议面的请求同样能取到);`protocols` 字段 = 勾选列表(全勾 → 空 = 全部;勾选子集 → 逗号分隔)。不创建两条
+- 列表:Provider 列显示注册名(同 vendor 的 key 因共享池而 provider_name 相同,天然相邻);keys 加载循环 vendor.names 展开后的注册名列表拉取(与现状循环 provider 等价)
 - 编辑/删除:按行内注册名操作,不变
 
 ---
