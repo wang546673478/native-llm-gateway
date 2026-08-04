@@ -324,6 +324,9 @@ type PoolStatus struct {
 	// P-quota-balance: 上游 quota polling 的聚合指标
 	QuotaPolledKeys int     `json:"quota_polled_keys"` // 至少 poll 过一次的 key 数
 	QuotaKnownSum   float64 `json:"quota_known_sum"`   // 已 poll 的 key 的 Remaining 之和
+	// P-quota-display: polled keys 的类型 — 全部 percent → "percent";否则 "currency"
+	// (空 Kind 如 GLM 按 currency,前端维持 ¥ 渲染)
+	QuotaKind string `json:"quota_kind"`
 }
 
 // Status 池状态摘要
@@ -348,6 +351,23 @@ func (p *Pool) Status() PoolStatus {
 		if !k.LastPolledAt.IsZero() {
 			s.QuotaPolledKeys++
 			s.QuotaKnownSum += k.Remaining
+		}
+	}
+	// P-quota-display: dominant kind — 全部 percent → "percent",否则 "currency"
+	if s.QuotaPolledKeys > 0 {
+		s.QuotaKind = "currency"
+		allPercent := true
+		for _, k := range p.keys {
+			if k.LastPolledAt.IsZero() {
+				continue
+			}
+			if k.QuotaKind != "percent" {
+				allPercent = false
+				break
+			}
+		}
+		if allPercent {
+			s.QuotaKind = "percent"
 		}
 	}
 	return s

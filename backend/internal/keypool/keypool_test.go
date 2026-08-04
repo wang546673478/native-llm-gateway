@@ -530,3 +530,31 @@ func TestPool_StatusIncludesQuotaSummary(t *testing.T) {
 		t.Errorf("QuotaKnownSum = %v, want 114.5", st.QuotaKnownSum)
 	}
 }
+
+func TestPool_Status_QuotaKindDominant(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-2 * time.Minute)
+	mk := func(id string, kind string) *Key {
+		k := &Key{ID: id, ProviderName: "test", Name: id, Key: "sk",
+			Status: KeyStatusActive, CreatedAt: now, UpdatedAt: now}
+		k.LastPolledAt = past
+		k.QuotaKind = kind
+		return k
+	}
+	// 全部 percent → "percent"
+	all := NewPool("t", []*Key{mk("a", "percent"), mk("b", "percent")}, nil, Config{})
+	if got := all.Status().QuotaKind; got != "percent" {
+		t.Errorf("all-percent QuotaKind = %q, want %q", got, "percent")
+	}
+	// 混合(percent + currency)→ "currency"
+	mixed := NewPool("t", []*Key{mk("a", "percent"), mk("b", "currency")}, nil, Config{})
+	if got := mixed.Status().QuotaKind; got != "currency" {
+		t.Errorf("mixed QuotaKind = %q, want %q", got, "currency")
+	}
+	// 未 poll → ""
+	none := NewPool("t", []*Key{{ID: "a", ProviderName: "t", Name: "a", Key: "sk",
+		Status: KeyStatusActive, CreatedAt: now, UpdatedAt: now}}, nil, Config{})
+	if got := none.Status().QuotaKind; got != "" {
+		t.Errorf("no-poll QuotaKind = %q, want empty", got)
+	}
+}
