@@ -550,6 +550,13 @@ func (m *Manager) pollLoop(ctx context.Context) {
 //   - DISABLED key 跳过,无关
 //   - 每把 key 之间 sleep 1 秒(由 ctx 可中断),不爆上游
 func (m *Manager) pollAllBalancers(ctx context.Context) {
+	// P-quota-balance:整个 pollAllBalancers 兜 panic recover。
+	// 之前没有这一层,某个 key 的 FetchBalance panic 会杀掉整个 pollLoop 静默闭嘴。
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("pollAllBalancers panic", zap.Any("err", r))
+		}
+	}()
 	for providerName, pool := range m.pools.Get() {
 		balancer := LookupBalancer(providerName)
 		if balancer == nil {
