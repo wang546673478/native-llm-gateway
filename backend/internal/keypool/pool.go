@@ -347,27 +347,22 @@ func (p *Pool) Status() PoolStatus {
 			s.QuotaExceededKeys++
 		}
 	}
+	allPercent := true
 	for _, k := range p.keys {
 		if !k.LastPolledAt.IsZero() {
 			s.QuotaPolledKeys++
 			s.QuotaKnownSum += k.Remaining
+			if k.QuotaKind != "percent" {
+				allPercent = false
+			}
 		}
 	}
 	// P-quota-display: dominant kind — 全部 percent → "percent",否则 "currency"
 	if s.QuotaPolledKeys > 0 {
-		s.QuotaKind = "currency"
-		allPercent := true
-		for _, k := range p.keys {
-			if k.LastPolledAt.IsZero() {
-				continue
-			}
-			if k.QuotaKind != "percent" {
-				allPercent = false
-				break
-			}
-		}
 		if allPercent {
 			s.QuotaKind = "percent"
+		} else {
+			s.QuotaKind = "currency"
 		}
 	}
 	return s

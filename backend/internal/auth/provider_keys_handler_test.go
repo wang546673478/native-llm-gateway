@@ -16,7 +16,7 @@ func TestProviderKeyView_IncludesRemainingAndLastPolledAt(t *testing.T) {
 		KeyMasked: "sk-te...est", Enabled: true,
 		Status: "ACTIVE", BillingSource: "token_plan",
 		CreatedAt: past, UpdatedAt: past,
-		Remaining: 7.0, LastPolledAt: &past,
+		Remaining: 7.0, LastPolledAt: &past, QuotaKind: "percent",
 	}
 	out, err := json.Marshal(view)
 	if err != nil {
@@ -31,6 +31,9 @@ func TestProviderKeyView_IncludesRemainingAndLastPolledAt(t *testing.T) {
 	}
 	if _, ok := parsed["last_polled_at"]; !ok {
 		t.Error("missing 'last_polled_at' field in JSON output")
+	}
+	if got, _ := parsed["quota_kind"].(string); got != "percent" {
+		t.Errorf("quota_kind = %v, want percent", parsed["quota_kind"])
 	}
 	// nil-pointer case should serialise as null
 	view.LastPolledAt = nil

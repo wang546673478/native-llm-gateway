@@ -388,6 +388,12 @@ func TestPollAllBalancers_PolledAllStatusesNotJustQuotaExceeded(t *testing.T) {
 	if len(b.calls) != 2 {
 		t.Errorf("calls = %d, want 2 (both ACTIVE and QUOTA_EXCEEDED should be polled)", len(b.calls))
 	}
+	// P-quota-display: balancer 未上报 Kind → QuotaKind 写 ""(兼容路径,前端按 currency)
+	for _, k := range pool.KeyPtrs() {
+		if k.QuotaKind != "" {
+			t.Errorf("%s QuotaKind = %q, want empty (no Kind reported)", k.ID, k.QuotaKind)
+		}
+	}
 }
 
 func TestPollAllBalancers_HasQuotaFalseOnActivePushedToQuotaExceeded(t *testing.T) {

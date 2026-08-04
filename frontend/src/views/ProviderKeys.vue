@@ -90,7 +90,7 @@ interface ProviderKeyView {
   remaining: number
   last_polled_at: string | null
   // P-quota-display: 数值类型 — "percent" / "currency" / ""(空按 currency)
-  quota_kind: string
+  quota_kind: 'percent' | 'currency' | ''
 }
 
 interface ProviderInfo {
@@ -157,7 +157,10 @@ function balanceColour(
 ): 'green' | 'yellow' | 'red' | 'gray' {
   if (!row.last_polled_at) return 'gray'
   if (row.remaining === 0) return 'red'
-  const threshold = (warnPct / 100) * tierMax
+  // P-quota-display: percent 行用绝对阈值(百分比本身是绝对值,tier-relative 会双重归一化);
+  // currency 行保持 tier-relative 阈值(与既有行为一致)
+  const threshold =
+    row.quota_kind === 'percent' ? warnPct : (warnPct / 100) * tierMax
   if (row.remaining >= threshold) return 'green'
   return 'yellow'
 }
@@ -210,6 +213,8 @@ const columns: DataTableColumns<ProviderKeyView> = [
   {
     // P-quota-display: 列名"额度";渲染按 quota_kind:
     //   percent → "43%"(取整);currency/空 → "¥12.34"
+    // 颜色:green/yellow/red/gray — percent 行按绝对阈值 warnPct;
+    // currency 行按 tier_max 相对阈值(tierMaxForRow)
     title: '额度',
     key: 'remaining',
     width: 130,
@@ -226,7 +231,7 @@ const columns: DataTableColumns<ProviderKeyView> = [
       }
       const text =
         row.quota_kind === 'percent'
-          ? `${Math.round(row.remaining)}%`
+          ? `${Math.floor(row.remaining)}%`
           : `¥${row.remaining.toFixed(2)}`
       return h(
         'span',

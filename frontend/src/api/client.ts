@@ -168,8 +168,9 @@ export interface DashboardResp {
     // "Pool 列表里每行显示 QuotaKnownSum"
     quota_polled_keys: number
     quota_known_sum: number
-    // P-quota-display: polled keys 的类型 — "percent" 池不可汇总,前端显示 —
-    quota_kind: string
+    // P-quota-display: 池级 dominant kind — 全部 percent → "percent",否则 "currency"
+    // (percent 池不可汇总,前端显示 —)
+    quota_kind: 'percent' | 'currency' | ''
   }>
 }
 

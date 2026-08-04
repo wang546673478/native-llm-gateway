@@ -551,6 +551,11 @@ func TestPool_Status_QuotaKindDominant(t *testing.T) {
 	if got := mixed.Status().QuotaKind; got != "currency" {
 		t.Errorf("mixed QuotaKind = %q, want %q", got, "currency")
 	}
+	// 空 Kind polled key(GLM 场景)→ "currency"
+	mixedEmpty := NewPool("t", []*Key{mk("a", "percent"), mk("b", "")}, nil, Config{})
+	if got := mixedEmpty.Status().QuotaKind; got != "currency" {
+		t.Errorf("empty-kind QuotaKind = %q, want %q", got, "currency")
+	}
 	// 未 poll → ""
 	none := NewPool("t", []*Key{{ID: "a", ProviderName: "t", Name: "a", Key: "sk",
 		Status: KeyStatusActive, CreatedAt: now, UpdatedAt: now}}, nil, Config{})
