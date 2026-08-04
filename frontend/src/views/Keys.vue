@@ -173,6 +173,8 @@ interface ProviderKeyView {
   name: string
   key_masked: string
   enabled: boolean
+  remaining: number
+  last_polled_at: string | null
 }
 
 // P34: KeyView 含 provider_key_ids + 明文 key(用户要求 list 也能直接复制)

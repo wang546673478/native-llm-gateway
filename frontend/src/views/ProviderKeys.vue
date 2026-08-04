@@ -87,6 +87,8 @@ interface ProviderKeyView {
   billing_source: string
   created_at: string
   updated_at: string
+  remaining: number
+  last_polled_at: string | null
 }
 
 interface ProviderInfo {
