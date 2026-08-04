@@ -499,9 +499,18 @@ keypool:
   max_cooling_count: 5
   health_check_interval: 30s
   key_rotation: "round_robin"
-  quota:
-    poll_interval: 5m
-    warn_threshold_pct: 10
+  # P68: quota polling / restore 全部 flat key(和 KeyPoolConfig struct 的
+  # mapstructure tag 对齐)。不要嵌 quota: 子块,viper 不会自动展开。
+  quota_enabled: true
+  quota_probe_initial_delay: 5m
+  quota_probe_max_backoff: 30m
+  quota_probe_jitter_pct: 20
+  quota_probe_max_attempts: 8
+  quota_poll_interval: 5m
+  quota_poll_jitter_pct: 10
+  quota_warn_threshold_pct: 10
+  quota_http_timeout: 10s
+  quota_user_agent: "native-llm-gateway/quota-restore-1.0"
 
 # 超时与重试(P5 阶段真正生效)
 timeouts:
