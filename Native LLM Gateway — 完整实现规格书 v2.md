@@ -5,6 +5,26 @@
 
 ---
 
+## ⚠️ 现状差异(2026-08,实现已远超本规格书)
+
+本规格书是**设计基线**,以下为已落地且与本文不一致的现状。**代码与运维文档优先**:
+
+| 领域 | 规格书写法 | 现状 |
+|---|---|---|
+| 路由 | alias 表 + 短/长格式 + fallback model | **无路由表**:`routing.catch_all: {}` 自动模式,所有 provider 自动参与,按 tier(token_plan → api → free)计费;alias 表与 fallback model 已退役(能力保留) |
+| 路由决策 | 按 model 名路由到声明它的 provider | **模型名只是标签**:配了 catch_all 后一律走链,真实名也不直连声明者 |
+| 白名单 | 入口校验 | **逐候选校验 + 参与选择**:白名单外的候选跳过;provider 声明过白名单模型就用白名单模型 |
+| Provider 结构 | 按协议拆目录(`deepseek_anthropic/` 等)+ glm/kimi | **按厂商一个目录,内含多协议面**:`deepseek/`(openai+anthropic)、`minimax/`(anthropic+openai);glm/kimi 已删;同厂商协议面共享 key 池,vendor 级一份 key |
+| Provider 能力 | 无 | config `responses_api: true` 标记原生支持 OpenAI Responses API 的厂商(deepseek/minimax),`/responses` 纯透传(Codex) |
+| 错误处理 | 400 invalid_request 禁用 key | **不禁用**(只计数);仅 auth 禁用。跨厂商续接剥离推理块 + 强制 `effort=none`(DeepSeek 校验) |
+| 计费 | 无 tier 概念 | `billing_source: token_plan/api/free` 分层,quota 耗尽自动降级/恢复 |
+| 管理 API | 规格书 §9 | 增加 `/access-logs/export`(JSONL 训练数据导出)、`/config/quota`;provider 按厂商聚合 |
+| 接入日志 | — | 30 天保留、body 上限 16MB、区分「客户端请求模型/实际使用模型」、详情人类可读 |
+
+> 新增/更新厂商的实操指南见 `docs/provider厂商定制包指南.md`;历史踩坑见 `docs/踩坑与排错.md`。
+
+---
+
 # 第一部分：项目定义
 
 ## 1.1 一句话定义
@@ -207,27 +227,21 @@ llm-gateway/
 │   │   │   ├── provider.go              # Provider 接口定义
 │   │   │   ├── manager.go               # Provider 生命周期管理
 │   │   │   ├── registry.go              # Provider 注册表
-│   │   │   ├── deepseek/
-│   │   │   │   ├── deepseek.go
-│   │   │   │   └── config.go
-│   │   │   ├── minimax/
-│   │   │   │   ├── minimax.go
-│   │   │   │   └── config.go
-│   │   │   ├── glm/
-│   │   │   │   ├── glm.go
-│   │   │   │   └── config.go
+│   │   │   ├── deepseek/                # 厂商级目录(多协议面 + balancer)
+│   │   │   │   ├── deepseek.go          #   openai 面
+│   │   │   │   ├── anthropic.go         #   anthropic 面
+│   │   │   │   ├── balancer.go          #   余额查询
+│   │   │   │   └── registry_test.go     #   双协议面注册回归测试
+│   │   │   ├── minimax/                 # 同款结构(anthropic 面 + openai 面 + balancer)
 │   │   │   ├── qwen/
-│   │   │   │   ├── qwen.go
-│   │   │   │   └── config.go
-│   │   │   ├── kimi/
-│   │   │   │   ├── kimi.go
-│   │   │   │   └── config.go
+│   │   │   │   └── qwen.go
 │   │   │   ├── gemini/
-│   │   │   │   ├── gemini.go
+│   │   │   │   └── gemini.go
+│   │   │   ├── openai_compatible/       # 通用 OpenAI 兼容 Provider
+│   │   │   │   ├── openai_compatible.go #   含 ResponsesPath(/responses 透传)
 │   │   │   │   └── config.go
-│   │   │   └── openai_compatible/       # 通用 OpenAI 兼容 Provider
-│   │   │       ├── openai_compatible.go
-│   │   │       └── config.go
+│   │   │   └── anthropic_compatible/    # 通用 Anthropic 兼容 Provider
+│   │   │       └── anthropic_compatible.go
 │   │   ├── keypool/
 │   │   │   ├── pool.go                  # Key Pool 管理器
 │   │   │   ├── key.go                   # Key 实体和状态机
