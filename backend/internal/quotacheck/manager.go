@@ -580,6 +580,9 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 			continue
 		}
 		seen[pool] = true
+		// P-provider-vendor: 共享 pool 时遍历键是随机注册名 — 日志/metrics 统一用
+		// pool 名(vendor),避免标签在 deepseek / deepseek-anthropic 之间抖动
+		vendorName := pool.ProviderName
 		balancer := LookupBalancer(providerName)
 		if balancer == nil {
 			continue
@@ -601,10 +604,10 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				bal, err := balancer.FetchBalance(ctx, baseURL, k)
 				if err != nil {
 					m.logger.Warn("poll balance err",
-						zap.String("provider", providerName),
+						zap.String("provider", vendorName),
 						zap.String("key_id", k.ID),
 						zap.Error(err))
-					m.metricsPollInc(providerName, "transport_error")
+					m.metricsPollInc(vendorName, "transport_error")
 					continue
 				}
 
@@ -615,20 +618,20 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				switch {
 				case !bal.HasQuota && k.Status == keypool.KeyStatusActive:
 					m.logger.Info("poll: quota exhausted",
-						zap.String("provider", providerName),
+						zap.String("provider", vendorName),
 						zap.String("key_id", k.ID),
 						zap.Float64("remaining", bal.Raw))
 					pool.ReportQuotaExceeded(k)
-					m.metricsPollInc(providerName, "exhausted")
+					m.metricsPollInc(vendorName, "exhausted")
 				case bal.HasQuota && k.Status == keypool.KeyStatusQuotaExceeded:
 					m.logger.Info("poll: quota restored",
-						zap.String("provider", providerName),
+						zap.String("provider", vendorName),
 						zap.String("key_id", k.ID),
 						zap.Float64("remaining", bal.Raw))
 					pool.RestoreQuota(k)
-					m.metricsPollInc(providerName, "restored")
+					m.metricsPollInc(vendorName, "restored")
 				default:
-					m.metricsPollInc(providerName, "ok")
+					m.metricsPollInc(vendorName, "ok")
 				}
 
 				select {

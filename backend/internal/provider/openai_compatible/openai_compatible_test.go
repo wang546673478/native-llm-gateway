@@ -304,6 +304,29 @@ func TestParseOpenAIUsage_MiniMaxCachedTokens(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsage_CachedTokensSum(t *testing.T) {
+	// P-provider-vendor: CacheReadTokens = prompt_cache_hit_tokens + cached_tokens
+	// 两字段同时出现时相加(DeepSeek 风格与 OpenAI 标准并存)
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"usage": {
+			"prompt_tokens": 2000,
+			"completion_tokens": 100,
+			"total_tokens": 2100,
+			"prompt_cache_hit_tokens": 80,
+			"prompt_cache_miss_tokens": 1920,
+			"prompt_tokens_details": {"cached_tokens": 800}
+		}
+	}`)
+	u := parseOpenAIUsage(body)
+	if u == nil {
+		t.Fatal("parseOpenAIUsage returned nil")
+	}
+	if u.CacheReadTokens != 880 {
+		t.Fatalf("CacheReadTokens = %d, want 880 (80 + 800)", u.CacheReadTokens)
+	}
+}
+
 func TestSendRequest_CustomChatPath(t *testing.T) {
 	// DeepSeek 用 /chat/completions 而非 /v1/chat/completions
 	var gotPath string

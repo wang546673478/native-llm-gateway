@@ -69,8 +69,9 @@ func BuildPoolFromStrings(providerName string, plainKeys []string, cfg Config) *
 	return NewPool(providerName, keys, nil, cfg)
 }
 
-// Acquire P64: 这里保留 tier 降级是作为"无 tier 信息的旧 caller"的兼容入口
-// 新调用方应明确用 AcquireFromTier
+// Acquire 获取一个可用的 Key,按 tier 降级顺序尝试 token_plan → api → free
+// P64: 这里保留 tier 降级是作为"无 tier 信息的旧 caller"的兼容入口
+// 新调用方应明确用 AcquireFromTier;P-provider-vendor: 等价 AcquireForProtocol("")
 func (p *Pool) Acquire() (*Key, error) {
 	return p.AcquireForProtocol("")
 }
@@ -112,6 +113,7 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint, proto string) (*Key, error) {
 // AcquireFromTier P64: 只从指定 tier 桶里挑 key,不做 tier 间降级
 // tier ∈ {"token_plan", "api", "free"};空字符串按 "api" 兜底
 // allowedIDSet nil = 不限 ID;非 nil = 只从 ID 在集合里的 key 里挑
+// P-provider-vendor: proto 非空时只取 Protocols 为空或包含该协议的 key;空 = 不过滤
 // 该 tier 桶为空时直接返回 ErrNoAvailableKey,让 Router 推进到下一档候选
 func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}, proto string) (*Key, error) {
 	if tier == "" {

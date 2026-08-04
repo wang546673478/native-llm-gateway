@@ -14,7 +14,7 @@ import (
 )
 
 // modelsProberOpenAI: GET /v1/models 用 key 调,2xx → restored
-// 用于 OpenAI 协议 provider(deepseek / glm / kimi / qwen / minimax-openai)
+// 用于 OpenAI 协议 provider(deepseek / qwen / minimax-openai)
 type modelsProberOpenAI struct {
 	client *http.Client
 }
@@ -56,7 +56,7 @@ func (p *modelsProberOpenAI) Probe(ctx context.Context, baseURL string, k *keypo
 }
 
 // modelsProberAnthropic: POST /v1/messages 发 max_tokens=1 的最小请求
-// 用于 Anthropic 协议 provider(deepseek-anthropic / glm-anthropic / kimi-anthropic / minimax / minimax-anthropic)
+// 用于 Anthropic 协议 provider(deepseek-anthropic / minimax)
 type modelsProberAnthropic struct {
 	client *http.Client
 }

@@ -2,8 +2,8 @@
 // P68 — 配合 keypool.Pool 自动恢复 quota_exceeded 的 Key
 //
 // 架构:
-//   - 有 balance API 的 provider(deepseek/glm)走主动 polling
-//   - 没 balance API 的 provider(kimi/minimax/qwen/gemini)走 probe-on-cooldown
+//   - 有 balance API 的 provider(deepseek)走主动 polling
+//   - 没 balance API 的 provider(minimax/qwen/gemini)走 probe-on-cooldown
 //   - 所有 candidate 入一个 min-heap(按 nextAt 排序),单 goroutine tick 处理
 package quotacheck
 

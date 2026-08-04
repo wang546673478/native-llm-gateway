@@ -124,9 +124,13 @@ func (r *Registry) ListRegisteredInfo() map[string]RegisteredInfo {
 	defer r.mu.RUnlock()
 	out := make(map[string]RegisteredInfo, len(r.factories))
 	for n := range r.factories {
+		v := r.vendors[n]
+		if v == "" {
+			v = n // 与 VendorFor 的 fallback 保持一致(plain Register 未记录 vendor)
+		}
 		out[n] = RegisteredInfo{
 			Protocol: r.protocols[n],
-			Vendor:   r.vendors[n],
+			Vendor:   v,
 		}
 	}
 	return out

@@ -69,3 +69,53 @@ func TestMigrateProviderVendorKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrateProviderVendorKeys_LeavesOthersUntouched(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&ProviderAPIKey{}); err != nil {
+		t.Fatalf("auto migrate: %v", err)
+	}
+
+	// 迁移不应触碰的行:glm/kimi(已删包,保留无害)、已标非空 protocols 的主条目行
+	rows := []ProviderAPIKey{
+		{ProviderName: "glm", Name: "a", KeyHash: "k1", BillingSource: "api"},
+		{ProviderName: "glm-anthropic", Name: "b", KeyHash: "k2", BillingSource: "api"},
+		{ProviderName: "kimi", Name: "c", KeyHash: "k3", BillingSource: "api"},
+		{ProviderName: "kimi-anthropic", Name: "d", KeyHash: "k4", BillingSource: "api"},
+		// 用户已在 UI 把 deepseek key 改成全协议(空)— 迁移绝不能覆盖它
+		{ProviderName: "deepseek", Name: "e", KeyHash: "k5", BillingSource: "api", Protocols: ""},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	if err := migrateProviderVendorKeys(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var all []ProviderAPIKey
+	if err := db.Order("id").Find(&all).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	want := []struct{ provider, protocols string }{
+		{"glm", ""},
+		{"glm-anthropic", ""},
+		{"kimi", ""},
+		{"kimi-anthropic", ""},
+		{"deepseek", ""}, // 空 = 全部协议,保持原样
+	}
+	if len(all) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(all), len(want), all)
+	}
+	for i, w := range want {
+		if all[i].ProviderName != w.provider || all[i].Protocols != w.protocols {
+			t.Errorf("row %d = (%s, %q), want (%s, %q)",
+				i, all[i].ProviderName, all[i].Protocols, w.provider, w.protocols)
+		}
+	}
+}

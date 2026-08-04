@@ -722,6 +722,10 @@ func (s *Server) ReloadProviderPool(providerName string) {
 				setter.SetPool(pool)
 			}
 		}
+		// P54: 同单分支 — Router 持有的 pool 引用一并更新
+		if s.router != nil {
+			s.router.SetPool(name, pool)
+		}
 		if s.quotaM != nil && !injectedPools[pool] {
 			injectedPools[pool] = true
 			s.quotaM.ReinjectCallback(name, pool)

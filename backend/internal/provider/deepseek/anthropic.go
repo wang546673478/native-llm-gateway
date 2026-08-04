@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	anthropicName            = "deepseek-anthropic"
-	anthropicDefaultEndpoint = "https://api.deepseek.com/anthropic"
+	anthropicName = "deepseek-anthropic"
+	// anthropic 默认端点 https://api.deepseek.com/anthropic — 由 config.yaml 的 endpoint 提供
 )
 
 // AnthropicProvider Anthropic 兼容 Provider(协议面是 anthropic,账号与 openai 面同一组 key)

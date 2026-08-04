@@ -33,9 +33,8 @@ import (
 )
 
 const (
-	openaiName            = "minimax-openai"
-	openaiDefaultEndpoint = "https://api.minimaxi.com/v1"
-	openaiChatPath        = "/chat/completions" // base 已含 /v1,不要再拼
+	openaiName     = "minimax-openai"
+	openaiChatPath = "/chat/completions" // base 已含 /v1,不要再拼
 )
 
 // OpenAIProvider OpenAI 兼容 Provider
