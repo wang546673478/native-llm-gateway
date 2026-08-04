@@ -862,6 +862,11 @@ func (e *Engine) tryOneCandidate(
 			}
 		}
 	}
+	// P-catch-all: 记录实际使用的上游模型(候选的目标模型,如 MiniMax-M3 —
+	// 客户端请求名可能只是标签)。failover 时每次尝试都覆盖,最后一次成功者胜出
+	if entry != nil {
+		entry.FinalModel = result.ModelID
+	}
 	req.Headers.Set("X-Request-Id", req.TraceID)
 	if result.Key != nil {
 		req.Headers.Set("Authorization", "Bearer "+result.Key.Key)

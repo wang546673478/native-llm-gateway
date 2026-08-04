@@ -223,16 +223,20 @@ const columns: DataTableColumns<AccessLog> = [
   },
   { title: 'Key', key: 'gateway_key_name', width: 120 },
   {
-    title: 'Model',
+    // P-catch-all: 客户端请求名只是标签,实际使用模型(路由后)单独一列
+    title: '客户端请求模型',
     key: 'requested_model',
-    width: 180,
+    width: 150,
+    render: row => row.requested_model,
+  },
+  {
+    title: '实际使用模型',
+    key: 'final_model',
+    width: 150,
     render: row => {
-      if (row.requested_model === row.final_model) return row.requested_model
-      return h('span', {}, [
-        h('span', { style: 'color: #999' }, row.requested_model),
-        h('span', { style: 'margin: 0 4px' }, '→'),
-        h('span', { style: 'color: #2080f0' }, row.final_model),
-      ])
+      if (row.requested_model === row.final_model) return row.final_model
+      // 名字被路由改写(假名 → 真实模型)时蓝色标注
+      return h('span', { style: 'color: #2080f0' }, row.final_model)
     },
   },
   { title: 'Provider', key: 'provider_name', width: 120 },
