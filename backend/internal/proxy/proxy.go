@@ -281,11 +281,21 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		}
 	}
 
-	// 4.5: 白名单检查 → 失败时也试 default_model fallback(alias 命中场景)
-	if e.authn != nil {
-		if gkVal, ok := c.Get("gateway_key"); ok {
-			if gk, ok := gkVal.(*auth.GatewayKey); ok {
-				if err := e.authn.CheckAllowed(gk, model); err != nil {
+	// 4.5 白名单 + provider 绑定:探第一个候选,按路由结果的目标模型做白名单校验。
+	// P-catch-all: 客户端发假名(claude-opus-5)会被路由到真实模型(MiniMax-M3),
+	// 白名单必须按路由后的真实模型校验 — 否则 key 配了真实模型名也会被 403。
+	// 迭代器不支持 reset:探针通过的候选直接用 runWithFirstResult 作为第一个开始循环。
+	if gkVal, ok := c.Get("gateway_key"); ok {
+		if gk, ok := gkVal.(*auth.GatewayKey); ok {
+			probeResult, probeErr := iter.Next()
+			if probeErr != nil {
+				// 没更多候选
+				e.handleAllFailed(c, req, lastErr, traceID)
+				return
+			}
+			// 白名单:按候选的目标模型校验 → 失败时也试 default_model fallback
+			if e.authn != nil {
+				if err := e.authn.CheckAllowed(gk, probeResult.ModelID); err != nil {
 					if fb := e.tryDefaultModelFallback(c, model, req); fb != "" && fb != model {
 						// fallback 成功:重置 iter 用新的 model 重新路由
 						model = fb
@@ -306,35 +316,40 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 								fmt.Sprintf("no available provider for model %q", model))
 							return
 						}
+						probeResult, probeErr = iter.Next()
+						if probeErr != nil {
+							e.handleAllFailed(c, req, lastErr, traceID)
+							return
+						}
 					} else {
 						// 真没 fallback 或 fallback 失败,返回 403
 						e.logger.Warn("model not allowed for key",
 							zap.String("key", gk.Name),
 							zap.String("model", model),
+							zap.String("routed_model", probeResult.ModelID),
 							zap.Strings("allowed", gk.AllowedModels),
 							zap.String("trace_id", traceID),
 						)
+						// P-catch-all: 让 access log 标 model_not_allowed 而非 auth_failed
+						lastErr = &provider.ProviderError{
+							ProviderName: probeResult.ProviderName,
+							StatusCode:   http.StatusForbidden,
+							ErrorType:    provider.ErrorTypeModelNotAllowed,
+							Message:      fmt.Sprintf("key %q does not allow model %q", gk.Name, probeResult.ModelID),
+						}
 						c.JSON(http.StatusForbidden, gin.H{
 							"error": gin.H{
 								"type":    "model_not_allowed",
-								"message": fmt.Sprintf("key %q does not allow model %q (allowed: %v)", gk.Name, model, gk.AllowedModels),
+								"message": fmt.Sprintf("key %q does not allow model %q (allowed: %v)", gk.Name, probeResult.ModelID, gk.AllowedModels),
 							},
 						})
 						return
 					}
 				}
 			}
-		}
-	}
-
-	// 4.5 P19: 检查 Gateway Key 是否绑定了 Provider
-	// 若 key.Providers 非空,则只能路由到那些 Provider 之一;若路由解析到不在列表里的,直接 403
-	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok && len(gk.Providers) > 0 {
-			// 取路由结果看 ProviderName;failover iterator 第一个就是
-			probeResult, probeErr := iter.Next()
-			if probeErr == nil {
-				if e.authn != nil && e.authn.CheckProvider(gk, probeResult.ProviderName) != nil {
+			// P19: provider 绑定检查 — 若 key.Providers 非空,路由结果必须在列表里
+			if len(gk.Providers) > 0 && e.authn != nil {
+				if e.authn.CheckProvider(gk, probeResult.ProviderName) != nil {
 					e.logger.Warn("key provider mismatch",
 						zap.String("key", gk.Name),
 						zap.Strings("key_providers", gk.Providers),
@@ -351,15 +366,13 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 					})
 					return
 				}
-				// 记下第一个候选的 provider name,供 defer 写 ProviderName
-				if probeResult != nil {
-					lastProviderName = probeResult.ProviderName
-				}
-				// 检查通过,把这个候选放回 iterator(不太好做,所以重置当前 idx)
-				// 简单做法:迭代器不支持 reset,改为手动用 probeResult 开始循环
-				e.runWithFirstResult(c, ctx, req, iter, probeResult, &lastProviderName, &lastErr, entry)
-				return
 			}
+			// 记下第一个候选的 provider name,供 defer 写 ProviderName
+			lastProviderName = probeResult.ProviderName
+			// 检查通过,把这个候选放回 iterator(不太好做,所以重置当前 idx)
+			// 简单做法:迭代器不支持 reset,改为手动用 probeResult 开始循环
+			e.runWithFirstResult(c, ctx, req, iter, probeResult, &lastProviderName, &lastErr, entry)
+			return
 		}
 	}
 
@@ -459,6 +472,10 @@ func classifyError(statusCode int, providerEmpty bool, upstreamErrType *provider
 	// Client 断开连接 — 不是 upstream 错误,也不应 trigger failover
 	if upstreamErrType != nil && upstreamErrType.ErrorType == provider.ErrorTypeClientDisconnected {
 		return "client_disconnected"
+	}
+	// P-catch-all: 白名单拒绝 — gateway 自己返的 403,不是上游 auth 失败
+	if upstreamErrType != nil && upstreamErrType.ErrorType == provider.ErrorTypeModelNotAllowed {
+		return "model_not_allowed"
 	}
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:

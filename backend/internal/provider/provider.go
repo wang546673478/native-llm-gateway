@@ -173,6 +173,9 @@ const (
 	// 与 auth 不同:quota 用完应该 failover 到下一个 provider(api 计费),
 	// 而 auth 错误说明 key 本身有问题,不该 failover
 	ErrorTypeQuotaExceeded ErrorType = "quota_exceeded"
+	// P-catch-all: 白名单拒绝 — key 不允许该(路由后的)模型。
+	// gateway 自己返的 403,用于 access log 标注,区分上游 auth 失败
+	ErrorTypeModelNotAllowed ErrorType = "model_not_allowed"
 )
 
 // ProviderError 是 Provider 返回的结构化错误
