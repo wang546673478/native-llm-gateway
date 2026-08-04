@@ -2,7 +2,7 @@
   <n-spin :show="loading">
     <!-- P-catch-all 自动模式:唯一的"路由规则" — 无路由表,所有 provider 自动参与 -->
     <n-card v-if="data?.catch_all" title="兜底路由 *(任意未知模型)" style="margin-bottom: 12px">
-      <template v-if="data.catch_all.Providers.length === 0">
+      <template v-if="(data.catch_all.Providers ?? []).length === 0">
         <n-space align="center" style="margin-bottom: 12px">
           <n-tag type="success">自动模式</n-tag>
           <n-text depth="3" style="font-size: 12px">
@@ -68,7 +68,7 @@ onMounted(async () => {
   loading.value = true
   try {
     data.value = await api.routing()
-    if (data.value?.catch_all && data.value.catch_all.Providers.length === 0) {
+    if (data.value?.catch_all && (data.value.catch_all.Providers ?? []).length === 0) {
       // 自动模式:拉 provider 列表,展示参与方与默认模型(第一个声明 = 默认)
       const prov = await api.providers()
       autoProviders.value = prov.vendors.map(v => ({

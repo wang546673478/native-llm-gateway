@@ -459,6 +459,7 @@ func (r *Router) ReloadCatchAll(c *AliasConfig) {
 }
 
 // CatchAllConfig 返回当前 catch_all 规则的拷贝(供 /routing 端点展示)
+// Providers 保证非 nil(空规则也返回 [] 而非 null,前端可直接 .length)
 func (r *Router) CatchAllConfig() *AliasConfig {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -466,7 +467,7 @@ func (r *Router) CatchAllConfig() *AliasConfig {
 		return nil
 	}
 	c := *r.catchAll
-	c.Providers = append([]ProviderRoute(nil), r.catchAll.Providers...)
+	c.Providers = append([]ProviderRoute{}, r.catchAll.Providers...)
 	return &c
 }
 
