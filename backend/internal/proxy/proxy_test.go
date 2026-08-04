@@ -574,3 +574,65 @@ func TestProxy_WhitelistSkipsCandidates(t *testing.T) {
 		t.Errorf("body = %s, want type=model_not_allowed", w2.Body.String())
 	}
 }
+
+// TestStripResponsesReasoning P-responses:
+// 剥离 input 里的 reasoning 项和 message 内容块里的 reasoning_text —
+// 跨厂商切换时 MiniMax 的推理块会被 DeepSeek 400 拒收
+func TestStripResponsesReasoning(t *testing.T) {
+	body := `{
+		"model": "gpt-5-codex",
+		"input": [
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+			{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "thinking..."}], "content": "enc", "encrypted_content": "xyz"},
+			{"type": "function_call", "call_id": "fc_1", "name": "apply_patch", "arguments": "{}"},
+			{"type": "message", "role": "assistant", "content": [
+				{"type": "output_text", "text": "ok"},
+				{"type": "reasoning_text", "text": "old thinking"}
+			]}
+		],
+		"stream": true
+	}`
+
+	out, stripped := stripResponsesReasoning([]byte(body))
+	if !stripped {
+		t.Error("strip should report reasoning was removed")
+	}
+	var parsed struct {
+		Input     []map[string]any `json:"input"`
+		Reasoning *struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("strip produced invalid JSON: %v", err)
+	}
+	if len(parsed.Input) != 3 {
+		t.Fatalf("input items = %d, want 3(reasoning 项被剥离)", len(parsed.Input))
+	}
+	for _, it := range parsed.Input {
+		if it["type"] == "reasoning" {
+			t.Errorf("reasoning item survived strip: %+v", it)
+		}
+	}
+	// 最后一条 message 的 reasoning_text 块应被剥掉
+	last := parsed.Input[len(parsed.Input)-1]
+	content := last["content"].([]any)
+	if len(content) != 1 {
+		t.Errorf("message content blocks = %d, want 1(reasoning_text 块被剥离)", len(content))
+	}
+	// 剥离推理 + 带工具往返 → 强制 effort=none(DeepSeek 校验)
+	if parsed.Reasoning == nil || parsed.Reasoning.Effort != "none" {
+		t.Errorf("reasoning = %+v, want effort=none(有工具往返时必须显式关闭)", parsed.Reasoning)
+	}
+	// 非 JSON 原样返回
+	raw := []byte(`not-json`)
+	if got, _ := stripResponsesReasoning(raw); string(got) != string(raw) {
+		t.Error("non-JSON body should pass through unchanged")
+	}
+	// 无工具往返时不强制 effort(纯续接请求 DeepSeek 接受)
+	noTools := `{"model":"m","input":[{"type":"reasoning","id":"r1","summary":[]}],"stream":false}`
+	out2, _ := stripResponsesReasoning([]byte(noTools))
+	if string(out2) != `{"input":[],"model":"m","stream":false}` {
+		t.Errorf("no-tool-rounds strip = %s, want 不注入 reasoning", out2)
+	}
+}

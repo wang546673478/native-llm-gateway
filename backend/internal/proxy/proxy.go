@@ -4,10 +4,12 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -185,6 +187,13 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		gatewayValidation = true
 		writeJSONError(c, http.StatusBadRequest, "invalid_request", "failed to read request body")
 		return
+	}
+	// P-responses: /responses 透传前剥离推理块(跨厂商切换时 MiniMax 的
+	// reasoning 会被 DeepSeek 400 拒收;剥离后目标模型重新推理)
+	if isResponsesPath(c.Request.URL.Path) {
+		if nb, _ := stripResponsesReasoning(body); nb != nil {
+			body = nb
+		}
 	}
 	// P67: 写请求 body(同步,file-per-trace,失败也继续)
 	if entry != nil && e.accessLog != nil {
@@ -629,6 +638,77 @@ func (e *Engine) writeNonStreamResponse(
 	e.recordUsageWithTokens(req, result, latency, resp.StatusCode, "", req.IsStream, resp.Usage)
 }
 
+// isResponsesPath 判断请求路径是否是 OpenAI Responses API(Codex)
+func isResponsesPath(path string) bool {
+	p := strings.ToLower(path)
+	return strings.HasSuffix(p, "/responses")
+}
+
+// stripResponsesReasoning P-responses: 剥离 Responses input 里的推理块。
+//
+// 跨厂商切换时(如 token plan 耗尽从 MiniMax 切到 DeepSeek),客户端会把
+// 上一家的推理块原样回带 — MiniMax 的 reasoning 项(含 encrypted_content)
+// 会被 DeepSeek 以 400 "reasoning_text must be passed back" 拒收。
+// 推理内容是展示性上下文,剥离后目标模型重新推理,行为正确。
+//
+// 实测(DeepSeek /v1/responses):请求带工具往返(function_call/output)
+// 且处于 thinking 模式时,必须回带 reasoning_text,否则 400 — 剥离推理后
+// 必须显式 reasoning.effort="none" 声明不启用 thinking,请求才能通过。
+// 返回 (新 body, 是否剥离过推理)。
+func stripResponsesReasoning(body []byte) ([]byte, bool) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body, false
+	}
+	inp, ok := req["input"].([]any)
+	if !ok {
+		return body, false
+	}
+	out := make([]any, 0, len(inp))
+	stripped := false
+	hasToolRounds := false
+	for _, item := range inp {
+		it, ok := item.(map[string]any)
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		t, _ := it["type"].(string)
+		if t == "reasoning" {
+			stripped = true
+			continue // 整项剥离
+		}
+		if t == "function_call" || t == "function_call_output" {
+			hasToolRounds = true
+		}
+		// message 内容块里的 reasoning_text 也剥掉
+		if t == "message" {
+			if content, ok := it["content"].([]any); ok {
+				var blocks []any
+				for _, b := range content {
+					bm, ok := b.(map[string]any)
+					if !ok || bm["type"] != "reasoning_text" {
+						blocks = append(blocks, b)
+					}
+				}
+				it["content"] = blocks
+			}
+		}
+		out = append(out, it)
+	}
+	req["input"] = out
+	// 跨厂商续接:剥离了推理 + 带工具往返 → 强制 effort=none
+	// (DeepSeek 校验:thinking 模式 + 工具往返必须回带 reasoning_text,否则 400)
+	if stripped && hasToolRounds {
+		req["reasoning"] = map[string]any{"effort": "none"}
+	}
+	res, err := json.Marshal(req)
+	if err != nil {
+		return body, stripped
+	}
+	return res, stripped
+}
+
 // handleAllFailed 所有 failover 都失败
 func (e *Engine) handleAllFailed(
 	c *gin.Context,
@@ -814,6 +894,9 @@ func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *pr
 		return
 	}
 	if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
+		// P-empty200: 非重试错误也要写响应 — 之前静默 return,客户端收到
+		// 200 + 空 body/空流(Codex 报 "stream closed before response.completed")
+		e.handleAllFailed(c, req, *outLastErr, req.TraceID)
 		return
 	}
 
@@ -831,6 +914,7 @@ func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *pr
 			return
 		}
 		if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
+			e.handleAllFailed(c, req, *outLastErr, req.TraceID)
 			return
 		}
 	}
