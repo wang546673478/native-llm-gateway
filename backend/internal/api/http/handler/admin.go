@@ -395,9 +395,18 @@ func (a *Admin) modelProviders(c *gin.Context) {
 	})
 }
 
+// poolStatuses 汇总所有 key pool 状态(dashboard keypools)。
+// P-provider-vendor: Pools map 按注册名建 key,同 vendor 共享同一 pool 指针 —
+// 必须按 pool 去重,否则同一个池输出两次(两个 deepseek + 两个 minimax),
+// QuotaKnownSum 翻倍。与 quotacheck pollAllBalancers 的 seen 去重同一不变量。
 func poolStatuses(pools map[string]*keypool.Pool) []keypool.PoolStatus {
+	seen := make(map[*keypool.Pool]bool, len(pools))
 	out := make([]keypool.PoolStatus, 0, len(pools))
 	for _, p := range pools {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
 		out = append(out, p.Status())
 	}
 	return out

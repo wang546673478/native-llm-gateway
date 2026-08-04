@@ -144,3 +144,44 @@ func TestListProviders_VendorAggregation(t *testing.T) {
 		t.Errorf("key_pool = %+v, want 共享 pool(vendor=deepseek, 2 keys)", ds.KeyPool)
 	}
 }
+
+// TestPoolStatuses_DedupSharedPools P-provider-vendor:
+// Pools map 按注册名建 key,同 vendor 共享同一 pool 指针 — poolStatuses 必须按
+// pool 去重,否则 dashboard 的 keypools 同一个池出现两次(两个 deepseek + 两个
+// minimax),QuotaKnownSum 翻倍统计
+func TestPoolStatuses_DedupSharedPools(t *testing.T) {
+	now := time.Now()
+	mkKey := func(id, name string) *keypool.Key {
+		return &keypool.Key{
+			ID: id, ProviderName: "deepseek", Name: name,
+			Status: keypool.KeyStatusActive, BillingSource: "api",
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	shared := keypool.NewPool("deepseek", []*keypool.Key{
+		mkKey("1", "k1"), mkKey("2", "k2"),
+	}, nil, keypool.Config{})
+	qwen := keypool.NewPool("qwen", nil, nil, keypool.Config{})
+
+	statuses := poolStatuses(map[string]*keypool.Pool{
+		"deepseek":           shared,
+		"deepseek-anthropic": shared,
+		"qwen":               qwen,
+	})
+
+	if len(statuses) != 2 {
+		t.Fatalf("len(statuses) = %d, want 2 (按 pool 去重,同 vendor 只出现一次)", len(statuses))
+	}
+	seen := make(map[string]bool, len(statuses))
+	for _, s := range statuses {
+		if seen[s.ProviderName] {
+			t.Errorf("duplicate provider_name %q in poolStatuses", s.ProviderName)
+		}
+		seen[s.ProviderName] = true
+	}
+	for _, s := range statuses {
+		if s.ProviderName == "deepseek" && s.TotalKeys != 2 {
+			t.Errorf("deepseek total_keys = %d, want 2", s.TotalKeys)
+		}
+	}
+}
