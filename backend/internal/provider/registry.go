@@ -28,12 +28,19 @@ type ProviderConfig struct {
 	OpenTimeout      time.Duration
 }
 
+// RegisteredInfo 单个注册名的注册元数据(vendor 用于前端按厂商聚合)
+type RegisteredInfo struct {
+	Protocol Protocol
+	Vendor   string
+}
+
 // Registry 维护 name → Factory + Protocol 的映射
 // 每个 Provider 包在 init() 时调用 Register 注册自己
 type Registry struct {
 	mu        sync.RWMutex
 	factories map[string]Factory
 	protocols map[string]Protocol // 用于前端显示绑定选项,即使 provider 未启用
+	vendors   map[string]string   // P-provider-vendor: name → vendor(默认 = name)
 }
 
 // NewRegistry 构造空 Registry
@@ -41,6 +48,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		factories: make(map[string]Factory),
 		protocols: make(map[string]Protocol),
+		vendors:   make(map[string]string),
 	}
 }
 
@@ -63,6 +71,11 @@ func RegisterGlobalWithProtocol(name string, factory Factory, proto Protocol) {
 	defaultRegistry.RegisterWithProtocol(name, factory, proto)
 }
 
+// RegisterGlobalWithProtocolVendor 注册时同时记录 protocol 和 vendor 元数据
+func RegisterGlobalWithProtocolVendor(name string, factory Factory, proto Protocol, vendor string) {
+	defaultRegistry.RegisterWithProtocolVendor(name, factory, proto, vendor)
+}
+
 // Register 注册一个 Provider factory
 // name 必须唯一;重复注册会 panic,因为这是编程错误
 func (r *Registry) Register(name string, factory Factory) {
@@ -76,6 +89,12 @@ func (r *Registry) Register(name string, factory Factory) {
 
 // RegisterWithProtocol 同 Register,但额外记录 protocol 元数据
 func (r *Registry) RegisterWithProtocol(name string, factory Factory, proto Protocol) {
+	r.RegisterWithProtocolVendor(name, factory, proto, name)
+}
+
+// RegisterWithProtocolVendor 同 RegisterWithProtocol,但额外记录 vendor 元数据
+// vendor 为空时默认 = name(单协议厂商)
+func (r *Registry) RegisterWithProtocolVendor(name string, factory Factory, proto Protocol, vendor string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.factories[name]; exists {
@@ -83,6 +102,34 @@ func (r *Registry) RegisterWithProtocol(name string, factory Factory, proto Prot
 	}
 	r.factories[name] = factory
 	r.protocols[name] = proto
+	if vendor == "" {
+		vendor = name
+	}
+	r.vendors[name] = vendor
+}
+
+// VendorFor 查询注册名的 vendor;未注册或未声明时返回 name 本身
+func (r *Registry) VendorFor(name string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if v, ok := r.vendors[name]; ok {
+		return v
+	}
+	return name
+}
+
+// ListRegisteredInfo 返回所有已注册 name 的注册元数据
+func (r *Registry) ListRegisteredInfo() map[string]RegisteredInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]RegisteredInfo, len(r.factories))
+	for n := range r.factories {
+		out[n] = RegisteredInfo{
+			Protocol: r.protocols[n],
+			Vendor:   r.vendors[n],
+		}
+	}
+	return out
 }
 
 // ListRegisteredProtocols 返回所有已注册 provider 的 protocol
