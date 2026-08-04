@@ -1,4 +1,4 @@
-// Package minimax 实现 MiniMax(MiniMax 稀宇科技)Provider
+// Package minimax 实现 MiniMax(MiniMax 稀宇科技)Provider(Anthropic + OpenAI 两种协议)
 //
 // 官方文档:https://platform.minimaxi.com/docs/api-reference/api-overview
 //
@@ -93,7 +93,10 @@ func (p *Provider) SetPool(pool *keypool.Pool) {
 
 func (p *Provider) Close() error { return p.base.Close() }
 
-func init() { provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolAnthropic) }
+func init() {
+	provider.RegisterGlobalWithProtocolVendor(name, New, provider.ProtocolAnthropic, name)
+	provider.RegisterGlobalWithProtocolVendor(openaiName, NewOpenAI, provider.ProtocolOpenAI, name)
+}
 
 // toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
 func toPool(p interface{}) *keypool.Pool {
@@ -105,3 +108,15 @@ func toPool(p interface{}) *keypool.Pool {
 	}
 	return nil
 }
+
+// P-provider-vendor: openai 协议实现在 openai.go(注册名 "minimax-openai")。
+// 官方文档特性(2026-08-04 全量调研,Anthropic 面):
+//   - thinking:仅 disabled / adaptive(MiniMax 扩展);M3 默认关闭(省略 = disabled);
+//     M2.x 系列 thinking 恒开不可关
+//   - 响应 content 块含 thinking(文本 + signature);多轮必须原样回带 thinking 块(含 signature)
+//   - service_tier:standard | priority(1.5x 价,优先准入);standard Anthropic SDK 可能不识别
+//   - 缓存:主动缓存(cache_control 断点,5min TTL,最多 4 断点/20 块回溯)支持 M2.x 但不支持 M3;
+//     usage.cache_creation_input_tokens / cache_read_input_tokens(message_start 即返回)
+//   - tool_choice 仅 auto / none;top_k / stop_sequences / mcp_servers 静默忽略
+//   - 无官方余额查询 API — 本包 balancer 用未文档化端点 www.minimaxi.com/v1/token_plan/remains
+//   - 错误:HTTP 状态码 + body {type:"error", error:{type,message}};余额不足 1008 / 超套餐 2056 走 base_resp

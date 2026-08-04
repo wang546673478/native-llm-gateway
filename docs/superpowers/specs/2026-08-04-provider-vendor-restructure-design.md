@@ -116,19 +116,17 @@ deepseek/                  minimax/
 启动迁移函数(放在现有 AutoMigrate 之后):
 
 ```sql
--- 1. 协议变体并入厂商名,并标协议
+-- 协议变体并入厂商名,并标协议
 UPDATE provider_api_keys SET provider_name='deepseek', protocols='anthropic'
   WHERE provider_name='deepseek-anthropic';
 UPDATE provider_api_keys SET provider_name='minimax', protocols='openai'
   WHERE provider_name='minimax-openai';
--- 2. 现有厂商主条目标协议(保留原语义:deepseek 的 key 原仅用于 openai)
-UPDATE provider_api_keys SET protocols='openai'    WHERE provider_name='deepseek' AND protocols='';
-UPDATE provider_api_keys SET protocols='anthropic' WHERE provider_name='minimax'  AND protocols='';
 ```
 
-- 幂等:条件限定 `protocols=''` 与具体 provider_name,重复执行无副作用
+- **只迁移变体注册名**(deepseek-anthropic / minimax-openai),不碰主条目:主条目的旧 key 保持 protocols 为空 = 全部协议(物理上同一 key 两端点通用;且避免每次重启把用户后来新加的全协议 key 覆盖成单协议 — 2026-08-04 用户裁决)
+- 幂等:变体行迁移后不再存在,重复执行影响 0 行,无副作用
 - glm/kimi 的 key 行**不迁移**(包已删,行保留无害)
-- 迁移后 `deepseek` 池内可能同一把 key 两行(一行 openai 一行 anthropic)— 不去重,行为正确(各自标协议),用户可在 UI 调整
+- 迁移后 `deepseek` 池内可能同一把 key 两行(主条目一行空、变体行标 anthropic)— 不去重,行为正确,用户可在 UI 调整
 
 ### 4.3 key pool 共享(厂商级一个池)
 
