@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
 // generateGatewayKey 生成一个形如 gw-XXXXXX... 的随机密钥(48 hex 字符 = 24 字节熵)
@@ -236,7 +237,7 @@ func (h *KeysHandler) create(c *gin.Context) {
 	k := &dbpkg.GatewayKey{
 		Name:           req.Name,
 		KeyHash:        issuedKey, // DB 存原值(hash 化留给中间件;这里只是命名沿用)
-		Providers:      serializeProviders(req.Providers),
+		Providers:      serializeProviders(normalizeProviderBindings(req.Providers)),
 		ProviderKeyIDs: serializeProviderKeyIDs(req.ProviderKeyIDs),
 		AllowedModels:  serializeAllowedModels(models),
 		DefaultModel:   req.DefaultModel,
@@ -272,7 +273,7 @@ func (h *KeysHandler) update(c *gin.Context) {
 
 	// Key 一旦签发就不再允许通过 update 改(只能删了重建)
 	// Providers / ProviderKeyIDs / AllowedModels / RPM / TPM / Enabled 仍然可调
-	existing.Providers = serializeProviders(req.Providers)
+	existing.Providers = serializeProviders(normalizeProviderBindings(req.Providers))
 	// ProviderKeyIDs 可显式置空(传 nil 或 [] → "[]")
 	existing.ProviderKeyIDs = serializeProviderKeyIDs(req.ProviderKeyIDs)
 	if req.AllowedModels != nil {
@@ -353,6 +354,26 @@ func parseAllowedModels(s string) []string {
 	}
 	if out == nil {
 		return []string{"*"}
+	}
+	return out
+}
+
+// normalizeProviderBindings P-provider-vendor: 绑定 provider 统一存厂商名。
+// 路由侧 CheckProvider 已按 vendor 归一比较,存注册名与厂商名等价;
+// 统一存厂商名让 UI 只展示厂商,避免深挖注册名(deepseek-anthropic 之类)
+func normalizeProviderBindings(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, p := range in {
+		v := provider.Default().VendorFor(p)
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
 	}
 	return out
 }

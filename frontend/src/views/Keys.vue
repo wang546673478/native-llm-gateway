@@ -198,6 +198,9 @@ interface KeyView {
 const keys = ref<KeyView[]>([])
 const providers = ref<ProviderInfo[]>([])
 const providerKeysMap = ref<Record<string, ProviderKeyView[]>>({}) // P34: provider_name → ProviderKey[]
+// P-provider-vendor: 注册名(deepseek-anthropic)→ 厂商(deepseek)映射 —
+// 编辑/展示旧数据(绑定仍存注册名)时归一,保存后后端统一存厂商名
+const regToVendor = ref<Record<string, string>>({})
 const loading = ref(false)
 const saving = ref(false)
 const modalVisible = ref(false)
@@ -299,16 +302,23 @@ async function load() {
   loading.value = true
   try {
     // 1. 拿 keys + providers
-    const [keysResp, regResp] = await Promise.all([
+    // P-provider-vendor: 绑定 Provider 按厂商 — 用 /providers(vendor 聚合)
+    // 而非 /providers/registered(注册名);同时建注册名→厂商映射供旧数据归一
+    const [keysResp, provResp] = await Promise.all([
       axios.get('/api/v1/keys'),
-      axios.get('/api/v1/providers/registered'),
+      axios.get('/api/v1/providers'),
     ])
     keys.value = keysResp.data.keys
-    providers.value = (regResp.data.providers ?? []).map((p: any) => ({
-      name: p.name,
-      protocol: p.protocol,
+    const vendors: any[] = provResp.data.vendors ?? []
+    regToVendor.value = {}
+    for (const v of vendors) {
+      for (const n of v.names ?? []) regToVendor.value[n.name] = v.vendor
+    }
+    providers.value = vendors.map((v: any) => ({
+      name: v.vendor,
+      protocol: v.names?.[0]?.protocol ?? '',
       loaded: true,
-      models: p.models ?? [],
+      models: v.models ?? [],
     }))
 
     // 2. 拿所有 provider 的 keys(P34: 用于 ProviderKey 下拉)
@@ -350,7 +360,9 @@ function openEdit(row: KeyView) {
   editing.value = true
   form.value = {
     name: row.name,
-    providers: [...row.providers],
+    // P-provider-vendor: 旧数据可能存了注册名(deepseek-anthropic),映射回厂商
+    // 使下拉能选中;保存时后端再统一归一为厂商名
+    providers: row.providers.map(p => regToVendor.value[p] ?? p),
     provider_key_ids: [...(row.provider_key_ids ?? [])],
     allowed_models: row.allowed_models.length > 0 ? [...row.allowed_models] : ['*'],
     default_model: row.default_model ?? '',
@@ -478,8 +490,9 @@ const columns: DataTableColumns<KeyView> = [
       if (!row.providers || row.providers.length === 0) {
         return h('span', { style: 'color: #999' }, '任意')
       }
+      // P-provider-vendor: 旧数据存注册名,展示归一为厂商
       return h('span', {}, row.providers.map((p, i) =>
-        h('span', { key: i, style: 'color: #2080f0; margin-right: 4px' }, `🔒 ${p}`)
+        h('span', { key: i, style: 'color: #2080f0; margin-right: 4px' }, `🔒 ${regToVendor.value[p] ?? p}`)
       ))
     },
   },

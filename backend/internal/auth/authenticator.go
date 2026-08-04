@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
 // GatewayKey 是客户端可以使用的 Gateway 凭证
@@ -56,7 +58,9 @@ var (
 
 // CheckProvider 验证 key 是否能用指定 provider
 // 当 key.Providers 为空时,允许任意 provider(返回 nil)
-// 否则只允许 providerName 在 key.Providers 里
+// P-provider-vendor: 比较按 vendor 归一 — key 绑 "deepseek" 时,路由到
+// "deepseek"(openai 面)或 "deepseek-anthropic"(anthropic 面)都通过;
+// 旧数据绑的注册名("deepseek-anthropic")同样匹配,无需迁移
 func (a *Authenticator) CheckProvider(key *GatewayKey, providerName string) error {
 	if key == nil {
 		return ErrUnknownKey
@@ -64,8 +68,9 @@ func (a *Authenticator) CheckProvider(key *GatewayKey, providerName string) erro
 	if len(key.Providers) == 0 {
 		return nil // 未绑定,任意 provider 都行
 	}
+	target := provider.Default().VendorFor(providerName)
 	for _, p := range key.Providers {
-		if p == providerName {
+		if provider.Default().VendorFor(p) == target {
 			return nil
 		}
 	}
