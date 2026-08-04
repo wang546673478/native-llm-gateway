@@ -60,6 +60,30 @@
         :pagination="false"
       />
     </n-card>
+
+    <!-- P-quota-balance: spec §6.2 — "Pool 列表里每行显示 QuotaKnownSum
+         (整池可用额度粗略值)". 复用 keypools 数据,展示每池已 poll key
+         的 Remaining 之和(CNY,toFixed(2)). -->
+    <n-card title="整池可用额度 (QuotaKnownSum)" style="margin-top: 16px">
+      <n-grid :cols="3" :x-gap="16" :y-gap="16">
+        <n-gi v-for="row in data?.keypools ?? []" :key="row.provider_name">
+          <div class="bs-card">
+            <div class="bs-label">
+              <span class="bs-tag">{{ row.provider_name }}</span>
+              <span class="bs-desc">
+                {{ row.quota_polled_keys }} / {{ row.total_keys }} keys polled
+              </span>
+            </div>
+            <div class="bs-stats">
+              <div class="bs-row big">
+                <span class="bs-key">可用额度</span>
+                <span class="bs-val">¥{{ row.quota_known_sum.toFixed(2) }}</span>
+              </div>
+            </div>
+          </div>
+        </n-gi>
+      </n-grid>
+    </n-card>
   </n-spin>
 </template>
 

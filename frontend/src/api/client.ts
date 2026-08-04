@@ -164,6 +164,10 @@ export interface DashboardResp {
     active_keys: number
     cooling_keys: number
     disabled_keys: number
+    // P-quota-balance: 上游 quota polling 聚合 — spec §6.2 dashboard
+    // "Pool 列表里每行显示 QuotaKnownSum"
+    quota_polled_keys: number
+    quota_known_sum: number
   }>
 }
 
