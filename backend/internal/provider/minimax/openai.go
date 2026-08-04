@@ -35,6 +35,9 @@ import (
 const (
 	openaiName     = "minimax-openai"
 	openaiChatPath = "/chat/completions" // base 已含 /v1,不要再拼
+	// P-responses: endpoint 已含 /v1(https://api.minimaxi.com/v1)→ 透传 /responses
+	// 不拼 /v1,否则双前缀。MiniMax 官方原生支持 Responses API(Codex)
+	openaiResponsesPath = "/responses"
 )
 
 // OpenAIProvider OpenAI 兼容 Provider
@@ -54,12 +57,13 @@ func NewOpenAI(cfg provider.ProviderConfig) (provider.Provider, error) {
 	}
 	return &OpenAIProvider{
 		base: openai_compatible.NewBase(openai_compatible.Config{
-			Name:        openaiName,
-			Endpoint:    cfg.Endpoint,
-			Timeout:     cfg.Timeout,
-			ChatPath:    openaiChatPath,
-			StreamUsage: true, // MiniMax 支持 stream_options.include_usage
-			Pool:        toPool(cfg.Pool),
+			Name:          openaiName,
+			Endpoint:      cfg.Endpoint,
+			Timeout:       cfg.Timeout,
+			ChatPath:      openaiChatPath,
+			ResponsesPath: openaiResponsesPath, // P-responses
+			StreamUsage:   true,                // MiniMax 支持 stream_options.include_usage
+			Pool:          toPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil

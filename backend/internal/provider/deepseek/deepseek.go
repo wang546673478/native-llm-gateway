@@ -72,8 +72,10 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Endpoint:    cfg.Endpoint,
 			Timeout:     cfg.Timeout,
 			ChatPath:    ChatPath, // DeepSeek 关键差异:无 /v1 前缀
-			StreamUsage: true,     // 让流式末尾带 usage,便于 Gateway 端记账
-			Pool:        toPool(cfg.Pool),
+			// P-responses: endpoint 无 /v1 → 透传 /v1/responses(官方原生支持,Codex 兼容)
+			ResponsesPath: "/v1/responses",
+			StreamUsage:   true, // 让流式末尾带 usage,便于 Gateway 端记账
+			Pool:          toPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil

@@ -318,6 +318,8 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 			BillingSource: defaultBillingSource(p.BillingSource),
 			// P-catch-all: 默认模型 — 热重载时同步
 			DefaultModel: p.DefaultModel,
+			// P-responses: Responses API 能力 — 热重载时同步
+			ResponsesAPI: p.ResponsesAPI,
 		}
 	}
 	return mcfg
@@ -606,6 +608,10 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	r.POST("/v1/chat/completions", proxyHandlers...)
 	r.POST("/v1/messages", proxyHandlers...)
 	r.POST("/v1/completions", proxyHandlers...)
+	// P-responses: OpenAI Responses API(Codex 客户端;Codex 的 base_url 直接
+	// 打 /responses,不带 /v1 前缀,所以要注册两个路径)
+	r.POST("/responses", proxyHandlers...)
+	r.POST("/v1/responses", proxyHandlers...)
 	// 流式请求也走 HandleRequest,Engine 内部从 body.stream 判断
 	// 没匹配到的路径兜底(例如 /v1/embeddings 之类)
 	r.NoRoute(func(c *gin.Context) {

@@ -716,3 +716,63 @@ func TestRouteIterator_NextExhaustsTierBeforeRolling(t *testing.T) {
 		t.Errorf("expected a (candidates 第一个), got %s", res.ProviderName)
 	}
 }
+
+// TestRouter_CatchAllAuto_ResponsesFilter P-responses:
+// /responses 透传只走原生支持 Responses API 的 provider(manager 标记),
+// 不支持的 provider(qwen)不参与 — 避免 404 model_not_found 中断 failover
+func TestRouter_CatchAllAuto_ResponsesFilter(t *testing.T) {
+	now := time.Now()
+	mkPool := func() *keypool.Pool {
+		return keypool.NewPool("p", []*keypool.Key{{
+			ID: "1", ProviderName: "p", Name: "k1", Key: "sk",
+			Status: keypool.KeyStatusActive, BillingSource: "api",
+			CreatedAt: now, UpdatedAt: now,
+		}}, nil, keypool.Config{})
+	}
+
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "deepseek", proto: provider.ProtocolOpenAI, models: []string{"deepseek-v4-flash"}},
+		&fakeProvider{name: "qwen", proto: provider.ProtocolOpenAI, models: []string{"qwen-plus"}},
+	)
+	// 标记能力:deepseek 支持,qwen 不支持
+	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
+		Providers: map[string]provider.ManagerProviderConfig{
+			"deepseek": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"deepseek-v4-flash"}, APIKeys: []string{"sk"}, ResponsesAPI: true},
+			"qwen":     {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"qwen-plus"}, APIKeys: []string{"sk"}},
+		},
+	}); err != nil {
+		t.Fatalf("LoadFromConfig: %v", err)
+	}
+	r := NewRouter(zap.NewNop(), mgr, map[string]*keypool.Pool{
+		"deepseek": mkPool(),
+		"qwen":     mkPool(),
+	}, Config{Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"}})
+
+	// /responses 请求:只有 deepseek 参与
+	it, err := r.Route(context.Background(),
+		&provider.Request{Model: "gpt-5-codex", Path: "/responses"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "deepseek" {
+		t.Errorf("responses chain = %s, want deepseek(qwen 不支持应被过滤)", res.ProviderName)
+	}
+	// 第二个候选也没有 qwen
+	if _, err := it.Next(); err == nil {
+		t.Error("expected no more candidates(qwen 被过滤)")
+	}
+
+	// chat/completions 请求:两个都参与
+	it2, err := r.Route(context.Background(),
+		&provider.Request{Model: "x", Path: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatalf("Route chat: %v", err)
+	}
+	if _, err := it2.Next(); err != nil {
+		t.Errorf("chat chain should have candidates: %v", err)
+	}
+}

@@ -151,12 +151,19 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 // AcquireFromTier 自然跳过。加新 provider + key 即自动进链 — 无路由表可维护
 func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
 	reqProto := detectProtocol(req.Path)
+	isResponses := reqProto == provider.ProtocolOpenAI && strings.HasSuffix(strings.ToLower(req.Path), "/responses")
 	var routes []ProviderRoute
 	for name, p := range r.manager.GetAll() {
 		if reqProto != "" && p.Protocol() != reqProto {
 			continue
 		}
 		if r.healthStatus[name] {
+			continue
+		}
+		// P-responses: /responses 透传只走原生支持 Responses API 的 provider
+		// (DeepSeek / MiniMax;Qwen / Gemini 不支持,硬发会 400/404 且
+		// 404 归类 model_not_found 非 retryable,会中断 failover)
+		if isResponses && !r.manager.SupportsResponsesAPI(name) {
 			continue
 		}
 		model := r.manager.DefaultModelFor(name)
@@ -320,6 +327,8 @@ func detectProtocol(path string) provider.Protocol {
 	case strings.Contains(p, "/v1/messages"):
 		return provider.ProtocolAnthropic
 	case strings.Contains(p, "/chat/completions"):
+		return provider.ProtocolOpenAI
+	case strings.Contains(p, "/responses"): // P-responses: OpenAI Responses API(Codex)
 		return provider.ProtocolOpenAI
 	case strings.Contains(p, ":generatecontent") || strings.Contains(p, "/v1beta/models"):
 		return provider.ProtocolGoogle

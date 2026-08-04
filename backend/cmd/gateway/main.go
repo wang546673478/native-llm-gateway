@@ -176,6 +176,8 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 			BillingSource: defaultStr(p.BillingSource, "api"),
 			// P-catch-all: 默认模型(catch_all 自动模式用)
 			DefaultModel: p.DefaultModel,
+			// P-responses: Responses API 能力(/v1/responses 透传)
+			ResponsesAPI: p.ResponsesAPI,
 			Circuit: provider.ManagerCircuitConfig{
 				FailureThreshold: p.CircuitBreaker.FailureThreshold,
 				FailureWindow:    p.CircuitBreaker.FailureWindow,

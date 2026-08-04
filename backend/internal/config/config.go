@@ -110,6 +110,10 @@ type Provider struct {
 	// 该 provider 用哪个模型承接未知模型名的请求。
 	// 空 = 取 models 列表第一个声明。其他路由路径不涉及此字段
 	DefaultModel string `mapstructure:"default_model"`
+	// ResponsesAPI P-responses: 原生支持 OpenAI Responses API(/v1/responses)。
+	// true 的 provider 才会收到 Codex 等客户端的 /responses 透传请求
+	// (DeepSeek / MiniMax 官方支持;Qwen / Gemini 等不支持)
+	ResponsesAPI bool `mapstructure:"responses_api"`
 	// BillingSource 计费来源(P47)
 	//   - "token_plan": 包月套餐(如 minimax token plan),优先路由,quota 用完自动 failover
 	//   - "api":        按 token 计费(deepseek/openai/anthropic 等)— 默认

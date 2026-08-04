@@ -35,6 +35,8 @@ type ManagerProviderConfig struct {
 	// P-catch-all: catch_all 自动模式下该 provider 承接未知模型名的默认模型。
 	// 空 = 取 Models 第一个
 	DefaultModel string
+	// P-responses: 原生支持 OpenAI Responses API(/v1/responses 透传)
+	ResponsesAPI bool
 }
 
 // ModelCost 单个 model 的定价
@@ -74,6 +76,9 @@ type Manager struct {
 	// P-catch-all: provider name → 默认模型(catch_all 自动模式用)。
 	// LoadFromConfig / ReloadPricing 时填充;热重载同步
 	defaultModels map[string]string
+	// P-responses: provider name → 是否原生支持 Responses API(/v1/responses)
+	// LoadFromConfig / ReloadPricing 时填充
+	responsesAPI map[string]bool
 }
 
 // NewManager 构造 Manager
@@ -85,6 +90,7 @@ func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 		pricing:        make(map[string]ModelCost),
 		billingSources: make(map[string]string),
 		defaultModels:  make(map[string]string),
+		responsesAPI:   make(map[string]bool),
 	}
 }
 
@@ -130,6 +136,8 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			dm = pcfg.Models[0]
 		}
 		m.defaultModels[name] = dm
+		// P-responses: Responses API 能力标记
+		m.responsesAPI[name] = pcfg.ResponsesAPI
 
 		p, err := m.registry.Create(name, factoryCfg)
 		if err != nil {
@@ -271,8 +279,18 @@ func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 			dm = pcfg.Models[0]
 		}
 		m.defaultModels[name] = dm
+		// P-responses: 能力标记同频热重载
+		m.responsesAPI[name] = pcfg.ResponsesAPI
 	}
 	m.logger.Info("pricing reloaded", zap.Int("entries", len(m.pricing)))
+}
+
+// SupportsResponsesAPI P-responses: 该 provider 是否原生支持 OpenAI
+// Responses API(/v1/responses 透传,Codex 客户端)
+func (m *Manager) SupportsResponsesAPI(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.responsesAPI[name]
 }
 
 // DefaultModelFor P-catch-all: 返回 provider 承接未知模型名的默认模型

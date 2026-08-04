@@ -28,6 +28,11 @@ type Config struct {
 	// ChatPath 是 chat completions 端点的路径,默认 /v1/chat/completions
 	// DeepSeek 用 /chat/completions(无 /v1 前缀);其他 OpenAI 兼容家族都用默认
 	ChatPath string
+	// ResponsesPath 是 OpenAI Responses API 端点的路径(/v1/responses 透传,
+	// Codex 客户端)。默认 /v1/responses;endpoint 已含 /v1 的 provider
+	// (如 minimax-openai 的 https://api.minimaxi.com/v1)覆盖为 /responses。
+	// 不支持 Responses API 的 provider(ResponsesAPI=false)不会收到此类请求
+	ResponsesPath string
 	// ModelsOverride 若非空,覆盖 cfg.Models(用于 DeepSeek v4 时代)
 	ModelsOverride []string
 	// StreamUsage 控制是否在流式请求里加 stream_options.include_usage=true
@@ -52,6 +57,9 @@ func NewBase(cfg Config) *Base {
 	if cfg.ChatPath == "" {
 		cfg.ChatPath = "/v1/chat/completions"
 	}
+	if cfg.ResponsesPath == "" {
+		cfg.ResponsesPath = "/v1/responses"
+	}
 	// 默认开启 stream_options.include_usage:让流式响应最后一个 chunk 带 usage,
 	// Gateway 才能正确计费。OpenAI 兼容家族(DeepSeek/Qwen/Kimi/GLM)都支持。
 	cfg.StreamUsage = true
@@ -61,12 +69,24 @@ func NewBase(cfg Config) *Base {
 	}
 }
 
+// upstreamPath P-responses: 按客户端请求路径选上游端点路径。
+//   - /responses、/v1/responses(Codex)→ {endpoint}{ResponsesPath},body 原样透传
+//     (DeepSeek / MiniMax 官方原生支持 Responses API)
+//   - 其他 → ChatPath(chat/completions)
+func (b *Base) upstreamPath(req *provider.Request) string {
+	p := strings.ToLower(req.Path)
+	if strings.HasSuffix(p, "/responses") {
+		return b.cfg.ResponsesPath
+	}
+	return b.cfg.ChatPath
+}
+
 // Name / Protocol / Models 由 wrapper 提供
 // 这里把方法放在 wrapper 中,Base 只提供 HTTP 调用
 
 // SendRequest 发送非流式请求
 //  1. 从 Pool 取 Key
-//  2. POST 到 {endpoint}{ChatPath}
+//  2. POST 到 {endpoint}{ChatPath}(Responses API 请求走 ResponsesPath 透传)
 //  3. Authorization: Bearer {key}
 //  4. body 原样透传
 //  5. 解析 OpenAI 格式响应,提取 Usage
@@ -88,7 +108,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+b.cfg.ChatPath,
+		strings.TrimRight(b.cfg.Endpoint, "/")+b.upstreamPath(req),
 		bytes.NewReader(req.Body))
 	if err != nil {
 		return nil, &provider.ProviderError{
@@ -208,8 +228,10 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	}
 
 	// 启用 StreamUsage 时,自动注入 stream_options.include_usage
+	// (Responses API 透传不注入 — 该字段是 chat.completions 专有,
+	// usage 在 response.completed 事件里自带)
 	streamBody := req.Body
-	if b.cfg.StreamUsage {
+	if b.cfg.StreamUsage && !strings.HasSuffix(strings.ToLower(req.Path), "/responses") {
 		streamBody = injectStreamUsage(streamBody)
 	}
 
@@ -225,7 +247,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	client := &http.Client{Timeout: streamTimeout}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+b.cfg.ChatPath,
+		strings.TrimRight(b.cfg.Endpoint, "/")+b.upstreamPath(req),
 		bytes.NewReader(streamBody))
 	if err != nil {
 		return nil, nil, &provider.ProviderError{
