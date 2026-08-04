@@ -200,8 +200,8 @@ export const api = {
         name: string
         protocol: string
         models: string[]
-        key_pool?: KeyPoolStatus
-        circuit_breaker?: CircuitBreakerInfo
+        key_pool?: KeyPoolStatus | null
+        circuit_breaker?: CircuitBreakerInfo | null
       }>(`/providers/${name}`)
       .then(r => r.data),
   routing: () => client.get<RoutingResp>('/routing').then(r => r.data),

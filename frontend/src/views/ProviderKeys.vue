@@ -110,8 +110,7 @@ const message = useMessage()
 
 const form = ref({
   // P-provider-vendor: 提交目标 = 选中 vendor 的第一个注册名(pool 共享,任意协议面可写)
-  provider_name: '',
-  // P-provider-vendor: 新增 — 厂商 + 勾选的协议(空数组 = 全部)
+  // (vendor/protocols 两级选择,provider_name 由 targetProviderName computed 推导,不落表单)
   vendor: '',
   protocols: [] as string[],
   name: '',
@@ -311,7 +310,6 @@ async function load() {
 function openCreate() {
   editing.value = false
   form.value = {
-    provider_name: targetProviderName.value,
     vendor: providers.value[0]?.vendor ?? '',
     protocols: providers.value[0]?.names.map(n => n.protocol) ?? [],
     name: '',
