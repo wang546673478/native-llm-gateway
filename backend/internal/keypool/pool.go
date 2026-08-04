@@ -4,6 +4,7 @@ package keypool
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -142,6 +143,14 @@ func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}) (*Ke
 	}
 	if len(usable) == 0 {
 		return nil, ErrNoAvailableKey
+	}
+
+	// P-quota-balance: token_plan tier 在进入 tier 过滤前按 Remaining 降序稳定排序
+	// 稳定排序保证 Remaining 相等时仍维持 RoundRobin 原始顺序
+	if tier == "token_plan" {
+		sort.SliceStable(usable, func(i, j int) bool {
+			return usable[i].Remaining > usable[j].Remaining
+		})
 	}
 
 	// 3. P64: 只从指定 tier 桶里挑,不再做 tier 降级

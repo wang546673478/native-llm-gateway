@@ -421,3 +421,81 @@ func TestKey_RemainingAndLastPolledAt_DefaultZero(t *testing.T) {
 		t.Errorf("LastPolledAt default = %v, want zero", k.LastPolledAt)
 	}
 }
+
+// P-quota-balance: token_plan tier 在 tier 过滤前按 Remaining DESC 稳定排序
+func TestAcquireFromTier_TokenPlanSortsByRemainingDesc(t *testing.T) {
+	// 3 个 token_plan key,Remaining 不同 — 应按 Remaining 降序返回第一个
+	now := time.Now()
+	mk := func(id string, remaining float64) *Key {
+		return &Key{
+			ID: id, ProviderName: "test", Name: id, Key: "sk",
+			Status: KeyStatusActive, BillingSource: "token_plan",
+			Remaining: remaining,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	keys := []*Key{mk("k-low", 0.3), mk("k-high", 12.5), mk("k-mid", 8.0)}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	k, err := pool.AcquireFromTier("token_plan", nil)
+	if err != nil {
+		t.Fatalf("AcquireFromTier: %v", err)
+	}
+	if k.ID != "k-high" {
+		t.Errorf("got %q, want k-high (Remaining=12.5)", k.ID)
+	}
+}
+
+func TestAcquireFromTier_TokenPlanStableWhenEqualRemaining(t *testing.T) {
+	// 相同 Remaining 时,稳定排序保留输入顺序 — round-robin 计数器会随后接管
+	now := time.Now()
+	mk := func(id string) *Key {
+		return &Key{
+			ID: id, ProviderName: "test", Name: id, Key: "sk",
+			Status: KeyStatusActive, BillingSource: "token_plan",
+			Remaining: 1.0,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	keys := []*Key{mk("first"), mk("second"), mk("third")}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	// 三次取 key 应该是 first, second, third(稳定排序保留相对顺序)
+	want := []string{"first", "second", "third"}
+	for i, w := range want {
+		k, err := pool.AcquireFromTier("token_plan", nil)
+		if err != nil {
+			t.Fatalf("AcquireFromTier #%d: %v", i, err)
+		}
+		if k.ID != w {
+			t.Errorf("call %d: got %q, want %q", i, k.ID, w)
+		}
+	}
+}
+
+func TestAcquireFromTier_ApiTierNotSorted(t *testing.T) {
+	// api tier 走原调度顺序,不应被 Remaining 排序影响
+	// 验证:即使 Remaining 倒着排,AcquireFromTier("api") 仍按 RoundRobin 原序
+	now := time.Now()
+	mk := func(id string, remaining float64) *Key {
+		return &Key{
+			ID: id, ProviderName: "test", Name: id, Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api",
+			Remaining: remaining,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	// 按 Remaining 倒序构造,期待 RoundRobin 仍按输入顺序轮询
+	keys := []*Key{mk("a", 100), mk("b", 50), mk("c", 1)}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	for _, want := range []string{"a", "b", "c", "a"} {
+		k, err := pool.AcquireFromTier("api", nil)
+		if err != nil {
+			t.Fatalf("AcquireFromTier(api): %v", err)
+		}
+		if k.ID != want {
+			t.Errorf("got %q, want %q", k.ID, want)
+		}
+	}
+}
