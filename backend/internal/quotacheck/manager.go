@@ -463,7 +463,7 @@ func (m *Manager) runProbe(ctx context.Context, it *probeItem) {
 		baseURL := m.prov.EndpointFor(it.keyProvider)
 		bal, err := balancer.FetchBalance(ctx, baseURL, k)
 		if err != nil {
-			m.logger.Debug("balance fetch err", zap.String("provider", it.keyProvider), zap.Error(err))
+			m.logger.Warn("balance fetch err", zap.String("provider", it.keyProvider), zap.Error(err))
 			m.metricsPollInc(it.keyProvider, "transport_error")
 			m.handleProbeResult(it.keyProvider, it.keyID, ResultTransportError)
 			return
@@ -578,7 +578,7 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 
 				bal, err := balancer.FetchBalance(ctx, baseURL, k)
 				if err != nil {
-					m.logger.Debug("poll balance err",
+					m.logger.Warn("poll balance err",
 						zap.String("provider", providerName),
 						zap.String("key_id", k.ID),
 						zap.Error(err))

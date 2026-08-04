@@ -27,8 +27,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -59,7 +59,15 @@ type deepseekBalanceRow struct {
 }
 
 func (b *deepseekBalancer) FetchBalance(ctx context.Context, baseURL string, k *keypool.Key) (quotacheck.Balance, error) {
-	url := strings.TrimRight(baseURL, "/") + "/user/balance"
+	// P-quota-balance:DeepSeek 的 quota 端点固定是 https://api.deepseek.com/user/balance,
+	// 不管 anthropic 还是 openai 协议线 — 用同一个账号余额。config 里的 endpoint 包含 path
+	//(e.g. "/anthropic"),需要剥 path 只取 scheme+host,否则会拼成不存在的 URL。
+	// 兜底是官方 host,允许测试用 httptest server 覆盖(传任意 URL 即可)。
+	host := "https://api.deepseek.com"
+	if u, err := url.Parse(baseURL); err == nil && u.Scheme != "" && u.Host != "" {
+		host = u.Scheme + "://" + u.Host
+	}
+	url := host + "/user/balance"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return quotacheck.Balance{}, err
