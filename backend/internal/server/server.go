@@ -43,7 +43,7 @@ type Server struct {
 	usageR   *usage.Repository
 	metricsC *metrics.Collector
 	accessR  *accesslog.Recorder // P67: 接入日志 Recorder
-	quotaM   *quotacheck.Manager  // P68: 配额恢复 worker
+	quotaM   *quotacheck.Manager // P68: 配额恢复 worker
 	http     *http.Server
 }
 
@@ -144,8 +144,8 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		Metrics:       metrics.NewAdapter(metricsC),
 		Breaker:       reporter,
 		TokenRecorder: newAuthTokenRecorder(authn), // P13: TPM 计数(若 auth 启用)
-		Authenticator: authn,                        // P19: Provider 绑定检查
-		AccessLog:     accessR,                      // P67: 接入日志
+		Authenticator: authn,                       // P19: Provider 绑定检查
+		AccessLog:     accessR,                     // P67: 接入日志
 		MaxRetry:      cfg.Retry.MaxAttempts,
 	})
 	// P30:把 DB Pool 注入到每个 Provider(Manager.LoadFromConfig 时 Pool 还是 nil)
@@ -159,15 +159,15 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		}
 	}
 	quotaCfg := quotacheck.ManagerConfig{
-		Enabled:             cfg.KeyPool.QuotaEnabled,
-		ProbeInitialDelay:   cfg.KeyPool.QuotaProbeInitialDelay,
-		ProbeMaxBackoff:     cfg.KeyPool.QuotaProbeMaxBackoff,
-		ProbeJitterPct:      cfg.KeyPool.QuotaProbeJitterPct,
-		ProbeMaxAttempts:    cfg.KeyPool.QuotaProbeMaxAttempts,
-		PollInterval:        cfg.KeyPool.QuotaPollInterval,
-		PollJitterPct:       cfg.KeyPool.QuotaPollJitterPct,
-		HTTPTimeout:         cfg.KeyPool.QuotaHTTPTimeout,
-		UserAgent:           cfg.KeyPool.QuotaUserAgent,
+		Enabled:           cfg.KeyPool.QuotaEnabled,
+		ProbeInitialDelay: cfg.KeyPool.QuotaProbeInitialDelay,
+		ProbeMaxBackoff:   cfg.KeyPool.QuotaProbeMaxBackoff,
+		ProbeJitterPct:    cfg.KeyPool.QuotaProbeJitterPct,
+		ProbeMaxAttempts:  cfg.KeyPool.QuotaProbeMaxAttempts,
+		PollInterval:      cfg.KeyPool.QuotaPollInterval,
+		PollJitterPct:     cfg.KeyPool.QuotaPollJitterPct,
+		HTTPTimeout:       cfg.KeyPool.QuotaHTTPTimeout,
+		UserAgent:         cfg.KeyPool.QuotaUserAgent,
 	}
 	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
 
@@ -512,6 +512,19 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 			}
 		}
 		return ""
+	})
+	// P-quota-balance: 注入 live key lookup,让 list endpoint 返回 Remaining / LastPolledAt
+	pkHandler.SetPoolLookup(func(providerName, keyID string) (*keypool.Key, bool) {
+		pool, ok := s.pools[providerName]
+		if !ok {
+			return nil, false
+		}
+		for _, k := range pool.KeyPtrs() {
+			if k.ID == keyID {
+				return k, true
+			}
+		}
+		return nil, false
 	})
 	// P68: 注入 quota mark func(手动把 key 标 QUOTA_EXCEEDED)
 	pkHandler.SetQuotaMarkFunc(func(providerName, keyID string) {

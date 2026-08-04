@@ -1,0 +1,48 @@
+package auth
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+func TestProviderKeyView_IncludesRemainingAndLastPolledAt(t *testing.T) {
+	past := time.Date(2026, 8, 4, 10, 0, 0, 0, time.UTC)
+	view := ProviderKeyView{
+		ID: 1, ProviderName: "test", Name: "k",
+		KeyMasked: "sk-te...est", Enabled: true,
+		Status: "ACTIVE", BillingSource: "token_plan",
+		CreatedAt: past, UpdatedAt: past,
+		Remaining: 7.0, LastPolledAt: &past,
+	}
+	out, err := json.Marshal(view)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := parsed["remaining"]; !ok {
+		t.Error("missing 'remaining' field in JSON output")
+	}
+	if _, ok := parsed["last_polled_at"]; !ok {
+		t.Error("missing 'last_polled_at' field in JSON output")
+	}
+	// nil-pointer case should serialise as null
+	view.LastPolledAt = nil
+	out, _ = json.Marshal(view)
+	if !contains(string(out), `"last_polled_at":null`) {
+		t.Errorf("expected last_polled_at:null when LastPolledAt is nil; got %s", string(out))
+	}
+}
+
+// tiny contains helper — keep file lean
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}

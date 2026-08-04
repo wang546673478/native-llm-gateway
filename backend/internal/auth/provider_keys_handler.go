@@ -80,18 +80,21 @@ func (s *gormProviderKeyStore) GetPlainKeys(ctx context.Context, providerName st
 // P48: 加 BillingSource — 路由时按这个字段选 tier(token_plan 优先)
 // P68: 加 Status 字段,前端可显示 QUOTA_EXCEEDED 等运行时状态
 type ProviderKeyView struct {
-	ID            uint      `json:"id"`
-	ProviderName  string    `json:"provider_name"`
-	Name          string    `json:"name"`
+	ID           uint   `json:"id"`
+	ProviderName string `json:"provider_name"`
+	Name         string `json:"name"`
 	// KeyMasked 是脱敏后的 key(只显示前 8 + 后 4 字符)
-	KeyMasked     string    `json:"key_masked"`
-	Enabled       bool      `json:"enabled"`
+	KeyMasked string `json:"key_masked"`
+	Enabled   bool   `json:"enabled"`
 	// P68: 运行时状态 — "ACTIVE" / "COOLING" / "QUOTA_EXCEEDED" / "DISABLED" 等
 	// 由 poolLookup 在 list 时填充。如果 pool 找不到该 key,fallback 到 "ACTIVE"。
 	Status        string    `json:"status"`
 	BillingSource string    `json:"billing_source"` // P48: token_plan / api / free
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// P-quota-balance: 上游轮询结果
+	Remaining    float64    `json:"remaining"`
+	LastPolledAt *time.Time `json:"last_polled_at"` // nil 时序列化为 null
 }
 
 func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
@@ -107,8 +110,23 @@ func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
 		Status:        status,
 		BillingSource: k.BillingSource,
 		CreatedAt:     k.CreatedAt,
-		UpdatedAt:    k.UpdatedAt,
+		UpdatedAt:     k.UpdatedAt,
 	}
+}
+
+// toProviderKeyViewFromPool builds a ProviderKeyView populated from both DB row
+// and the corresponding live *keypool.Key (Remaining, LastPolledAt).
+// Use this in place of toProviderKeyView when the Pool is available.
+func toProviderKeyViewFromPool(k dbpkg.ProviderAPIKey, status string, live *keypool.Key) ProviderKeyView {
+	v := toProviderKeyView(k, status)
+	if live != nil {
+		v.Remaining = live.Remaining
+		if !live.LastPolledAt.IsZero() {
+			t := live.LastPolledAt
+			v.LastPolledAt = &t
+		}
+	}
+	return v
 }
 
 // maskKey 脱敏:前 8 + ... + 后 4
@@ -132,6 +150,9 @@ type ProviderKeysHandler struct {
 	keyStatusLookup func(providerName, keyID string) string
 	// P68: 把指定 key 标 QUOTA_EXCEEDED(admin 端 e2e / 调试用)
 	quotaMarkFunc func(providerName, keyID string)
+	// P-quota-balance: 查运行时 live *keypool.Key(含 Remaining / LastPolledAt)
+	// 由 server.go 注入。如果 nil,Remaining/LastPolledAt 保持零值。
+	poolLookup func(providerName, keyID string) (*keypool.Key, bool)
 }
 
 // NewProviderKeysHandler 构造 handler
@@ -149,6 +170,12 @@ func (h *ProviderKeysHandler) SetKeyStatusLookup(fn func(providerName, keyID str
 // 由 server.go 启动时设置
 func (h *ProviderKeysHandler) SetQuotaMarkFunc(fn func(providerName, keyID string)) {
 	h.quotaMarkFunc = fn
+}
+
+// SetPoolLookup P-quota-balance: 注入 live *keypool.Key lookup
+// 由 server.go 启动时设置,让 list endpoint 返回 Remaining / LastPolledAt。
+func (h *ProviderKeysHandler) SetPoolLookup(fn func(providerName, keyID string) (*keypool.Key, bool)) {
+	h.poolLookup = fn
 }
 
 // Register 挂到 r.Group
@@ -179,23 +206,30 @@ func (h *ProviderKeysHandler) list(c *gin.Context) {
 	}
 	views := make([]ProviderKeyView, 0, len(rows))
 	for _, r := range rows {
+		keyID := fmt.Sprintf("%d", r.ID)
 		status := ""
 		if h.keyStatusLookup != nil {
-			status = h.keyStatusLookup(providerName, fmt.Sprintf("%d", r.ID))
+			status = h.keyStatusLookup(providerName, keyID)
 		}
-		views = append(views, toProviderKeyView(r, status))
+		var live *keypool.Key
+		if h.poolLookup != nil {
+			if lk, ok := h.poolLookup(providerName, keyID); ok {
+				live = lk
+			}
+		}
+		views = append(views, toProviderKeyViewFromPool(r, status, live))
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"keys":   views,
-		"count":  len(views),
+		"keys":     views,
+		"count":    len(views),
 		"provider": providerName,
 	})
 }
 
 type createProviderKeyReq struct {
-	Name          string `json:"name"`
-	Key           string `json:"key" binding:"required"`
-	Enabled       *bool  `json:"enabled"`
+	Name    string `json:"name"`
+	Key     string `json:"key" binding:"required"`
+	Enabled *bool  `json:"enabled"`
 	// P48: 创建 key 时指定计费来源(token_plan / api / free)
 	// 默认 "api"(向后兼容);为空时也用 "api"
 	BillingSource string `json:"billing_source"`
@@ -236,9 +270,9 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 		// ok
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "invalid_billing_source",
-			"detail":  "billing_source must be one of: token_plan, api, free",
-			"got":     billingSource,
+			"error":  "invalid_billing_source",
+			"detail": "billing_source must be one of: token_plan, api, free",
+			"got":    billingSource,
 		})
 		return
 	}
