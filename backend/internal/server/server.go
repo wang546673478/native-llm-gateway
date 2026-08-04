@@ -168,6 +168,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		PollJitterPct:     cfg.KeyPool.QuotaPollJitterPct,
 		HTTPTimeout:       cfg.KeyPool.QuotaHTTPTimeout,
 		UserAgent:         cfg.KeyPool.QuotaUserAgent,
+		WarnThresholdPct:  cfg.KeyPool.QuotaWarnThresholdPct,
 	}
 	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
 
