@@ -16,13 +16,13 @@ import (
 
 // GatewayKey 是客户端可以使用的 Gateway 凭证
 type GatewayKey struct {
-	ID            string
-	Name          string
-	KeyHash       string
+	ID      string
+	Name    string
+	KeyHash string
 	// Providers 绑定:空 = 不限制;非空 = 只能用路由解析到这些 Provider 之一的请求
 	// 例:["deepseek", "deepseek-anthropic"] 表示 deepseek 的 OpenAI 和
 	// Anthropic 兼容端点都能用(共享同一个 API key)
-	Providers     []string
+	Providers []string
 	// P34: ProviderKeyIDs 绑定具体凭证(ProviderAPIKey.ID)
 	// 空 = 不限制(用该 provider 的所有 key 池里挑)
 	// 非空 = 只用 ID 在这个集合里的 Provider Key(精准锁定凭证)
@@ -47,10 +47,10 @@ type RateLimitConfig struct {
 
 // Errors
 var (
-	ErrMissingAuthHeader = errors.New("auth: missing Authorization header")
-	ErrInvalidAuthFormat = errors.New("auth: Authorization must be Bearer <token>")
-	ErrUnknownKey        = errors.New("auth: unknown gateway key")
-	ErrModelNotAllowed   = errors.New("auth: model not allowed for this key")
+	ErrMissingAuthHeader   = errors.New("auth: missing Authorization header")
+	ErrInvalidAuthFormat   = errors.New("auth: Authorization must be Bearer <token>")
+	ErrUnknownKey          = errors.New("auth: unknown gateway key")
+	ErrModelNotAllowed     = errors.New("auth: model not allowed for this key")
 	ErrKeyProviderMismatch = errors.New("auth: key is bound to a different provider")
 )
 
@@ -75,10 +75,10 @@ func (a *Authenticator) CheckProvider(key *GatewayKey, providerName string) erro
 // Authenticator 持有所有 Gateway Keys
 // 简单内存存储,启动时从 config 加载;生产可换 DB 后端(P7)
 type Authenticator struct {
-	mu    sync.RWMutex
-	keys  map[string]*GatewayKey // hash → key
-	rpm   map[string]*rpmCounter // key ID → rpm 计数
-	tpm   map[string]*tpmCounter // key ID → tpm 计数(token)
+	mu   sync.RWMutex
+	keys map[string]*GatewayKey // hash → key
+	rpm  map[string]*rpmCounter // key ID → rpm 计数
+	tpm  map[string]*tpmCounter // key ID → tpm 计数(token)
 }
 
 // New 构造 Authenticator
@@ -135,9 +135,9 @@ func hashKey(plain string) string {
 // Authenticate 验证 Gateway Key,返回对应的 GatewayKey
 //
 // 优先级:
-//   1. Authorization: Bearer <token>   (OpenAI 客户端风格,curl / OpenAI SDK)
-//   2. x-api-key: <token>              (Anthropic SDK / Claude Code 风格)
-//   3. 都为空 → ErrMissingAuthHeader
+//  1. Authorization: Bearer <token>   (OpenAI 客户端风格,curl / OpenAI SDK)
+//  2. x-api-key: <token>              (Anthropic SDK / Claude Code 风格)
+//  3. 都为空 → ErrMissingAuthHeader
 //
 // 任一存在即可,二者都给时以 Authorization 优先。
 // 这让 OpenAI / Anthropic 客户端都能直接对接 Gateway,不需要适配层。
@@ -208,8 +208,10 @@ func (a *Authenticator) AllowRequest(keyID string, limitRPM int) bool {
 // CheckTPM 检查 token 配额
 //   - limitTPM=0 → 不限
 //   - estimatedTokens 是预估消耗(可以填 0 表示不预订,只追加)
+//
 // 返回 (allowed, reason)
-//   allowed=false 时 reason 描述被拒原因
+//
+//	allowed=false 时 reason 描述被拒原因
 func (a *Authenticator) CheckTPM(keyID string, limitTPM int, estimatedTokens int64) (bool, string) {
 	if limitTPM <= 0 {
 		return true, ""

@@ -101,9 +101,9 @@ func NewEngine(cfg Config) *Engine {
 // 返回替换后的 model 名,空字符串表示不需要/无法 fallback
 //
 // 调用方应该:
-//   1. 用返回值更新自己的 model 变量
-//   2. 重写 req.Model 和 req.Body(用 rewriteModelField)
-//   3. 重新调 router.Route
+//  1. 用返回值更新自己的 model 变量
+//  2. 重写 req.Model 和 req.Body(用 rewriteModelField)
+//  3. 重新调 router.Route
 //
 // 检查项:
 //   - client key 必须有 DefaultModel 配置
@@ -344,7 +344,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 					)
 					c.JSON(http.StatusForbidden, gin.H{
 						"error": gin.H{
-							"type":    "key_provider_mismatch",
+							"type": "key_provider_mismatch",
 							"message": fmt.Sprintf("key %q is bound to providers %v but request routes to %q",
 								gk.Name, gk.Providers, probeResult.ProviderName),
 						},
@@ -903,6 +903,7 @@ func (e *Engine) tryOneCandidate(
 	}
 	return false
 }
+
 // 总是回写到响应 header,方便客户端链路追踪
 func extractOrGenTraceID(c *gin.Context) string {
 	id := c.GetHeader("X-Request-Id")

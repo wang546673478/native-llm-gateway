@@ -50,7 +50,7 @@ func TestSendRequest_Success(t *testing.T) {
 	resp, err := b.SendRequest(context.Background(), &provider.Request{
 		Method: "POST", Path: "/v1/chat/completions",
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
-		Body:   []byte(`{"model":"m","messages":[]}`),
+		Body:    []byte(`{"model":"m","messages":[]}`),
 		TraceID: "trace-abc",
 	})
 	if err != nil {
@@ -350,10 +350,10 @@ func contains(haystack, needle string) bool {
 
 func TestParseRetryAfter(t *testing.T) {
 	cases := map[string]time.Duration{
-		"":      0,
-		"30":    30 * time.Second,
-		"120":   120 * time.Second,
-		"junk":  0,
+		"":     0,
+		"30":   30 * time.Second,
+		"120":  120 * time.Second,
+		"junk": 0,
 	}
 	for in, want := range cases {
 		got := parseRetryAfter(in)

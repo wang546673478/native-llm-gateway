@@ -107,14 +107,14 @@ type AggregateResult struct {
 //   - provider 信息由 Usage.vue 表格按需调用 ModelProviders 端点拉
 func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateRow, error) {
 	type row struct {
-		ModelID       string
-		Count         int64
-		InputTokens   int64
-		OutputTokens  int64
-		TotalTokens   int64
-		Cost          float64
-		AvgLatency    float64
-		ErrorCount    int64
+		ModelID      string
+		Count        int64
+		InputTokens  int64
+		OutputTokens int64
+		TotalTokens  int64
+		Cost         float64
+		AvgLatency   float64
+		ErrorCount   int64
 	}
 
 	q := r.db.WithContext(ctx).Model(&dbpkg.UsageRecord{})
@@ -172,7 +172,7 @@ type AggregateRow struct {
 // ModelProviderRow P65: 给定 model,列出哪些 provider 调用过(按请求数排序)
 type ModelProviderRow struct {
 	ProviderName string `json:"provider_name"`
-	RequestCount int64   `json:"request_count"`
+	RequestCount int64  `json:"request_count"`
 }
 
 // ModelProviders 按 model 查 provider 分布

@@ -56,22 +56,23 @@ func BuildPoolFromStrings(providerName string, plainKeys []string, cfg Config) *
 	keys := make([]*Key, len(plainKeys))
 	for i, pk := range plainKeys {
 		keys[i] = &Key{
-			ID:            fmt.Sprintf("%s-key-%d", providerName, i+1),
-			ProviderName:  providerName,
-			Name:          fmt.Sprintf("key-%d", i+1),
-			Key:           pk,
-			Status:        KeyStatusActive,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			ID:           fmt.Sprintf("%s-key-%d", providerName, i+1),
+			ProviderName: providerName,
+			Name:         fmt.Sprintf("key-%d", i+1),
+			Key:          pk,
+			Status:       KeyStatusActive,
+			CreatedAt:    now,
+			UpdatedAt:    now,
 		}
 	}
 	return NewPool(providerName, keys, nil, cfg)
 }
 
 // Acquire 获取一个可用的 Key
-//   1. 遍历 keys,若 COOLING 且 cooling_until < now,自动恢复为 ACTIVE
-//   2. 按 tier 降级顺序尝试:token_plan → api → free
-//   3. 若没有可用,返回 ErrNoAvailableKey
+//  1. 遍历 keys,若 COOLING 且 cooling_until < now,自动恢复为 ACTIVE
+//  2. 按 tier 降级顺序尝试:token_plan → api → free
+//  3. 若没有可用,返回 ErrNoAvailableKey
+//
 // P64: 这里保留 tier 降级是作为"无 tier 信息的旧 caller"的兼容入口
 // 新调用方应明确用 AcquireFromTier
 func (p *Pool) Acquire() (*Key, error) {

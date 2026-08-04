@@ -6,12 +6,12 @@ import "time"
 
 // Provider Provider 主表
 type Provider struct {
-	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	Name      string    `gorm:"column:name;uniqueIndex;not null" json:"name"`
-	Protocol  string    `gorm:"column:protocol;not null" json:"protocol"`
-	Endpoint  string    `gorm:"column:endpoint;not null" json:"endpoint"`
-	Enabled   bool      `gorm:"column:enabled;not null;default:true" json:"enabled"`
-	Timeout   int       `gorm:"column:timeout_seconds;not null;default:60" json:"timeout_seconds"`
+	ID       uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name     string `gorm:"column:name;uniqueIndex;not null" json:"name"`
+	Protocol string `gorm:"column:protocol;not null" json:"protocol"`
+	Endpoint string `gorm:"column:endpoint;not null" json:"endpoint"`
+	Enabled  bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	Timeout  int    `gorm:"column:timeout_seconds;not null;default:60" json:"timeout_seconds"`
 	// P47: 计费来源 — token_plan / api / free
 	BillingSource string    `gorm:"column:billing_source;not null;default:'api'" json:"billing_source"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -25,11 +25,11 @@ func (Provider) TableName() string { return "providers" }
 
 // ProviderModel Provider 的模型声明
 type ProviderModel struct {
-	ID                     uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	ProviderName           string    `gorm:"column:provider_name;uniqueIndex:idx_provider_model;not null" json:"provider_name"`
-	ModelID                string    `gorm:"column:model_id;uniqueIndex:idx_provider_model;not null" json:"model_id"`
-	CostPer1kInput         float64   `gorm:"column:cost_per_1k_input;not null;default:0" json:"cost_per_1k_input"`
-	CostPer1kOutput        float64   `gorm:"column:cost_per_1k_output;not null;default:0" json:"cost_per_1k_output"`
+	ID              uint    `gorm:"primaryKey;autoIncrement" json:"id"`
+	ProviderName    string  `gorm:"column:provider_name;uniqueIndex:idx_provider_model;not null" json:"provider_name"`
+	ModelID         string  `gorm:"column:model_id;uniqueIndex:idx_provider_model;not null" json:"model_id"`
+	CostPer1kInput  float64 `gorm:"column:cost_per_1k_input;not null;default:0" json:"cost_per_1k_input"`
+	CostPer1kOutput float64 `gorm:"column:cost_per_1k_output;not null;default:0" json:"cost_per_1k_output"`
 	// P40: cache pricing 字段 — GORM AutoMigrate 会自动加列
 	CostPer1kCacheRead     float64   `gorm:"column:cost_per_1k_cache_read;not null;default:0" json:"cost_per_1k_cache_read"`
 	CostPer1kCacheCreation float64   `gorm:"column:cost_per_1k_cache_creation;not null;default:0" json:"cost_per_1k_cache_creation"`
@@ -58,17 +58,17 @@ func (ModelAlias) TableName() string { return "model_aliases" }
 // Gateway 调上游时由 Authenticator 从这里构建 KeyPool 取 key
 // P48: 每把 key 独立标注 billing_source — 支持同 provider 同时有 token_plan + api key
 type ProviderAPIKey struct {
-	ID            uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	ProviderName  string     `gorm:"column:provider_name;index;not null" json:"provider_name"`
-	Name          string     `gorm:"column:name;not null" json:"name"`
+	ID           uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	ProviderName string `gorm:"column:provider_name;index;not null" json:"provider_name"`
+	Name         string `gorm:"column:name;not null" json:"name"`
 	// KeyHash 存明文(P30 暂不上加密,跟 GatewayKey 一样,生产可加)
-	KeyHash       string     `gorm:"column:key_hash;not null" json:"-"`
-	Enabled       bool       `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	KeyHash string `gorm:"column:key_hash;not null" json:"-"`
+	Enabled bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`
 	// P48: 单 key 的计费来源(token_plan / api / free)
 	// 默认 api(向后兼容);创建时如果不指定,可用 provider 的 billing_source 作默认值
-	BillingSource string     `gorm:"column:billing_source;default:'api'" json:"billing_source"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	BillingSource string    `gorm:"column:billing_source;default:'api'" json:"billing_source"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // TableName
@@ -76,12 +76,12 @@ func (ProviderAPIKey) TableName() string { return "provider_api_keys" }
 
 // UsageRecord 单次请求的用量记录(P8 阶段真正写入)
 type UsageRecord struct {
-	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	TraceID       string    `gorm:"column:trace_id;index;not null" json:"trace_id"`
-	GatewayKeyID  string    `gorm:"column:gateway_key_id;index" json:"gateway_key_id"`
-	ProviderName  string    `gorm:"column:provider_name;index;not null" json:"provider_name"`
-	ModelID       string    `gorm:"column:model_id;index;not null" json:"model_id"`
-	Protocol      string    `gorm:"column:protocol;not null" json:"protocol"`
+	ID           uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	TraceID      string `gorm:"column:trace_id;index;not null" json:"trace_id"`
+	GatewayKeyID string `gorm:"column:gateway_key_id;index" json:"gateway_key_id"`
+	ProviderName string `gorm:"column:provider_name;index;not null" json:"provider_name"`
+	ModelID      string `gorm:"column:model_id;index;not null" json:"model_id"`
+	Protocol     string `gorm:"column:protocol;not null" json:"protocol"`
 	// P47: 冗余存 billing_source — 方便按 token_plan / api / free 聚合统计
 	// 取自请求时刻该 provider 的 billing_source,改 config 不会影响历史记录
 	BillingSource string    `gorm:"column:billing_source;index;default:'api'" json:"billing_source"`
@@ -101,12 +101,12 @@ func (UsageRecord) TableName() string { return "usage_records" }
 
 // RoutingConfig 路由配置(JSON 存储,P4 阶段使用)
 type RoutingConfig struct {
-	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	Alias     string    `gorm:"column:alias;uniqueIndex;not null" json:"alias"`
-	Strategy  string    `gorm:"column:strategy;not null;default:'priority'" json:"strategy"`
-	ConfigJSON string   `gorm:"column:config_json;not null" json:"config_json"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Alias      string    `gorm:"column:alias;uniqueIndex;not null" json:"alias"`
+	Strategy   string    `gorm:"column:strategy;not null;default:'priority'" json:"strategy"`
+	ConfigJSON string    `gorm:"column:config_json;not null" json:"config_json"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // TableName
@@ -114,30 +114,30 @@ func (RoutingConfig) TableName() string { return "routing_configs" }
 
 // GatewayKey 客户端使用的 Gateway API Key(P7 阶段真正生效)
 type GatewayKey struct {
-	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	Name          string    `gorm:"column:name;uniqueIndex;not null" json:"name"`
-	KeyHash       string    `gorm:"column:key_hash;uniqueIndex;not null" json:"-"`
+	ID      uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name    string `gorm:"column:name;uniqueIndex;not null" json:"name"`
+	KeyHash string `gorm:"column:key_hash;uniqueIndex;not null" json:"-"`
 	// Providers 绑定:JSON 数组,空 = 不限制(可用于任意 Provider)
 	// 非空 = 只能用路由解析到这些 Provider 之一的请求
 	// 例:"[\"deepseek\",\"deepseek-anthropic\"]" 表示 deepseek 的 OpenAI 和
 	// Anthropic 兼容端点都能用(用同一个 API key)
-	Providers     string    `gorm:"column:providers;default:'[]'" json:"providers"`
+	Providers string `gorm:"column:providers;default:'[]'" json:"providers"`
 	// P34: ProviderKeyIDs 绑定:JSON 数组存 ProviderAPIKey.ID(uint)
 	// 空 = 不限制(用该 provider 的所有 key 池)
 	// 非空 = 只能用这些 ID 对应的 provider key 调上游
 	// 例:"[5,7]" 表示只能从 minimax provider_api_keys 表 ID=5 和 ID=7 的 key 池里挑
-	ProviderKeyIDs string    `gorm:"column:provider_key_ids;default:'[]'" json:"provider_key_ids"`
-	AllowedModels string    `gorm:"column:allowed_models;not null;default:'[\"*\"]'" json:"allowed_models"`
+	ProviderKeyIDs string `gorm:"column:provider_key_ids;default:'[]'" json:"provider_key_ids"`
+	AllowedModels  string `gorm:"column:allowed_models;not null;default:'[\"*\"]'" json:"allowed_models"`
 	// DefaultModel: 客户端发 Gateway 没见过的 model 名(claude-sonnet-4-5 / gpt-4o 等
 	// Claude Code / CodeX 的探测名)时,fallback 到这个 model。
 	// 空字符串 = 不 fallback,严格返回 503。
 	// 也必须经过 AllowedModels 白名单 — 防止用 fallback 绕过白名单。
-	DefaultModel  string    `gorm:"column:default_model;default:''" json:"default_model"`
-	RPM           int       `gorm:"column:rpm;not null;default:100" json:"rpm"`
-	TPM           int       `gorm:"column:tpm;not null;default:500000" json:"tpm"`
-	Enabled       bool      `gorm:"column:enabled;not null;default:true" json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	DefaultModel string    `gorm:"column:default_model;default:''" json:"default_model"`
+	RPM          int       `gorm:"column:rpm;not null;default:100" json:"rpm"`
+	TPM          int       `gorm:"column:tpm;not null;default:500000" json:"tpm"`
+	Enabled      bool      `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // TableName

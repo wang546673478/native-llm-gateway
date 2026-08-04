@@ -76,4 +76,3 @@ func NewScheduler(strategy string) Scheduler {
 		return &RoundRobinScheduler{}
 	}
 }
-

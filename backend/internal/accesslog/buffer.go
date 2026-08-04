@@ -32,7 +32,7 @@ type Buffer struct {
 }
 
 type atomicBool struct {
-	v int32 // 0=false, 1=true;通过 sync.Mutex 保护读写(F7 决议:保留 mutex 实现,改正注释)
+	v   int32 // 0=false, 1=true;通过 sync.Mutex 保护读写(F7 决议:保留 mutex 实现,改正注释)
 	mux sync.Mutex
 }
 

@@ -53,13 +53,13 @@ func WithProviderKeyIDs(ids []uint) RouteOption {
 
 // Router 持有所有路由决策所需的状态
 type Router struct {
-	mu          sync.RWMutex
-	logger      *zap.Logger
-	manager     *provider.Manager
-	pools       map[string]*keypool.Pool
-	aliases     map[string]AliasConfig
-	policies    map[string]policy.Policy
-	cfg         Config
+	mu           sync.RWMutex
+	logger       *zap.Logger
+	manager      *provider.Manager
+	pools        map[string]*keypool.Pool
+	aliases      map[string]AliasConfig
+	policies     map[string]policy.Policy
+	cfg          Config
 	healthStatus map[string]bool // P6 接 Circuit Breaker
 }
 
@@ -146,11 +146,11 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 	keyCandidates := buildKeyCandidates(ordered, r.pools)
 
 	return &RouteIterator{
-		alias:           req.Model,
-		candidates:      keyCandidates,
-		pools:           r.pools,
-		manager:         r.manager,
-		providerKeyIDs:  o.ProviderKeyIDs,
+		alias:          req.Model,
+		candidates:     keyCandidates,
+		pools:          r.pools,
+		manager:        r.manager,
+		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
 }
 
@@ -305,7 +305,7 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 // 每个 provider 按 pool.Tiers() 展开成它声明的所有 tier
 //   - provider 没有 pool → 兜底按 "api" 产一个 KeyCandidate
 //   - provider 没有声明任何 key → pool.Tiers() 返回 [],同样兜底 "api"
-//   (调用方 AcquireFromTier 实际拿不到 key 时会自动 continue)
+//     (调用方 AcquireFromTier 实际拿不到 key 时会自动 continue)
 func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool) []KeyCandidate {
 	tierOrder := []string{"token_plan", "api", "free"}
 	buckets := make(map[string][]KeyCandidate, 3)

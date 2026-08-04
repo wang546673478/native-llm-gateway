@@ -50,7 +50,7 @@ func TestBreaker_HalfOpenSuccessClosesBreaker(t *testing.T) {
 	b.RecordFailure("server_error")
 	b.RecordFailure("server_error")
 	time.Sleep(10 * time.Millisecond)
-	b.Allow()                // 触发 OPEN → HALF_OPEN
+	b.Allow() // 触发 OPEN → HALF_OPEN
 	b.RecordSuccess()
 	if b.State() != StateClosed {
 		t.Errorf("after half-open success: state = %s, want CLOSED", b.State())

@@ -1,17 +1,18 @@
 // P68 + P-quota-balance: DeepSeek quota balance 探测
 // https://api-docs.deepseek.com/api-get-user-balance
 // GET {endpoint}/user/balance
-// 响应:{
-//   "is_available": true,
-//   "balance_infos": [
-//     {
-//       "currency": "CNY",
-//       "total_balance": "110.00",
-//       "granted_balance": "10.00",
-//       "topped_up_balance": "100.00"
-//     }
-//   ]
-// }
+//
+//	响应:{
+//	  "is_available": true,
+//	  "balance_infos": [
+//	    {
+//	      "currency": "CNY",
+//	      "total_balance": "110.00",
+//	      "granted_balance": "10.00",
+//	      "topped_up_balance": "100.00"
+//	    }
+//	  ]
+//	}
 //
 // 之前(本文件最初版本)把字段名错记成 `balance`(string 数组),实际是
 // `balance_infos`(object 数组)。这造成 P-quota-balance 启用后,每次 poll

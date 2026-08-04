@@ -98,12 +98,12 @@ func (r *PoolsRef) Get() map[string]*keypool.Pool {
 
 // Manager 主管理器
 type Manager struct {
-	logger    *zap.Logger
-	cfg       ManagerConfig
-	pools     *PoolsRef
-	prov      providerLookup
-	sched     *Scheduler
-	metricsC  *metrics.Collector // 可选,nil 时 skip metrics emit
+	logger   *zap.Logger
+	cfg      ManagerConfig
+	pools    *PoolsRef
+	prov     providerLookup
+	sched    *Scheduler
+	metricsC *metrics.Collector // 可选,nil 时 skip metrics emit
 
 	// worker 生命周期 — Reload 时 cancel + 重新 Start
 	workerCtx    context.Context

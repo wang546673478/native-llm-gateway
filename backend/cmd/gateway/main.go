@@ -1,12 +1,12 @@
 // Package main 是 Gateway 的入口
 // 负责:
-//   1. 解析命令行参数(config 路径)
-//   2. 加载配置
-//   3. 初始化日志
-//   4. 打开数据库 + 迁移
-//   5. 构建 Provider Manager 并加载所有 enabled Provider
-//   6. 启动 HTTP 服务
-//   7. 监听信号,触发优雅关停
+//  1. 解析命令行参数(config 路径)
+//  2. 加载配置
+//  3. 初始化日志
+//  4. 打开数据库 + 迁移
+//  5. 构建 Provider Manager 并加载所有 enabled Provider
+//  6. 启动 HTTP 服务
+//  7. 监听信号,触发优雅关停
 package main
 
 import (
@@ -22,16 +22,16 @@ import (
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"               // 触发 init() 注册
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek_anthropic"    // DeepSeek 的 Anthropic 兼容端点
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm"                   // 智谱 (OpenAI 兼容)
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm_anthropic"        // 智谱 (Anthropic 兼容,给 Claude Code 用户)
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/qwen"                  // 通义千问
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/kimi"                  // 月之暗面 (OpenAI 兼容)
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/kimi_anthropic"        // 月之暗面 (Anthropic 兼容,给 Claude Code 用户)
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"               // Anthropic 兼容
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax_openai"        // OpenAI 兼容
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/gemini"                // Google 协议
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"           // 触发 init() 注册
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek_anthropic" // DeepSeek 的 Anthropic 兼容端点
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/gemini"             // Google 协议
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm"                // 智谱 (OpenAI 兼容)
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm_anthropic"      // 智谱 (Anthropic 兼容,给 Claude Code 用户)
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/kimi"               // 月之暗面 (OpenAI 兼容)
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/kimi_anthropic"     // 月之暗面 (Anthropic 兼容,给 Claude Code 用户)
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"            // Anthropic 兼容
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax_openai"     // OpenAI 兼容
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/qwen"               // 通义千问
 
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"

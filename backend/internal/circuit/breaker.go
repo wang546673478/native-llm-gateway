@@ -2,10 +2,11 @@
 // 对应规格书 5.6
 //
 // 状态机:
-//   CLOSED   → 正常处理请求;失败计数超出阈值 → OPEN
-//   OPEN     → 直接拒绝请求;OpenTimeout 后 → HALF_OPEN
-//   HALF_OPEN→ 放行最多 HalfOpenRequests 个试探请求;
-//              全部成功 → CLOSED;任一失败 → 重新 OPEN
+//
+//	CLOSED   → 正常处理请求;失败计数超出阈值 → OPEN
+//	OPEN     → 直接拒绝请求;OpenTimeout 后 → HALF_OPEN
+//	HALF_OPEN→ 放行最多 HalfOpenRequests 个试探请求;
+//	           全部成功 → CLOSED;任一失败 → 重新 OPEN
 package circuit
 
 import (
@@ -47,12 +48,12 @@ type Breaker struct {
 	name   string
 	config Config
 
-	mu           sync.Mutex
-	state        State
-	failures     []time.Time    // 滑动窗口内的失败时间戳
-	successCount int            // HALF_OPEN 期间累计成功数
-	openedAt     time.Time
-	halfOpenInFlight int        // HALF_OPEN 期间已发出去的请求数
+	mu               sync.Mutex
+	state            State
+	failures         []time.Time // 滑动窗口内的失败时间戳
+	successCount     int         // HALF_OPEN 期间累计成功数
+	openedAt         time.Time
+	halfOpenInFlight int // HALF_OPEN 期间已发出去的请求数
 }
 
 // New 构造 Breaker

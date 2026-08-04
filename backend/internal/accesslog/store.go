@@ -16,7 +16,8 @@ import (
 // 精确匹配(ErrorType 非空)。两种语义互斥 — handler 端构造,store 端 OR 拼装。
 //
 // 示例:status=4xx,auth_failed →
-//   {Min:400, Max:500} OR {ErrorType:"auth_failed"}
+//
+//	{Min:400, Max:500} OR {ErrorType:"auth_failed"}
 type StatusBucket struct {
 	Min       int    // status_code >= Min(0 表示无下界)
 	Max       int    // status_code <  Max(0 表示无上界)

@@ -22,9 +22,9 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
 	"github.com/wang546673478/native-llm-gateway/internal/proxy"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
 )
 
 // buildGateway 构造完整 Gateway:Provider(指向上游) + Router + Proxy + Gin

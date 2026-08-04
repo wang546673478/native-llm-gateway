@@ -317,9 +317,9 @@ func TestProxy_Stream_EmitsSSEChunks(t *testing.T) {
 
 func TestExtractModelAndStream(t *testing.T) {
 	tests := []struct {
-		name      string
-		body      string
-		wantModel string
+		name       string
+		body       string
+		wantModel  string
 		wantStream bool
 	}{
 		{"openai non-stream", `{"model":"x","messages":[]}`, "x", false},
@@ -378,17 +378,17 @@ var _ = bytes.NewReader
 // TestStreamBuffer_NoLeakAcrossChunks 验证 F4 streamCnt 不会因为 per-chunk
 // 调用而泄漏 — 这是旧实现里的一个 critical bug:
 //
-//   旧 acquireStreamSlot 在 appendStreamChunk 内被调用,每个 SSE chunk 都
-//   +1,但 finalizeStream 只 -1 一次。一个 N-chunk 的 stream 会泄漏 N-1
-//   的计数,长 SSE 响应会让计数器永久超过 1000,后续 stream 的 chunk
-//   全部被静默丢弃,body 不入 buffer。
+//	旧 acquireStreamSlot 在 appendStreamChunk 内被调用,每个 SSE chunk 都
+//	+1,但 finalizeStream 只 -1 一次。一个 N-chunk 的 stream 会泄漏 N-1
+//	的计数,长 SSE 响应会让计数器永久超过 1000,后续 stream 的 chunk
+//	全部被静默丢弃,body 不入 buffer。
 //
 // 修复后,acquireStreamSlot 只在 doStream 开始前调一次,appendStreamChunk
 // 是 lookup-only。本测试覆盖真实工作模式:
 //
-//   Part 1: 5 个 stream × 300 chunk,全部 finalize → streamCnt 必须归 0。
-//   Part 2: F4 cap — 1500 并发 acquire,前 1000 成功,后 500 拒绝;
-//           finalize 全部 1000 个成功 slot 后 → streamCnt 必须归 0。
+//	Part 1: 5 个 stream × 300 chunk,全部 finalize → streamCnt 必须归 0。
+//	Part 2: F4 cap — 1500 并发 acquire,前 1000 成功,后 500 拒绝;
+//	        finalize 全部 1000 个成功 slot 后 → streamCnt 必须归 0。
 func TestStreamBuffer_NoLeakAcrossChunks(t *testing.T) {
 	e := &Engine{}
 

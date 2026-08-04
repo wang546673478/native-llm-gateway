@@ -15,11 +15,11 @@ import (
 
 // Record 单条用量记录(来自 Proxy.UsageRecorder)
 type Record struct {
-	TraceID       string
-	GatewayKeyID  string
-	ProviderName  string
-	ModelID       string
-	Protocol      string
+	TraceID      string
+	GatewayKeyID string
+	ProviderName string
+	ModelID      string
+	Protocol     string
 	// P47: 计费来源(token_plan / api / free)
 	BillingSource string
 	InputTokens   int
@@ -34,13 +34,13 @@ type Record struct {
 
 // Collector 异步收集器
 type Collector struct {
-	db         *gorm.DB
-	channel    chan *Record
-	batchSize  int
-	flushInt   time.Duration
-	stopCh     chan struct{}
-	doneCh     chan struct{}
-	once       sync.Once
+	db        *gorm.DB
+	channel   chan *Record
+	batchSize int
+	flushInt  time.Duration
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	once      sync.Once
 }
 
 // NewCollector 构造 Collector

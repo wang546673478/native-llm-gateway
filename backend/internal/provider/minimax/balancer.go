@@ -66,7 +66,7 @@ func newMiniMaxBalancer() *miniMaxBalancer {
 
 // miniMaxModelRemains 单个模型当前的余额窗口(5h + 周)
 type miniMaxModelRemains struct {
-	ModelName                       string `json:"model_name"`
+	ModelName                       string  `json:"model_name"`
 	CurrentIntervalRemainingPercent float64 `json:"current_interval_remaining_percent"`
 	CurrentWeeklyRemainingPercent   float64 `json:"current_weekly_remaining_percent"`
 }
@@ -148,12 +148,12 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 	// 不然会被外层 pollAllBalancers 当作 "ok 但 HasQuota=false" 走 default 分支,看不到真实错误。
 	if parsed.BaseResp.StatusCode != 0 {
 		return quotacheck.Balance{
-			Raw:      0,
-			HasQuota: false,
-			Source:   "minimax:/v1/token_plan/remains",
-			Kind:     "percent",
-		}, fmt.Errorf("minimax base_resp status_code=%d msg=%s",
-			parsed.BaseResp.StatusCode, parsed.BaseResp.StatusMsg)
+				Raw:      0,
+				HasQuota: false,
+				Source:   "minimax:/v1/token_plan/remains",
+				Kind:     "percent",
+			}, fmt.Errorf("minimax base_resp status_code=%d msg=%s",
+				parsed.BaseResp.StatusCode, parsed.BaseResp.StatusMsg)
 	}
 
 	// 没有 model_remains — 账户无任何可用模型(理论上 Token Plan 至少 "general")。

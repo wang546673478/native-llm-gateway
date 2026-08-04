@@ -65,11 +65,11 @@ func NewBase(cfg Config) *Base {
 // 这里把方法放在 wrapper 中,Base 只提供 HTTP 调用
 
 // SendRequest 发送非流式请求
-//   1. 从 Pool 取 Key
-//   2. POST 到 {endpoint}{ChatPath}
-//   3. Authorization: Bearer {key}
-//   4. body 原样透传
-//   5. 解析 OpenAI 格式响应,提取 Usage
+//  1. 从 Pool 取 Key
+//  2. POST 到 {endpoint}{ChatPath}
+//  3. Authorization: Bearer {key}
+//  4. body 原样透传
+//  5. 解析 OpenAI 格式响应,提取 Usage
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	if b.cfg.Pool == nil {
 		return nil, &provider.ProviderError{
@@ -169,8 +169,9 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 
 // SendStreamRequest 发送流式请求,返回 chunk channel
 // 流式响应是 SSE 格式:
-//   data: {json}\n\n
-//   data: [DONE]\n\n
+//
+//	data: {json}\n\n
+//	data: [DONE]\n\n
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	if b.cfg.Pool == nil {
 		return nil, nil, &provider.ProviderError{
@@ -195,11 +196,11 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	}
 
 	// 流式超时:拉到 10 分钟
-// http.Client.Timeout 限制整个请求生命周期(包括读 body)。
-// 对于流式响应,Anthropic / OpenAI 官方自家超时是 10 分钟,thinking / 长上下文
-// 模型可能更久。120s 太短,容易触发 context deadline exceeded,
-// 导致客户端报 "Connection closed mid-response"。
-streamTimeout := b.cfg.Timeout
+	// http.Client.Timeout 限制整个请求生命周期(包括读 body)。
+	// 对于流式响应,Anthropic / OpenAI 官方自家超时是 10 分钟,thinking / 长上下文
+	// 模型可能更久。120s 太短,容易触发 context deadline exceeded,
+	// 导致客户端报 "Connection closed mid-response"。
+	streamTimeout := b.cfg.Timeout
 	if streamTimeout < 600*time.Second {
 		streamTimeout = 600 * time.Second
 	}
@@ -388,12 +389,12 @@ func parseOpenAIUsage(body []byte) *provider.Usage {
 	}
 
 	raw := map[string]interface{}{
-		"prompt_tokens":              resp.Usage.PromptTokens,
-		"completion_tokens":          resp.Usage.CompletionTokens,
-		"total_tokens":               resp.Usage.TotalTokens,
-		"prompt_cache_hit_tokens":    resp.Usage.PromptCacheHitTokens,
-		"prompt_cache_miss_tokens":   resp.Usage.PromptCacheMissTokens,
-		"reasoning_tokens":           reasoningTokens,
+		"prompt_tokens":            resp.Usage.PromptTokens,
+		"completion_tokens":        resp.Usage.CompletionTokens,
+		"total_tokens":             resp.Usage.TotalTokens,
+		"prompt_cache_hit_tokens":  resp.Usage.PromptCacheHitTokens,
+		"prompt_cache_miss_tokens": resp.Usage.PromptCacheMissTokens,
+		"reasoning_tokens":         reasoningTokens,
 	}
 
 	u := &provider.Usage{

@@ -3,24 +3,24 @@
 // 基于官方文档 https://api-docs.deepseek.com 重写:
 //
 // 关键差异(与标准 OpenAI Chat Completions):
-//   1. 端点路径是 /chat/completions(没有 /v1 前缀!)
-//   2. 支持 thinking 模式:"thinking": {"type": "enabled"}
-//   3. 启用 thinking 后,响应中增加 reasoning_content 字段
-//   4. usage 增加 prompt_cache_hit_tokens / prompt_cache_miss_tokens
-//      和 completion_tokens_details.reasoning_tokens
-//   5. 模型:deepseek-v4-flash / deepseek-v4-pro
-//      (deepseek-chat / deepseek-reasoner 于 2026/07/24 弃用)
+//  1. 端点路径是 /chat/completions(没有 /v1 前缀!)
+//  2. 支持 thinking 模式:"thinking": {"type": "enabled"}
+//  3. 启用 thinking 后,响应中增加 reasoning_content 字段
+//  4. usage 增加 prompt_cache_hit_tokens / prompt_cache_miss_tokens
+//     和 completion_tokens_details.reasoning_tokens
+//  5. 模型:deepseek-v4-flash / deepseek-v4-pro
+//     (deepseek-chat / deepseek-reasoner 于 2026/07/24 弃用)
 //
 // 实现策略:继承 openai_compatible.Base,通过 Config.ChatPath 覆盖端点,
 // 启用 StreamUsage 让流式响应末尾带 usage。
 package deepseek
 
 import (
-	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"context"
 	"fmt"
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 
-		"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/provider/openai_compatible"
 )
 
@@ -57,12 +57,12 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 
 	return &Provider{
 		base: openai_compatible.NewBase(openai_compatible.Config{
-			Name:       name,
-			Endpoint:   cfg.Endpoint,
-			Timeout:    cfg.Timeout,
-			ChatPath:   ChatPath, // DeepSeek 关键差异:无 /v1 前缀
-			StreamUsage: true,    // 让流式末尾带 usage,便于 Gateway 端记账
-			Pool:       toPool(cfg.Pool),
+			Name:        name,
+			Endpoint:    cfg.Endpoint,
+			Timeout:     cfg.Timeout,
+			ChatPath:    ChatPath, // DeepSeek 关键差异:无 /v1 前缀
+			StreamUsage: true,     // 让流式末尾带 usage,便于 Gateway 端记账
+			Pool:        toPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil

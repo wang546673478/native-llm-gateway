@@ -1,10 +1,11 @@
 // Package deepseek_anthropic 实现 DeepSeek 的 Anthropic 兼容端点
 //
 // 官方文档 https://api-docs.deepseek.com:
-//   base URL: https://api.deepseek.com/anthropic
-//   鉴权:     x-api-key: {DEEPSEEK_API_KEY}
-//             anthropic-version: 2023-06-01
-//   端点:     POST /v1/messages
+//
+//	base URL: https://api.deepseek.com/anthropic
+//	鉴权:     x-api-key: {DEEPSEEK_API_KEY}
+//	          anthropic-version: 2023-06-01
+//	端点:     POST /v1/messages
 //
 // 与标准 MiniMax 不同的是 DeepSeek 这里用 /anthropic 子路径作为 base URL,
 // 所以 endpoint 字段填 https://api.deepseek.com/anthropic,实际请求会拼成
@@ -14,11 +15,11 @@
 package deepseek_anthropic
 
 import (
-	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"context"
 	"fmt"
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 
-		"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/provider/anthropic_compatible"
 )
 
@@ -53,7 +54,7 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Name:     name,
 			Endpoint: cfg.Endpoint,
 			Timeout:  cfg.Timeout,
-			Pool: toPool(cfg.Pool),
+			Pool:     toPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil
@@ -89,7 +90,6 @@ func (p *Provider) SetPool(pool *keypool.Pool) {
 func (p *Provider) Close() error { return p.base.Close() }
 
 func init() { provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolAnthropic) }
-
 
 // toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
 func toPool(p interface{}) *keypool.Pool {

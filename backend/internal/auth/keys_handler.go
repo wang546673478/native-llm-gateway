@@ -177,7 +177,7 @@ func toViewSafe(k dbpkg.GatewayKey) KeyViewSafe {
 // KeyCreateReq POST body(P31: 不再需要 Key 字段,系统自动生成)
 type KeyCreateReq struct {
 	Name           string   `json:"name" binding:"required"`
-	Providers      []string `json:"providers"`       // 多 Provider 绑定,空 = 不限制
+	Providers      []string `json:"providers"`        // 多 Provider 绑定,空 = 不限制
 	ProviderKeyIDs []uint   `json:"provider_key_ids"` // P34: 绑定具体 Provider Key ID
 	AllowedModels  []string `json:"allowed_models"`
 	DefaultModel   string   `json:"default_model"`

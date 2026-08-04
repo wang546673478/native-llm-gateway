@@ -14,14 +14,14 @@ import (
 
 // fakeProvider 最小可用的 Provider(用于测试 Router)
 type fakeProvider struct {
-	name    string
-	proto   provider.Protocol
-	models  []string
+	name   string
+	proto  provider.Protocol
+	models []string
 }
 
-func (p *fakeProvider) Name() string                          { return p.name }
-func (p *fakeProvider) Protocol() provider.Protocol           { return p.proto }
-func (p *fakeProvider) Models() []string                      { return p.models }
+func (p *fakeProvider) Name() string                { return p.name }
+func (p *fakeProvider) Protocol() provider.Protocol { return p.proto }
+func (p *fakeProvider) Models() []string            { return p.models }
 func (p *fakeProvider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return nil, nil
 }

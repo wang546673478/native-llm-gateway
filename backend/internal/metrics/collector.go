@@ -17,11 +17,11 @@ type Collector struct {
 	tokensTotal   *prometheus.CounterVec
 	latencySecs   *prometheus.HistogramVec
 	// P68: quota restore metrics
-	quotaProbeTotal       *prometheus.CounterVec   // probe 调用结果
-	quotaPollTotal        *prometheus.CounterVec   // poll 调用结果
-	quotaKeyTransitions   *prometheus.CounterVec   // 状态转换计数
-	quotaPendingProbes    prometheus.Gauge        // 当前待探测 key 数
-	registry              *prometheus.Registry
+	quotaProbeTotal     *prometheus.CounterVec // probe 调用结果
+	quotaPollTotal      *prometheus.CounterVec // poll 调用结果
+	quotaKeyTransitions *prometheus.CounterVec // 状态转换计数
+	quotaPendingProbes  prometheus.Gauge       // 当前待探测 key 数
+	registry            *prometheus.Registry
 }
 
 // NewCollector 构造 Collector

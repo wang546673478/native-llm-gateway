@@ -73,11 +73,11 @@ type Manager struct {
 // NewManager 构造 Manager
 func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 	return &Manager{
-		registry:        registry,
-		logger:          logger,
-		providers:       make(map[string]Provider),
-		pricing:         make(map[string]ModelCost),
-		billingSources:  make(map[string]string),
+		registry:       registry,
+		logger:         logger,
+		providers:      make(map[string]Provider),
+		pricing:        make(map[string]ModelCost),
+		billingSources: make(map[string]string),
 	}
 }
 

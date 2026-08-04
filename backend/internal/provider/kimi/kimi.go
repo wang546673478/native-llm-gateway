@@ -2,30 +2,30 @@
 //
 // 基于官方文档重写:
 //
-//   文档集:https://platform.kimi.com/docs/overview
-//   协议:   OpenAI Chat Completions 兼容
-//   Base URL: https://api.moonshot.cn  (中国;国际走 platform.kimi.ai,key 不通用)
-//   端点:   POST {base}/v1/chat/completions
-//   鉴权:   Authorization: Bearer {MOONSHOT_API_KEY}
+//	文档集:https://platform.kimi.com/docs/overview
+//	协议:   OpenAI Chat Completions 兼容
+//	Base URL: https://api.moonshot.cn  (中国;国际走 platform.kimi.ai,key 不通用)
+//	端点:   POST {base}/v1/chat/completions
+//	鉴权:   Authorization: Bearer {MOONSHOT_API_KEY}
 //
 // 关键差异(与标准 OpenAI Chat Completions):
-//   1. 模型命名:Moonshot 自有体系,常见:
-//      - kimi-k3           旗舰,1M 上下文,顶层 reasoning_effort(low/high/max)
-//      - kimi-k2.7-code    代码专用,256K 上下文,支持 thinking mode + 图像/视频输入
-//      - kimi-k2.7-code-highspeed  代码高速版
-//      - kimi-k2.6         通用,256K 上下文,支持 thinking / 非 thinking 模式
-//      - kimi-k2.5         通用
-//      注:"kimi-k2-0905-preview" / "kimi-latest" / "kimi-thinking-preview" 已弃用;
-//         "moonshot-v1-*" 老系列不对新用户开放
-//   2. 扩展参数(通过 body 透传,Gateway 不需要特殊处理):
-//      - thinking:     extra_body={"thinking": {...}}(thinking mode 开关)
-//      - reasoning_effort:kimi-k3 顶层字段,"low"/"high"/"max"
-//      - partial:      assistant 消息字段 {"partial": true}(partial mode)
-//   3. 错误码:HTTP 状态码 + body 中 error.type,
-//      常见类型:content_filter / invalid_request_error / engine_overloaded_error
-//      / exceeded_current_quota_error / rate_limit_reached_error
-//      401 区分:platform.kimi.com(中国)与 platform.kimi.ai(国际)key 不通用
-//      openai_compatible.Base.ClassifyErrorWithBody 已支持通用分类
+//  1. 模型命名:Moonshot 自有体系,常见:
+//     - kimi-k3           旗舰,1M 上下文,顶层 reasoning_effort(low/high/max)
+//     - kimi-k2.7-code    代码专用,256K 上下文,支持 thinking mode + 图像/视频输入
+//     - kimi-k2.7-code-highspeed  代码高速版
+//     - kimi-k2.6         通用,256K 上下文,支持 thinking / 非 thinking 模式
+//     - kimi-k2.5         通用
+//     注:"kimi-k2-0905-preview" / "kimi-latest" / "kimi-thinking-preview" 已弃用;
+//     "moonshot-v1-*" 老系列不对新用户开放
+//  2. 扩展参数(通过 body 透传,Gateway 不需要特殊处理):
+//     - thinking:     extra_body={"thinking": {...}}(thinking mode 开关)
+//     - reasoning_effort:kimi-k3 顶层字段,"low"/"high"/"max"
+//     - partial:      assistant 消息字段 {"partial": true}(partial mode)
+//  3. 错误码:HTTP 状态码 + body 中 error.type,
+//     常见类型:content_filter / invalid_request_error / engine_overloaded_error
+//     / exceeded_current_quota_error / rate_limit_reached_error
+//     401 区分:platform.kimi.com(中国)与 platform.kimi.ai(国际)key 不通用
+//     openai_compatible.Base.ClassifyErrorWithBody 已支持通用分类
 //
 // Anthropic 兼容入口(kimi-anthropic provider)走 https://api.moonshot.cn/anthropic,
 // 共享同一组 API Key — 给 Claude Code / Anthropic SDK 用户使用。
@@ -56,10 +56,10 @@ const (
 //
 //   - kimi-k3                   2026-07-16 上线,1M 上下文,Kimi 迄今最强旗舰
 //   - kimi-k2.7-code            2026-06-12 开源,256K 上下文,编程专项
-//                              强制开启思考模式(MoE 1T 总参 / 32B 激活)
+//     强制开启思考模式(MoE 1T 总参 / 32B 激活)
 //   - kimi-k2.7-code-highspeed  同模型,2× 价格,5-6× 速度(180 tok/s, 短场景 260 tok/s)
 //   - kimi-k2.6                2026-04 发布,256K 上下文,通用
-//                              支持 thinking / 非 thinking 模式,智能体集群
+//     支持 thinking / 非 thinking 模式,智能体集群
 //   - kimi-for-coding          Kimi Code Plan 专用模型 ID(给 Cursor / Claude Code 订阅用户)
 //
 // 弃用(不要列):

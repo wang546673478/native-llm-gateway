@@ -10,10 +10,10 @@ import (
 type KeyStatus string
 
 const (
-	KeyStatusActive        KeyStatus = "ACTIVE"          // 正常可用
-	KeyStatusCooling       KeyStatus = "COOLING"         // 429 后冷却中
-	KeyStatusLimited       KeyStatus = "LIMITED"         // 配额受限(预留)
-	KeyStatusDisabled      KeyStatus = "DISABLED"        // 累计冷却超阈值,永久禁用
+	KeyStatusActive   KeyStatus = "ACTIVE"   // 正常可用
+	KeyStatusCooling  KeyStatus = "COOLING"  // 429 后冷却中
+	KeyStatusLimited  KeyStatus = "LIMITED"  // 配额受限(预留)
+	KeyStatusDisabled KeyStatus = "DISABLED" // 累计冷却超阈值,永久禁用
 	// P68: 配额耗尽(quota_exceeded) — 区别于 DISABLED,worker 可恢复
 	KeyStatusQuotaExceeded KeyStatus = "QUOTA_EXCEEDED"
 )

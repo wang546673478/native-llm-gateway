@@ -18,10 +18,10 @@ type probeItem struct {
 
 type probeHeap []*probeItem
 
-func (h probeHeap) Len() int { return len(h) }
+func (h probeHeap) Len() int           { return len(h) }
 func (h probeHeap) Less(i, j int) bool { return h[i].nextAt.Before(h[j].nextAt) }
-func (h probeHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *probeHeap) Push(x any) { *h = append(*h, x.(*probeItem)) }
+func (h probeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *probeHeap) Push(x any)        { *h = append(*h, x.(*probeItem)) }
 func (h *probeHeap) Pop() any {
 	old := *h
 	n := len(old)
@@ -36,7 +36,7 @@ type Scheduler struct {
 	mu    sync.Mutex
 	heap  *probeHeap
 	index map[string]*probeItem // "minimax:1" → item,用于 dedup / re-schedule
-	now   func() time.Time       // 可注入用于 test
+	now   func() time.Time      // 可注入用于 test
 }
 
 func NewScheduler() *Scheduler {

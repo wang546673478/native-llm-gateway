@@ -48,12 +48,13 @@ func NewBase(cfg Config) *Base {
 // Name 由 wrapper 提供
 
 // SendRequest 发送非流式 Anthropic Messages 请求
-//   POST {endpoint}/v1/messages
-//   Headers:
-//     x-api-key: {key}
-//     anthropic-version: 2023-06-01
-//     Content-Type: application/json
-//   Body 原样透传
+//
+//	POST {endpoint}/v1/messages
+//	Headers:
+//	  x-api-key: {key}
+//	  anthropic-version: 2023-06-01
+//	  Content-Type: application/json
+//	Body 原样透传
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	if b.cfg.Pool == nil {
 		return nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
@@ -118,17 +119,18 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 
 // SendStreamRequest 发送流式 Anthropic Messages 请求
 // Anthropic SSE 格式:
-//   event: message_start
-//   data: {"type":"message_start","message":{...}}
 //
-//   event: content_block_delta
-//   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}
+//	event: message_start
+//	data: {"type":"message_start","message":{...}}
 //
-//   event: message_delta
-//   data: {"type":"message_delta","usage":{"output_tokens":N}}
+//	event: content_block_delta
+//	data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}
 //
-//   event: message_stop
-//   data: {"type":"message_stop"}
+//	event: message_delta
+//	data: {"type":"message_delta","usage":{"output_tokens":N}}
+//
+//	event: message_stop
+//	data: {"type":"message_stop"}
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	if b.cfg.Pool == nil {
 		return nil, nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
@@ -139,14 +141,14 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	}
 
 	// 流式请求:超时拉长到 10 分钟
-// http.Client.Timeout 是整个请求生命周期(包括读 body)的硬上限。
-// 对于流式响应,Anthropic 官方 API 自家超时是 10 分钟,thinking 模型可能更久。
-// 之前 120s 太短 — upstream 思考类请求会触发 context deadline exceeded,
-// 导致 Claude Code 报 "Connection closed mid-response"。
-//
-// 10 分钟足够绝大多数 thinking 模型生成;超时由 context 控制
-// (调用方 ctx cancel 即触发中断)
-streamTimeout := b.cfg.Timeout
+	// http.Client.Timeout 是整个请求生命周期(包括读 body)的硬上限。
+	// 对于流式响应,Anthropic 官方 API 自家超时是 10 分钟,thinking 模型可能更久。
+	// 之前 120s 太短 — upstream 思考类请求会触发 context deadline exceeded,
+	// 导致 Claude Code 报 "Connection closed mid-response"。
+	//
+	// 10 分钟足够绝大多数 thinking 模型生成;超时由 context 控制
+	// (调用方 ctx cancel 即触发中断)
+	streamTimeout := b.cfg.Timeout
 	if streamTimeout < 600*time.Second {
 		streamTimeout = 600 * time.Second
 	}
@@ -418,10 +420,10 @@ func parseAnthropicUsage(body []byte) *provider.Usage {
 		return nil
 	}
 	u := &provider.Usage{
-		Model:               resp.Model, // P65: 上游响应的真实 model 名
-		PromptTokens:        resp.Usage.InputTokens,
-		CompletionTokens:    resp.Usage.OutputTokens,
-		TotalTokens:         resp.Usage.InputTokens + resp.Usage.OutputTokens +
+		Model:            resp.Model, // P65: 上游响应的真实 model 名
+		PromptTokens:     resp.Usage.InputTokens,
+		CompletionTokens: resp.Usage.OutputTokens,
+		TotalTokens: resp.Usage.InputTokens + resp.Usage.OutputTokens +
 			resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
 		CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
 		CacheReadTokens:     resp.Usage.CacheReadInputTokens,

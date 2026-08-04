@@ -21,7 +21,7 @@ type ProviderConfig struct {
 	Protocol         Protocol
 	Timeout          time.Duration
 	Models           []string
-	APIKeys          []string // 明文,内部会加密传给 KeyPool
+	APIKeys          []string    // 明文,内部会加密传给 KeyPool
 	Pool             interface{} // *keypool.Pool — 用 interface{} 避免循环依赖
 	FailureThreshold int
 	FailureWindow    time.Duration
@@ -31,9 +31,9 @@ type ProviderConfig struct {
 // Registry 维护 name → Factory + Protocol 的映射
 // 每个 Provider 包在 init() 时调用 Register 注册自己
 type Registry struct {
-	mu          sync.RWMutex
-	factories   map[string]Factory
-	protocols   map[string]Protocol // 用于前端显示绑定选项,即使 provider 未启用
+	mu        sync.RWMutex
+	factories map[string]Factory
+	protocols map[string]Protocol // 用于前端显示绑定选项,即使 provider 未启用
 }
 
 // NewRegistry 构造空 Registry

@@ -3,10 +3,10 @@
 // 智谱官方为 Claude Code / Anthropic SDK 用户提供的兼容入口:
 //   - 文档说明:https://docs.bigmodel.cn/cn/guide/start/introduction
 //     (在 /cn/guide/develop/ 文档集里有相关迁移指南,
-//      官方也发了"Claude API 用户特别搬家计划"公告)
+//     官方也发了"Claude API 用户特别搬家计划"公告)
 //   - base URL: https://open.bigmodel.cn/api/anthropic
 //   - 鉴权:     x-api-key: {ZHIPU_API_KEY}
-//               anthropic-version: 2023-06-01
+//     anthropic-version: 2023-06-01
 //   - 端点:     POST /v1/messages
 //
 // 端点结构与 deepseek_anthropic 完全相同 — endpoint 字段填
@@ -48,15 +48,16 @@ const (
 //   - glm-4.6         上一代旗舰
 //   - glm-4.6v        多模态
 //   - glm-4.5         Anthropic 协议最先支持的商用模型
+//
 // 免费:
 //   - glm-4.7-flash   替代 glm-4.5-flash(2026-01-30 下线)
 var DefaultModels = []string{
-	"glm-5.2",         // Coding 旗舰
-	"glm-4.7",         // Claude Code 默认
-	"glm-4.7-flash",   // 免费
-	"glm-4.6",         // 上一代旗舰
-	"glm-4.6v",        // 多模态
-	"glm-4.5",         // Anthropic 协议最先支持
+	"glm-5.2",       // Coding 旗舰
+	"glm-4.7",       // Claude Code 默认
+	"glm-4.7-flash", // 免费
+	"glm-4.6",       // 上一代旗舰
+	"glm-4.6v",      // 多模态
+	"glm-4.5",       // Anthropic 协议最先支持
 }
 
 // Provider GLM Anthropic 兼容 Provider

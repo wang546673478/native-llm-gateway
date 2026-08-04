@@ -8,17 +8,17 @@
 //   - 鉴权:   Authorization: Bearer {API_KEY}
 //
 // 关键差异(与标准 OpenAI Chat Completions):
-//   1. 端点路径是 /chat/completions(没有 /v1 前缀,DeepSeek 也类似)
-//   2. 模型命名体系:
-//      - glm-4.7        最新旗舰(2025-12),32K 上下文,8K 输出,支持 thinking + function calling
-//      - glm-4.7-flash  轻量免费版(2026-01),替代 glm-4.5-flash(2026-01-30 下线)
-//      - glm-4.6        上一代旗舰(2025-10),200K 上下文
-//      - glm-4.6v       多模态版
-//      - glm-4-air      / glm-4-airx / glm-4-long / glm-4-flashx / glm-4-plus  持续维护
-//      注:"glm-4.5-flash" 已下线;不存在的命名:glm-4.6 / glm-4.7 + "-free" 后缀
-//   3. 流式响应支持 stream_options.include_usage=true,
-//      最后一个 chunk 带 usage(prompt_tokens / completion_tokens / total_tokens)
-//      与标准 OpenAI 兼容 — openai_compatible.Base 已处理
+//  1. 端点路径是 /chat/completions(没有 /v1 前缀,DeepSeek 也类似)
+//  2. 模型命名体系:
+//     - glm-4.7        最新旗舰(2025-12),32K 上下文,8K 输出,支持 thinking + function calling
+//     - glm-4.7-flash  轻量免费版(2026-01),替代 glm-4.5-flash(2026-01-30 下线)
+//     - glm-4.6        上一代旗舰(2025-10),200K 上下文
+//     - glm-4.6v       多模态版
+//     - glm-4-air      / glm-4-airx / glm-4-long / glm-4-flashx / glm-4-plus  持续维护
+//     注:"glm-4.5-flash" 已下线;不存在的命名:glm-4.6 / glm-4.7 + "-free" 后缀
+//  3. 流式响应支持 stream_options.include_usage=true,
+//     最后一个 chunk 带 usage(prompt_tokens / completion_tokens / total_tokens)
+//     与标准 OpenAI 兼容 — openai_compatible.Base 已处理
 //
 // 实现策略:继承 openai_compatible.Base,通过 Config.ChatPath 覆盖端点,
 // 启用 StreamUsage 让流式响应末尾带 usage。
@@ -61,7 +61,7 @@ const (
 // 已弃用(不要列):
 //   - glm-4.5-flash        2026-01-30 下线,自动路由到 glm-4.7-flash
 //   - glm-4-long / glm-4-plus / glm-4-air / glm-4-airx / glm-4-flashx
-//                          2024-2025 旧 GLM-4 系列,被新的 glm-4.6/4.7 系列替代
+//     2024-2025 旧 GLM-4 系列,被新的 glm-4.6/4.7 系列替代
 var DefaultModels = []string{
 	// 旗舰/商用
 	"glm-5.2", // 2026-06 开源,1M 上下文,Coding 旗舰
@@ -98,7 +98,7 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Endpoint:    cfg.Endpoint,
 			Timeout:     cfg.Timeout,
 			ChatPath:    ChatPath, // GLM 关键差异:无 /v1 前缀
-			StreamUsage: true,    // 流式末尾带 usage,Gateway 才能正确计费
+			StreamUsage: true,     // 流式末尾带 usage,Gateway 才能正确计费
 			Pool:        toPool(cfg.Pool),
 		}),
 		cfg: cfg,

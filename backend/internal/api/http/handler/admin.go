@@ -29,16 +29,16 @@ const (
 
 // Admin 持有管理 API 所需的依赖
 type Admin struct {
-	Manager     *provider.Manager
-	Registry    *provider.Registry
-	Pools       map[string]*keypool.Pool
-	Router      *router.Router
-	Breakers    *circuit.Manager
-	Usage       *usage.Repository
-	Aliases     map[string]router.AliasConfig
-	Keys        []GatewayKeyInfo
-	AccessLog   *accesslog.Recorder // P67: 接入日志 Recorder(可能为 no-op)
-	QuotaMgr    *quotacheck.Manager  // P68/P-quota-balance: quota 恢复 worker(nil 时前端拿到 default)
+	Manager   *provider.Manager
+	Registry  *provider.Registry
+	Pools     map[string]*keypool.Pool
+	Router    *router.Router
+	Breakers  *circuit.Manager
+	Usage     *usage.Repository
+	Aliases   map[string]router.AliasConfig
+	Keys      []GatewayKeyInfo
+	AccessLog *accesslog.Recorder // P67: 接入日志 Recorder(可能为 no-op)
+	QuotaMgr  *quotacheck.Manager // P68/P-quota-balance: quota 恢复 worker(nil 时前端拿到 default)
 }
 
 // NewAdmin 构造 Admin(caller 端负责注入依赖)。
@@ -339,9 +339,9 @@ func (a *Admin) modelProviders(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"model_id": modelID,
+		"model_id":  modelID,
 		"providers": rows,
-		"count":    len(rows),
+		"count":     len(rows),
 	})
 }
 
@@ -443,9 +443,10 @@ func statusBucketFor(t string) accesslog.StatusBucket {
 // []accesslog.StatusBucket(F9 binding)。
 //
 // 返回值:
-//   buckets  — 翻译后的 StatusBucket 列表(OR 拼装,store.buildWhere 处理)
-//   unknown  — 输入中遇到的未知 token(用于在响应里告诉前端具体哪几个)
-//   ok       — 是否全部合法;为 false 时 caller 应 400 拒绝
+//
+//	buckets  — 翻译后的 StatusBucket 列表(OR 拼装,store.buildWhere 处理)
+//	unknown  — 输入中遇到的未知 token(用于在响应里告诉前端具体哪几个)
+//	ok       — 是否全部合法;为 false 时 caller 应 400 拒绝
 //
 // 多值用 OR 拼装。未知 token 不再"静默忽略"(原实现 bug):一旦出现
 // 未知值就 ok=false,由 caller 决定如何回应。
@@ -473,16 +474,17 @@ func parseStatusBuckets(s string) (buckets []accesslog.StatusBucket, unknown []s
 // listAccessLogs GET /api/v1/access-logs
 //
 // 支持 query params:
-//   start        RFC3339 时间下界
-//   end          RFC3339 时间上界
-//   gateway_key  精确匹配 gateway_key_name
-//   provider     精确匹配 provider_name
-//   model        匹配 requested_model 或 final_model
-//   trace_id     精确匹配 trace_id
-//   error_type   精确匹配 error_type
-//   status       F9 多值,逗号分隔;OR 拼接
-//   limit        默认 20,上限 200(Store.List 内部夹紧)
-//   offset       默认 0
+//
+//	start        RFC3339 时间下界
+//	end          RFC3339 时间上界
+//	gateway_key  精确匹配 gateway_key_name
+//	provider     精确匹配 provider_name
+//	model        匹配 requested_model 或 final_model
+//	trace_id     精确匹配 trace_id
+//	error_type   精确匹配 error_type
+//	status       F9 多值,逗号分隔;OR 拼接
+//	limit        默认 20,上限 200(Store.List 内部夹紧)
+//	offset       默认 0
 func (a *Admin) listAccessLogs(c *gin.Context) {
 	store := a.accessLogStore()
 	if store == nil {
@@ -589,7 +591,7 @@ func (a *Admin) getAccessLogDetail(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"metadata":        e,
-		"req_body":        string(reqBody),  // F3: 原始 JSON 字符串(非 base64)
+		"req_body":        string(reqBody), // F3: 原始 JSON 字符串(非 base64)
 		"resp_body":       string(respBody),
 		"req_body_trunc":  accesslog.IsTruncated(e.ReqBodyPath),
 		"resp_body_trunc": accesslog.IsTruncated(e.RespBodyPath),
@@ -599,10 +601,11 @@ func (a *Admin) getAccessLogDetail(c *gin.Context) {
 // accessLogStats GET /api/v1/access-logs/stats
 //
 // 24h 时间窗聚合:
-//   total_24h   — 总记录数
-//   errors_24h  — status_code >= 400 的记录数
-//   active_keys — F14 binding:真正 distinct 的 gateway_key_name 数
-//                 (COUNT(DISTINCT ...),不能误用 COUNT(*))
+//
+//	total_24h   — 总记录数
+//	errors_24h  — status_code >= 400 的记录数
+//	active_keys — F14 binding:真正 distinct 的 gateway_key_name 数
+//	              (COUNT(DISTINCT ...),不能误用 COUNT(*))
 func (a *Admin) accessLogStats(c *gin.Context) {
 	store := a.accessLogStore()
 	if store == nil {

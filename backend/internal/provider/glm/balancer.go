@@ -31,7 +31,7 @@ func newGLMBalancer() *glmBalancer {
 
 // glmUsageResp GLM /api/usage 响应
 type glmUsageResp struct {
-	Code int `json:"code"`
+	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data struct {
 		Limit float64 `json:"limit"`

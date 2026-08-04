@@ -67,11 +67,12 @@ type StreamChunk struct {
 //   - CacheCreationTokens: 创建新 cache 单元的 token(Anthropic 才有,DeepSeek = 0)
 //   - CacheReadTokens:     命中已有 cache 的 token(DeepSeek prompt_cache_hit_tokens,Anthropic cache_read_input_tokens)
 //   - CompletionTokens:    输出 token
+//
 // P65: 新增 Model 字段 — 上游响应里的真实 model 名
 //   - OpenAI 协议: 响应顶层 "model" 字段
 //   - Anthropic 协议: 响应顶层 "model" 字段
 //   - Google 协议: 响应顶层 "modelVersion" 字段(Gemini 命名不一样)
-//   proxy 写入 UsageRecord.ModelID 时,优先用此字段覆盖客户端请求的 model
+//     proxy 写入 UsageRecord.ModelID 时,优先用此字段覆盖客户端请求的 model
 type Usage struct {
 	Model               string
 	PromptTokens        int
@@ -109,18 +110,18 @@ type Provider interface {
 type ErrorType string
 
 const (
-	ErrorTypeRateLimit         ErrorType = "rate_limit"
-	ErrorTypeAuth              ErrorType = "auth"
-	ErrorTypeInvalidRequest    ErrorType = "invalid_request"
-	ErrorTypeServerError       ErrorType = "server_error"
-	ErrorTypeTimeout           ErrorType = "timeout"
-	ErrorTypeConnection        ErrorType = "connection"
-	ErrorTypeModelNotFound     ErrorType = "model_not_found"
+	ErrorTypeRateLimit          ErrorType = "rate_limit"
+	ErrorTypeAuth               ErrorType = "auth"
+	ErrorTypeInvalidRequest     ErrorType = "invalid_request"
+	ErrorTypeServerError        ErrorType = "server_error"
+	ErrorTypeTimeout            ErrorType = "timeout"
+	ErrorTypeConnection         ErrorType = "connection"
+	ErrorTypeModelNotFound      ErrorType = "model_not_found"
 	ErrorTypeClientDisconnected ErrorType = "client_disconnected" // P: stream 客户端断开,非 retryable
 	// P49: 配额/额度耗尽错误(MiniMax token plan 5h 用完等场景)
 	// 与 auth 不同:quota 用完应该 failover 到下一个 provider(api 计费),
 	// 而 auth 错误说明 key 本身有问题,不该 failover
-	ErrorTypeQuotaExceeded  ErrorType = "quota_exceeded"
+	ErrorTypeQuotaExceeded ErrorType = "quota_exceeded"
 )
 
 // ProviderError 是 Provider 返回的结构化错误
@@ -143,10 +144,11 @@ func (e *ProviderError) Error() string {
 // IsRetryable 判断错误是否触发 failover
 // 规格书:invalid_request / auth 不重试
 // P49 调整:auth 错误**可重试**
-//   理由:chain failover 场景下,provider A 的 key 错误 → failover 到 provider B 的 key
-//   pool 已经把 A 的坏 key 标记为 DISABLED(ReportError),
-//   下次 iter.Next() 会跳过 A 选 B,B 有独立 key 可以成功
-//   invalid_request 和 model_not_found 仍然不重试(请求/模型本身有问题,换 provider 也没用)
+//
+//	理由:chain failover 场景下,provider A 的 key 错误 → failover 到 provider B 的 key
+//	pool 已经把 A 的坏 key 标记为 DISABLED(ReportError),
+//	下次 iter.Next() 会跳过 A 选 B,B 有独立 key 可以成功
+//	invalid_request 和 model_not_found 仍然不重试(请求/模型本身有问题,换 provider 也没用)
 func (e *ProviderError) IsRetryable() bool {
 	switch e.ErrorType {
 	case ErrorTypeInvalidRequest, ErrorTypeModelNotFound, ErrorTypeClientDisconnected:
@@ -158,10 +160,10 @@ func (e *ProviderError) IsRetryable() bool {
 
 // ClassifyError 根据 HTTP 状态码 + body 分类错误
 // P49: 识别 quota exceeded 错误(从 body 关键字判断)
-//  - 402 Payment Required → 明确是 quota/账单问题
-//  - 429 Too Many Requests → 优先按 rate limit,但 body 含 quota 关键字时升级为 quota_exceeded
-//  - 403 Forbidden + body 含 quota/usage_limit/insufficient/balance 关键字 → quota_exceeded(不是 auth)
-//  - 其他 403 → auth(说明 key 本身有问题)
+//   - 402 Payment Required → 明确是 quota/账单问题
+//   - 429 Too Many Requests → 优先按 rate limit,但 body 含 quota 关键字时升级为 quota_exceeded
+//   - 403 Forbidden + body 含 quota/usage_limit/insufficient/balance 关键字 → quota_exceeded(不是 auth)
+//   - 其他 403 → auth(说明 key 本身有问题)
 func ClassifyError(statusCode int) ErrorType {
 	return ClassifyErrorWithBody(statusCode, nil)
 }

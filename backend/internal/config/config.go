@@ -13,18 +13,18 @@ import (
 
 // Config 是 Gateway 的根配置
 type Config struct {
-	Server    ServerConfig         `mapstructure:"server"`
-	Database  DatabaseConfig       `mapstructure:"database"`
-	Redis     RedisConfig          `mapstructure:"redis"`
-	Auth      AuthConfig           `mapstructure:"auth"`
-	Providers map[string]Provider  `mapstructure:"providers"`
-	Routing   RoutingConfig        `mapstructure:"routing"`
-	KeyPool   KeyPoolConfig        `mapstructure:"keypool"`
-	Timeouts  TimeoutsConfig       `mapstructure:"timeouts"`
-	Retry     RetryConfig          `mapstructure:"retry"`
-	Logging   LoggingConfig        `mapstructure:"logging"`
-	Metrics   MetricsConfig        `mapstructure:"metrics"`
-	Usage     UsageConfig          `mapstructure:"usage"`
+	Server    ServerConfig        `mapstructure:"server"`
+	Database  DatabaseConfig      `mapstructure:"database"`
+	Redis     RedisConfig         `mapstructure:"redis"`
+	Auth      AuthConfig          `mapstructure:"auth"`
+	Providers map[string]Provider `mapstructure:"providers"`
+	Routing   RoutingConfig       `mapstructure:"routing"`
+	KeyPool   KeyPoolConfig       `mapstructure:"keypool"`
+	Timeouts  TimeoutsConfig      `mapstructure:"timeouts"`
+	Retry     RetryConfig         `mapstructure:"retry"`
+	Logging   LoggingConfig       `mapstructure:"logging"`
+	Metrics   MetricsConfig       `mapstructure:"metrics"`
+	Usage     UsageConfig         `mapstructure:"usage"`
 }
 
 // ServerConfig HTTP 服务配置
@@ -79,15 +79,15 @@ type RedisConfig struct {
 
 // AuthConfig 客户端认证配置
 type AuthConfig struct {
-	Enabled bool         `mapstructure:"enabled"`
-	Keys    []AuthKey    `mapstructure:"keys"`
+	Enabled bool      `mapstructure:"enabled"`
+	Keys    []AuthKey `mapstructure:"keys"`
 }
 
 // AuthKey 单个 Gateway 客户端 Key
 type AuthKey struct {
-	Name          string         `mapstructure:"name"`
-	Key           string         `mapstructure:"key"`
-	AllowedModels []string       `mapstructure:"allowed_models"`
+	Name          string          `mapstructure:"name"`
+	Key           string          `mapstructure:"key"`
+	AllowedModels []string        `mapstructure:"allowed_models"`
 	RateLimit     RateLimitConfig `mapstructure:"rate_limit"`
 }
 
@@ -120,12 +120,12 @@ type Provider struct {
 //   - CostPer1kCacheRead:     cache 命中(读)— DeepSeek ¥0.02-0.025/M 级别
 //   - CostPer1kCacheCreation: cache 写入(创建)— 比 input 略贵,Anthropic 1.25x input
 type ProviderModel struct {
-	ID                      string   `mapstructure:"id"`
-	Aliases                 []string `mapstructure:"aliases"`
-	CostPer1kInput          float64  `mapstructure:"cost_per_1k_input"`
-	CostPer1kOutput         float64  `mapstructure:"cost_per_1k_output"`
-	CostPer1kCacheRead      float64  `mapstructure:"cost_per_1k_cache_read"`
-	CostPer1kCacheCreation  float64  `mapstructure:"cost_per_1k_cache_creation"`
+	ID                     string   `mapstructure:"id"`
+	Aliases                []string `mapstructure:"aliases"`
+	CostPer1kInput         float64  `mapstructure:"cost_per_1k_input"`
+	CostPer1kOutput        float64  `mapstructure:"cost_per_1k_output"`
+	CostPer1kCacheRead     float64  `mapstructure:"cost_per_1k_cache_read"`
+	CostPer1kCacheCreation float64  `mapstructure:"cost_per_1k_cache_creation"`
 }
 
 // ProviderKey Provider 的 API Key
@@ -146,12 +146,12 @@ type CircuitBreakerCfg struct {
 
 // RoutingConfig 路由配置
 type RoutingConfig struct {
-	Aliases         map[string]AliasRule  `mapstructure:"aliases"`
+	Aliases map[string]AliasRule `mapstructure:"aliases"`
 	// P39: 共享 provider chain 定义。一个 chain 是一个有序的 (provider, model) 列表,
 	// alias 可以用 chain_ref 引用它,这样多个 alias 共享同一条 fallback 链,
 	// 加新 fallback 时只需要改 chains 里的一处。
-	Chains           map[string][]AliasRoute `mapstructure:"chains"`
-	DefaultStrategy  string                   `mapstructure:"default_strategy"`
+	Chains          map[string][]AliasRoute `mapstructure:"chains"`
+	DefaultStrategy string                  `mapstructure:"default_strategy"`
 }
 
 // AliasRoute 单条路由目标
@@ -178,22 +178,22 @@ type AliasRule struct {
 
 // KeyPoolConfig Key 池配置
 type KeyPoolConfig struct {
-	CoolingDuration    time.Duration `mapstructure:"cooling_duration"`
-	MaxCoolingCount    int           `mapstructure:"max_cooling_count"`
+	CoolingDuration     time.Duration `mapstructure:"cooling_duration"`
+	MaxCoolingCount     int           `mapstructure:"max_cooling_count"`
 	HealthCheckInterval time.Duration `mapstructure:"health_check_interval"`
-	KeyRotation        string        `mapstructure:"key_rotation"`
+	KeyRotation         string        `mapstructure:"key_rotation"`
 
 	// P68: quota restore 配置
-	QuotaEnabled         bool          `mapstructure:"quota_enabled"`
+	QuotaEnabled           bool          `mapstructure:"quota_enabled"`
 	QuotaProbeInitialDelay time.Duration `mapstructure:"quota_probe_initial_delay"`
-	QuotaProbeMaxBackoff time.Duration `mapstructure:"quota_probe_max_backoff"`
-	QuotaProbeJitterPct  int           `mapstructure:"quota_probe_jitter_pct"`
-	QuotaProbeMaxAttempts int           `mapstructure:"quota_probe_max_attempts"`
-	QuotaPollInterval    time.Duration `mapstructure:"quota_poll_interval"`
-	QuotaWarnThresholdPct int           `mapstructure:"quota_warn_threshold_pct"`
-	QuotaPollJitterPct   int           `mapstructure:"quota_poll_jitter_pct"`
-	QuotaHTTPTimeout     time.Duration `mapstructure:"quota_http_timeout"`
-	QuotaUserAgent       string        `mapstructure:"quota_user_agent"`
+	QuotaProbeMaxBackoff   time.Duration `mapstructure:"quota_probe_max_backoff"`
+	QuotaProbeJitterPct    int           `mapstructure:"quota_probe_jitter_pct"`
+	QuotaProbeMaxAttempts  int           `mapstructure:"quota_probe_max_attempts"`
+	QuotaPollInterval      time.Duration `mapstructure:"quota_poll_interval"`
+	QuotaWarnThresholdPct  int           `mapstructure:"quota_warn_threshold_pct"`
+	QuotaPollJitterPct     int           `mapstructure:"quota_poll_jitter_pct"`
+	QuotaHTTPTimeout       time.Duration `mapstructure:"quota_http_timeout"`
+	QuotaUserAgent         string        `mapstructure:"quota_user_agent"`
 }
 
 // TimeoutsConfig 超时配置
@@ -207,10 +207,10 @@ type TimeoutsConfig struct {
 
 // RetryConfig 重试配置
 type RetryConfig struct {
-	Enabled       bool     `mapstructure:"enabled"`
-	MaxAttempts   int      `mapstructure:"max_attempts"`
-	NoFailoverOn  []string `mapstructure:"no_failover_on"`
-	FailoverOn    []string `mapstructure:"failover_on"`
+	Enabled      bool     `mapstructure:"enabled"`
+	MaxAttempts  int      `mapstructure:"max_attempts"`
+	NoFailoverOn []string `mapstructure:"no_failover_on"`
+	FailoverOn   []string `mapstructure:"failover_on"`
 }
 
 // LoggingConfig 日志配置

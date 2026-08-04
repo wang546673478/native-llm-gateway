@@ -3,8 +3,9 @@
 // 官方文档:https://platform.minimaxi.com/docs/api-reference/text-openai-api
 //
 // 端点(2026-07):
-//   POST https://api.minimaxi.com/v1/chat/completions
-//   鉴权:Authorization: Bearer <API_KEY>  (OpenAI 标准)
+//
+//	POST https://api.minimaxi.com/v1/chat/completions
+//	鉴权:Authorization: Bearer <API_KEY>  (OpenAI 标准)
 //
 // 与 minimax (Anthropic 兼容) 共享模型列表:
 //   - MiniMax-M3           (1M tokens,旗舰)
@@ -16,7 +17,7 @@
 // M3 专属参数(在请求 body 的 extra_body 字段下,不是顶层):
 //   - thinking:         {"type": "adaptive"|"disabled"}  (M2.x 不可关闭)
 //   - reasoning_split:  true → 思考走 reasoning_content / reasoning_details
-//                       false → 思考嵌在 content 里的 <think>...</think> 标签
+//     false → 思考嵌在 content 里的 <think>...</think> 标签
 //   - service_tier:     "standard"(默认) | "priority" (1.5x 价格,优先准入)
 //
 // 不同温度:
@@ -73,19 +74,19 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 	}
 	return &Provider{
 		base: openai_compatible.NewBase(openai_compatible.Config{
-			Name:      name,
-			Endpoint:  cfg.Endpoint,
-			Timeout:   cfg.Timeout,
-			ChatPath:  ChatPath, // /chat/completions(无 /v1 前缀,因为 base 已含)
-			Pool:      toPool(cfg.Pool),
-			StreamUsage: true,  // MiniMax 支持 stream_options.include_usage
+			Name:        name,
+			Endpoint:    cfg.Endpoint,
+			Timeout:     cfg.Timeout,
+			ChatPath:    ChatPath, // /chat/completions(无 /v1 前缀,因为 base 已含)
+			Pool:        toPool(cfg.Pool),
+			StreamUsage: true, // MiniMax 支持 stream_options.include_usage
 		}),
 		cfg: cfg,
 	}, nil
 }
 
-func (p *Provider) Name() string                 { return name }
-func (p *Provider) Protocol() provider.Protocol  { return provider.ProtocolOpenAI }
+func (p *Provider) Name() string                { return name }
+func (p *Provider) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
 func (p *Provider) Models() []string {
 	if len(p.cfg.Models) > 0 {
 		return p.cfg.Models

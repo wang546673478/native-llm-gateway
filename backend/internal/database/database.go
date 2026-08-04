@@ -20,7 +20,7 @@ import (
 // 支持 sqlite (默认) 和 postgres
 func Open(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 	gormCfg := &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger:  logger.Default.LogMode(logger.Warn),
 		NowFunc: func() time.Time { return time.Now().UTC() },
 	}
 
@@ -95,7 +95,7 @@ func Migrate(db *gorm.DB) error {
 
 // migrateProviderToProviders 把旧 schema 里的 provider 单值(如果有的话)
 // 迁移到新 schema 的 providers JSON 数组。
-// 用 IFNULL 处理新列(可能为 NULL 或 '[]');老列不存在则 COALESCE 返回 ''。
+// 用 IFNULL 处理新列(可能为 NULL 或 '[]');老列不存在则 COALESCE 返回 ”。
 // 幂等:重复跑不会出错,因为已经迁移过的行 providers != '[]'。
 func migrateProviderToProviders(db *gorm.DB) error {
 	// 检查老列是否存在

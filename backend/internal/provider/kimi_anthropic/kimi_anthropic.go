@@ -5,13 +5,14 @@
 //     注意 platform.kimi.com(中国)和 platform.kimi.ai(国际)账号/key 不通用
 //   - 端点: https://api.moonshot.cn/anthropic
 //   - 鉴权: x-api-key: {MOONSHOT_API_KEY}
-//          anthropic-version: 2023-06-01
+//     anthropic-version: 2023-06-01
 //   - 端点: POST /v1/messages
 //
 // Claude Code 接入(实测可用的方案):
-//   ANTHROPIC_BASE_URL=https://api.moonshot.cn/anthropic
-//   ANTHROPIC_AUTH_TOKEN={YOUR_API_KEY}
-//   ANTHROPIC_MODEL=kimi-k2.5
+//
+//	ANTHROPIC_BASE_URL=https://api.moonshot.cn/anthropic
+//	ANTHROPIC_AUTH_TOKEN={YOUR_API_KEY}
+//	ANTHROPIC_MODEL=kimi-k2.5
 //
 // 端点结构与 deepseek_anthropic / glm_anthropic 完全相同 —
 // endpoint 字段填 https://api.moonshot.cn/anthropic,实际请求会拼成

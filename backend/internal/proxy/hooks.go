@@ -10,11 +10,11 @@ import (
 
 // UsageRecord 用量记录(简化版,P8 接 usage.Collector)
 type UsageRecord struct {
-	TraceID       string
-	GatewayKeyID  string
-	ProviderName  string
-	ModelID       string
-	Protocol      string
+	TraceID      string
+	GatewayKeyID string
+	ProviderName string
+	ModelID      string
+	Protocol     string
 	// P47: 计费来源(token_plan / api / free)— 冗余存方便按维度聚合统计
 	BillingSource string
 	InputTokens   int

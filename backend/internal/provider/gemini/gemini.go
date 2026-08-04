@@ -5,22 +5,23 @@
 // 端点:POST {endpoint}/models/{model}:generateContent
 // Body 格式:{contents: [{parts: [{text: "..."}], role: "user"}]}
 // Usage 字段:promptTokenCount / candidatesTokenCount / totalTokenCount /
-//   cachedContentTokenCount / thoughtsTokenCount
+//
+//	cachedContentTokenCount / thoughtsTokenCount
 package gemini
 
 import (
-	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"context"
 	"fmt"
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 
-		"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/provider/google"
 )
 
 const (
-	name           = "gemini"
+	name            = "gemini"
 	DefaultEndpoint = "https://generativelanguage.googleapis.com/v1beta"
-	ChatPath       = "" // Gemini 不用 chat path,model 拼在 URL 里
+	ChatPath        = "" // Gemini 不用 chat path,model 拼在 URL 里
 )
 
 // DefaultModels Google Gemini 当前 Stable 模型(2026-07)
@@ -70,12 +71,13 @@ func (p *Provider) SendStreamRequest(ctx context.Context, req *provider.Request)
 	return p.base.SendStreamRequest(ctx, req)
 }
 func (p *Provider) HealthCheck(ctx context.Context) error { return p.base.HealthCheck(ctx) }
+
 // SetPool P30:注入 KeyPool(从 DB 读)
 func (p *Provider) SetPool(pool *keypool.Pool) {
 	p.base.SetPool(pool)
 }
 
-func (p *Provider) Close() error                          { return p.base.Close() }
+func (p *Provider) Close() error { return p.base.Close() }
 
 func init() { provider.RegisterGlobalWithProtocol(name, New, provider.ProtocolGoogle) }
 

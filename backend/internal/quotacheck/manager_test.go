@@ -27,10 +27,10 @@ func (f *fakeProviderLookup) EndpointFor(name string) string {
 
 // stubBalancer 简单 stub,可配置返回
 type stubBalancer struct {
-	mu        sync.Mutex
-	calls     int32
-	balance   Balance
-	err       error
+	mu      sync.Mutex
+	calls   int32
+	balance Balance
+	err     error
 }
 
 func (s *stubBalancer) FetchBalance(_ context.Context, _ string, _ *keypool.Key) (Balance, error) {
@@ -201,7 +201,7 @@ func TestManager_BackoffExponential(t *testing.T) {
 		{1, 10 * time.Millisecond},
 		{2, 20 * time.Millisecond},
 		{3, 40 * time.Millisecond},
-		{4, 80 * time.Millisecond}, // capped
+		{4, 80 * time.Millisecond},  // capped
 		{10, 80 * time.Millisecond}, // capped
 	}
 	for _, c := range cases {
@@ -310,8 +310,8 @@ func TestManager_MetricsNilSafe(t *testing.T) {
 
 // fakeBalancer records the call order of FetchBalance
 type fakeBalancer struct {
-	calls []string            // 记录被调用的 key ID
-	bal   Balance             // 所有 key 都返同一个 Balance
+	calls []string // 记录被调用的 key ID
+	bal   Balance  // 所有 key 都返同一个 Balance
 	err   error
 }
 

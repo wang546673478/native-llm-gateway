@@ -38,7 +38,7 @@ type Policy interface {
 type PriorityPolicy struct{}
 
 func NewPriorityPolicy() *PriorityPolicy { return &PriorityPolicy{} }
-func (p *PriorityPolicy) Name() string    { return "priority" }
+func (p *PriorityPolicy) Name() string   { return "priority" }
 
 func (p *PriorityPolicy) Order(cs []ProviderRoute) ([]ProviderRoute, error) {
 	if len(cs) == 0 {
@@ -106,7 +106,7 @@ func (p *WeightPolicy) Order(cs []ProviderRoute) ([]ProviderRoute, error) {
 // CostPolicy 按 Weight 字段升序(占位实现,见 router.go 注释)
 type CostPolicy struct{}
 
-func NewCostPolicy() *CostPolicy { return &CostPolicy{} }
+func NewCostPolicy() *CostPolicy   { return &CostPolicy{} }
 func (p *CostPolicy) Name() string { return "cost" }
 
 func (p *CostPolicy) Order(cs []ProviderRoute) ([]ProviderRoute, error) {
@@ -127,7 +127,7 @@ func (p *CostPolicy) Order(cs []ProviderRoute) ([]ProviderRoute, error) {
 type HealthPolicy struct{}
 
 func NewHealthPolicy() *HealthPolicy { return &HealthPolicy{} }
-func (p *HealthPolicy) Name() string  { return "health" }
+func (p *HealthPolicy) Name() string { return "health" }
 
 func (p *HealthPolicy) Order(cs []ProviderRoute) ([]ProviderRoute, error) {
 	if len(cs) == 0 {
