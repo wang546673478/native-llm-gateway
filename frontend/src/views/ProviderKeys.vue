@@ -134,10 +134,14 @@ const warnThresholdPct = 10
 
 // Same provider & billing_source → max Remaining across all polled rows
 // in the tier.  Polled rows are those with last_polled_at set.
-function tierMaxFor(rows: ProviderKeyView[], tier: string): number {
+//
+// Spec §6.1: 同 provider 同 tier 桶内 Remaining 的最大值 — 必须同时
+// 按 provider_name + billing_source 过滤,避免跨 provider token_plan
+// keys 共享 tier_max 造成小余额 provider 显示错误的绿色。
+function tierMaxFor(rows: ProviderKeyView[], tier: string, providerName: string): number {
   let max = 0
   for (const r of rows) {
-    if (r.billing_source === tier && r.last_polled_at) {
+    if (r.billing_source === tier && r.provider_name === providerName && r.last_polled_at) {
       if (r.remaining > max) max = r.remaining
     }
   }
@@ -160,7 +164,7 @@ function balanceColour(
 const allKeys = computed<ProviderKeyView[]>(() => keys.value)
 
 function tierMaxForRow(row: ProviderKeyView): number {
-  return tierMaxFor(allKeys.value, row.billing_source || '')
+  return tierMaxFor(allKeys.value, row.billing_source || '', row.provider_name || '')
 }
 
 const columns: DataTableColumns<ProviderKeyView> = [
