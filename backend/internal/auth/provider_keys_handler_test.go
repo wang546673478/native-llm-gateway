@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 )
 
 func TestProviderKeyView_IncludesRemainingAndLastPolledAt(t *testing.T) {
@@ -34,6 +37,25 @@ func TestProviderKeyView_IncludesRemainingAndLastPolledAt(t *testing.T) {
 	out, _ = json.Marshal(view)
 	if !contains(string(out), `"last_polled_at":null`) {
 		t.Errorf("expected last_polled_at:null when LastPolledAt is nil; got %s", string(out))
+	}
+}
+
+func TestProviderKeyViewFromPool_IncludesQuotaKind(t *testing.T) {
+	now := time.Now()
+	live := &keypool.Key{Remaining: 43, QuotaKind: "percent", LastPolledAt: now}
+	v := toProviderKeyViewFromPool(dbpkg.ProviderAPIKey{
+		ProviderName: "test", Name: "k", KeyHash: "sk-1234567890", Enabled: true,
+		BillingSource: "token_plan", CreatedAt: now, UpdatedAt: now,
+	}, "ACTIVE", live)
+
+	if v.Remaining != 43 {
+		t.Errorf("Remaining = %v, want 43", v.Remaining)
+	}
+	if v.QuotaKind != "percent" {
+		t.Errorf("QuotaKind = %q, want %q (live key kind should pass through)", v.QuotaKind, "percent")
+	}
+	if v.LastPolledAt == nil || !v.LastPolledAt.Equal(now) {
+		t.Errorf("LastPolledAt = %v, want %v", v.LastPolledAt, now)
 	}
 }
 

@@ -95,6 +95,8 @@ type ProviderKeyView struct {
 	// P-quota-balance: 上游轮询结果
 	Remaining    float64    `json:"remaining"`
 	LastPolledAt *time.Time `json:"last_polled_at"` // nil 时序列化为 null
+	// P-quota-display: 数值类型("percent"/"currency"/"")— 前端按此渲染单位
+	QuotaKind string `json:"quota_kind"`
 }
 
 func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
@@ -121,6 +123,7 @@ func toProviderKeyViewFromPool(k dbpkg.ProviderAPIKey, status string, live *keyp
 	v := toProviderKeyView(k, status)
 	if live != nil {
 		v.Remaining = live.Remaining
+		v.QuotaKind = live.QuotaKind
 		if !live.LastPolledAt.IsZero() {
 			t := live.LastPolledAt
 			v.LastPolledAt = &t
