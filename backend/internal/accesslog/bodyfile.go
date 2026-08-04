@@ -34,13 +34,14 @@ func (b *BodyFileWriter) today() string {
 	return time.Now().UTC().Format("2006-01-02")
 }
 
-// MaxBodyBytes 单条 body 文件 8MB 上限(spec §3.3 / F12)
+// MaxBodyBytes 单条 body 文件 16MB 上限(P-training:训练数据积累,
+// 采集端尽量不丢信息;仍超限则截断并在文件名标记 truncated)
 // 任何调用方需要判断 body 大小上限或截断阈值时,都应使用此常量,
 // 不要在内部再定义新 const。
-const MaxBodyBytes = 8 * 1024 * 1024
+const MaxBodyBytes = 16 * 1024 * 1024
 
 // Write 写入 body 文件并返回相对于 rootDir 的路径。
-// 单个文件最多保存 8 MB；超出部分丢弃，并在文件名中标记 truncated。
+// 单个文件最多保存 16 MB；超出部分丢弃，并在文件名中标记 truncated。
 func (b *BodyFileWriter) Write(traceID, kind string, data []byte) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -63,7 +63,7 @@ func TestBodyFile_WriteTruncated(t *testing.T) {
 	}
 	defer bw.Close()
 
-	data := make([]byte, 8*1024*1024+1)
+	data := make([]byte, MaxBodyBytes+1)
 	path, err := bw.Write("test-trace-truncated", "resp", data)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
@@ -78,8 +78,8 @@ func TestBodyFile_WriteTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if len(got) != 8*1024*1024 {
-		t.Errorf("body size = %d, want %d", len(got), 8*1024*1024)
+	if len(got) != MaxBodyBytes {
+		t.Errorf("body size = %d, want %d", len(got), MaxBodyBytes)
 	}
 }
 

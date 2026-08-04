@@ -2,6 +2,8 @@
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -96,6 +98,8 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/access-logs", a.listAccessLogs)
 	r.GET("/access-logs/stats", a.accessLogStats)
 	r.GET("/access-logs/:id/detail", a.getAccessLogDetail)
+	// P-training: JSONL 训练数据导出(过滤条件同 list)
+	r.GET("/access-logs/export", a.exportAccessLogs)
 	// P68 / P-quota-balance: 暴露 quota runtime config(目前只含 warn_threshold_pct)
 	// 给前端 ProviderKeys.vue 用,避免硬编码颜色阈值。
 	r.GET("/config/quota", a.getQuotaConfig)
@@ -244,6 +248,97 @@ func (a *Admin) getProvider(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, info)
+}
+
+// embedJSONBody 把 body 字节嵌入导出样本:合法 JSON 原样内嵌(嵌套对象,
+// 训练管线直接用),否则退化为字符串(截断/非 JSON 场景)
+func embedJSONBody(b []byte) any {
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	return string(b)
+}
+
+// exportAccessLogs GET /api/v1/access-logs/export — JSONL 训练数据导出
+//
+// 过滤条件与 list 一致(start/end/gateway_key/provider/model/status),
+// 每行一条请求:metadata + req/resp body(原始 JSON 内嵌)。
+// 截断样本用 req_body_trunc / resp_body_trunc 标记,方便下游筛选;
+// body 文件可能因 retention 丢失 — 读不到就省略该字段。
+func (a *Admin) exportAccessLogs(c *gin.Context) {
+	store := a.accessLogStore()
+	if store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "access_log_disabled"})
+		return
+	}
+	f := accesslog.QueryFilter{
+		GatewayKey:   c.Query("gateway_key"),
+		ProviderName: c.Query("provider"),
+		ModelID:      c.Query("model"),
+		TraceID:      c.Query("trace_id"),
+		ErrorType:    c.Query("error_type"),
+	}
+	if t, ok := parseTime(c.Query("start")); ok {
+		f.StartTime = t
+	}
+	if t, ok := parseTime(c.Query("end")); ok {
+		f.EndTime = t
+	}
+	if v := c.Query("status"); v != "" {
+		buckets, unknown, ok := parseStatusBuckets(v)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_status", "unknown": unknown})
+			return
+		}
+		f.StatusBuckets = buckets
+	}
+	if v := c.Query("limit"); v != "" {
+		f.Limit, _ = strconv.Atoi(v)
+	}
+	if f.Limit <= 0 {
+		f.Limit = 10000 // 导出默认 1 万条,上限 5 万(防一次性拖垮网关)
+	}
+	if f.Limit > 50000 {
+		f.Limit = 50000
+	}
+
+	rows, err := store.List(c.Request.Context(), f)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "export_failed", "detail": err.Error()})
+		return
+	}
+
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Content-Disposition",
+		fmt.Sprintf("attachment; filename=access-logs-%d.ndjson", time.Now().UTC().Unix()))
+
+	enc := json.NewEncoder(c.Writer)
+	for _, e := range rows {
+		sample := map[string]any{
+			"id": e.ID, "trace_id": e.TraceID, "created_at": e.CreatedAt,
+			"gateway_key_name": e.GatewayKeyName,
+			"method":           e.Method, "path": e.Path,
+			"requested_model": e.RequestedModel, "final_model": e.FinalModel,
+			"provider_name": e.ProviderName, "protocol": e.Protocol,
+			"is_stream": e.IsStream, "status_code": e.StatusCode, "error_type": e.ErrorType,
+			"latency_ms":      e.LatencyMs,
+			"req_body_trunc":  accesslog.IsTruncated(e.ReqBodyPath),
+			"resp_body_trunc": accesslog.IsTruncated(e.RespBodyPath),
+		}
+		if e.ReqBodyPath != "" {
+			if b, err := a.AccessLog.ReadBody(e.ReqBodyPath); err == nil {
+				sample["req_body"] = embedJSONBody(b)
+			}
+		}
+		if e.RespBodyPath != "" {
+			if b, err := a.AccessLog.ReadBody(e.RespBodyPath); err == nil {
+				sample["resp_body"] = embedJSONBody(b)
+			}
+		}
+		if err := enc.Encode(sample); err != nil {
+			return // 客户端断开,停止写入
+		}
+	}
 }
 
 // listKeys 移除:P16 起由 auth.KeysHandler 提供 DB-backed 的 GET /api/v1/keys

@@ -8,6 +8,7 @@
           <n-tag style="margin-left: 4px" type="error">错 {{ stats.errors_24h }}</n-tag>
           <n-tag style="margin-left: 4px">{{ stats.active_keys }} 活跃 key</n-tag>
         </n-h3>
+        <n-button @click="exportJsonl">导出 JSONL</n-button>
         <n-button @click="load">刷新</n-button>
       </n-space>
 
@@ -244,18 +245,33 @@ const columns: DataTableColumns<AccessLog> = [
   { title: 'Trace', key: 'trace_id', render: row => row.trace_id.substring(0, 8) },
 ]
 
+// buildParams P-training: 当前过滤条件 → 查询参数(列表/导出共用)
+function buildParams(extra: Record<string, string | number> = {}): Record<string, string | number> {
+  const params: Record<string, string | number> = { ...extra }
+  if (filterTraceId.value) params.trace_id = filterTraceId.value
+  if (filterKey.value) params.gateway_key = filterKey.value
+  if (filterProvider.value) params.provider = filterProvider.value
+  if (filterModel.value) params.model = filterModel.value
+  if (filterStatus.value.length > 0) params.status = filterStatus.value.join(',')
+  return params
+}
+
+// exportJsonl P-training: 用当前过滤条件导出 JSONL 训练数据(新标签页下载)
+function exportJsonl() {
+  const params = new URLSearchParams()
+  for (const [k, v] of Object.entries(buildParams({ limit: 10000 }))) {
+    params.set(k, String(v))
+  }
+  window.open(`/api/v1/access-logs/export?${params.toString()}`, '_blank')
+}
+
 async function load() {
   loading.value = true
   try {
-    const params: Record<string, string | number> = {
+    const params = buildParams({
       limit: pagination.pageSize,
       offset: (pagination.page - 1) * pagination.pageSize,
-    }
-    if (filterTraceId.value) params.trace_id = filterTraceId.value
-    if (filterKey.value) params.gateway_key = filterKey.value
-    if (filterProvider.value) params.provider = filterProvider.value
-    if (filterModel.value) params.model = filterModel.value
-    if (filterStatus.value.length > 0) params.status = filterStatus.value.join(',')
+    })
 
     const [listResp, statsResp] = await Promise.all([
       api.accessLogs.list(params),
