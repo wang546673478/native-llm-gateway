@@ -35,6 +35,10 @@ const rows = ref<AggregateRow[]>([])
 const records = ref<any[]>([])
 const loading = ref(true)
 
+function fmtNum(n: number): string {
+  return n.toLocaleString()
+}
+
 // P65: provider 分布缓存(model_id → providers 列表)
 const providerMap = ref<Record<string, ModelProviderRow[]>>({})
 const loadingProvider = ref<Record<string, boolean>>({})
@@ -117,7 +121,11 @@ const columns = [
   { title: 'Output', key: 'total_output_tokens' },
   { title: '总 Token', key: 'total_tokens' },
   { title: '错误', key: 'error_count' },
-  { title: '平均延迟(ms)', key: 'avg_latency_ms' },
+  {
+    title: '平均延迟(ms)',
+    key: 'avg_latency_ms',
+    render: (row: AggregateRow) => Number(row.avg_latency_ms ?? 0).toFixed(2),
+  },
 ]
 
 const recordColumns = [
@@ -127,7 +135,15 @@ const recordColumns = [
   { title: 'Protocol', key: 'protocol' },
   { title: '状态', key: 'status_code' },
   { title: '延迟(ms)', key: 'latency_ms' },
-  { title: 'Token', key: 'total_tokens' },
+  // P-token-split: 缓存输入 = total - input - output(MiniMax 语义 total 另计缓存,
+  // 精确;DeepSeek 命中已在 input 内 → 缓存列 0)。DB 未存 cache 拆分,这是精确可得的分解
+  {
+    title: '缓存输入',
+    key: 'cache_input_tokens',
+    render: (row: any) => fmtNum(Math.max(0, row.total_tokens - row.input_tokens - row.output_tokens)),
+  },
+  { title: '未缓存输入', key: 'input_tokens', render: (row: any) => fmtNum(row.input_tokens) },
+  { title: '输出', key: 'output_tokens', render: (row: any) => fmtNum(row.output_tokens) },
   { title: 'Trace', key: 'trace_id' },
 ]
 
