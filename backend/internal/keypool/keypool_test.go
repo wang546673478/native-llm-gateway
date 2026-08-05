@@ -619,3 +619,42 @@ func TestPool_Status_QuotaKindDominant(t *testing.T) {
 		t.Errorf("no-poll QuotaKind = %q, want empty", got)
 	}
 }
+
+// TestPool_ReportErrorQuotaProbe_KeepsKeyActive — B-probe-quota: 无 balancer 的
+// api 厂商(glm/qwen/gemini,probe 模式)配额耗尽只计数不标记 — 没有轮询恢复通道,
+// 标 QUOTA_EXCEEDED 就是永久死 key;每次请求重新探测,充值后自动恢复
+func TestPool_ReportErrorQuotaProbe_KeepsKeyActive(t *testing.T) {
+	keys := newTestKeys(1)
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{
+		QuotaRecovery: QuotaRecoveryProbe,
+	})
+
+	pool.ReportError(keys[0], "quota_exceeded")
+
+	if keys[0].Status != KeyStatusActive {
+		t.Errorf("status = %q, want ACTIVE (probe mode must not persist quota mark)", keys[0].Status)
+	}
+	if keys[0].ErrorCount != 1 {
+		t.Errorf("error_count = %d, want 1 (stats still recorded)", keys[0].ErrorCount)
+	}
+	// key 仍可用 → 下一次请求会重新探测上游
+	if _, err := pool.Acquire(); err != nil {
+		t.Errorf("Acquire after probe quota error: %v, want usable", err)
+	}
+}
+
+// TestPool_ReportErrorQuotaPoll_MarksQuotaExceeded — 默认 poll 模式(有 balancer,
+// deepseek/minimax)保持现有行为:标 QUOTA_EXCEEDED,等 quotacheck 轮询恢复
+func TestPool_ReportErrorQuotaPoll_MarksQuotaExceeded(t *testing.T) {
+	keys := newTestKeys(1)
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{}) // 空 = 默认 poll
+
+	pool.ReportError(keys[0], "quota_exceeded")
+
+	if keys[0].Status != KeyStatusQuotaExceeded {
+		t.Errorf("status = %q, want QUOTA_EXCEEDED", keys[0].Status)
+	}
+	if _, err := pool.Acquire(); err == nil {
+		t.Error("Acquire after quota mark: want error (key unusable until poll restores)")
+	}
+}

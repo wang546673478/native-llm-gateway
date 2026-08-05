@@ -129,5 +129,6 @@ backend/internal/
 
 - 同 tier 内多个 provider 时顺序随机(现在只有 minimax 是 token plan,无影响)
 - 上游 400(invalid_request)不禁用 key(只计数);auth 错误才禁用
+- 配额耗尽标记按厂商分两档:有余额查询接口的(deepseek/minimax)→ 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;无余额接口的 api 厂商(glm/qwen/gemini)→ 不永久标记,每次请求重新探测,充值后自动恢复
 - 跨厂商切换时客户端回带的推理块会被网关剥离 + 强制 `effort=none`(DeepSeek 校验)
 - provider 的 endpoint/protocol/models 改动需重载(用 `./gateway-reload.sh` 无感重载,自动编译+优雅排空);routing/价格/key 热重载

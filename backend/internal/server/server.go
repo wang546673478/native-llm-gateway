@@ -219,10 +219,6 @@ func injectPools(manager *provider.Manager, pools map[string]*keypool.Pool, logg
 func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[string]*keypool.Pool {
 	out := make(map[string]*keypool.Pool)
 	sched := keypool.NewScheduler(cfg.KeyPool.KeyRotation)
-	poolCfg := keypool.Config{
-		CoolingDuration: cfg.KeyPool.CoolingDuration,
-		MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
-	}
 	store := auth.NewProviderKeyStore(db)
 	// P-provider-vendor: 同一 vendor 的多个注册名(如 deepseek / deepseek-anthropic)
 	// 共享同一个 pool — key 厂商级一份,协议由 key 的 Protocols 标记过滤
@@ -234,12 +230,34 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		vendor := provider.Default().VendorFor(name)
 		pool, ok := vendorPools[vendor]
 		if !ok {
+			poolCfg := keypool.Config{
+				CoolingDuration: cfg.KeyPool.CoolingDuration,
+				MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
+			}
+			// B-probe-quota: 该 vendor 没有任何注册名有余额查询 balancer
+			// (glm / qwen / gemini)→ probe 模式:配额耗尽不永久标记,每次请求
+			// 重新探测(充值即恢复);有 balancer 的(deepseek / minimax)→
+			// 默认 poll,由 quotacheck 轮询恢复
+			if !vendorHasBalancer(vendor) {
+				poolCfg.QuotaRecovery = keypool.QuotaRecoveryProbe
+			}
 			pool = buildOnePool(context.Background(), vendor, sched, poolCfg, store, logger)
 			vendorPools[vendor] = pool
 		}
 		out[name] = pool
 	}
 	return out
+}
+
+// vendorHasBalancer 该 vendor 的任意注册名是否注册了余额查询 balancer
+// (balancer = 有官方余额接口 → quotacheck 可以轮询恢复)
+func vendorHasBalancer(vendor string) bool {
+	for name, info := range provider.Default().ListRegisteredInfo() {
+		if info.Vendor == vendor && quotacheck.LookupBalancer(name) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // buildOnePool P35: 给单个 provider 从 DB 构造 Pool

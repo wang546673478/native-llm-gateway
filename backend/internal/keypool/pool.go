@@ -10,10 +10,27 @@ import (
 	"time"
 )
 
+// QuotaRecoveryMode 配额耗尽的恢复策略
+type QuotaRecoveryMode string
+
+const (
+	// QuotaRecoveryPoll 有 balancer:标 QUOTA_EXCEEDED,quotacheck 轮询恢复
+	// (deepseek / minimax — 有余额查询接口)
+	QuotaRecoveryPoll QuotaRecoveryMode = "poll"
+	// QuotaRecoveryProbe 无 balancer(api 计费,如 glm / qwen / gemini):
+	// 没有轮询恢复通道,标了 QUOTA_EXCEEDED 就没有恢复路径(充值也救不回来)。
+	// 不永久标记 — 每次请求重新探测,余额不足时 failover 到其他 provider,
+	// 充值后自动恢复
+	QuotaRecoveryProbe QuotaRecoveryMode = "probe"
+)
+
 // Config Pool 配置
 type Config struct {
 	CoolingDuration time.Duration // 默认冷却时长
 	MaxCoolingCount int           // 累计超过此值则 DISABLED
+	// QuotaRecovery 配额耗尽标记策略;空 = poll(保持现有行为)。
+	// 由 server.buildKeyPools 按「该 vendor 是否有 balancer」设置
+	QuotaRecovery QuotaRecoveryMode
 }
 
 // Pool 管理一个 Provider 下的所有 Key
@@ -38,6 +55,9 @@ func NewPool(providerName string, keys []*Key, scheduler Scheduler, cfg Config) 
 	}
 	if cfg.MaxCoolingCount <= 0 {
 		cfg.MaxCoolingCount = 5
+	}
+	if cfg.QuotaRecovery == "" {
+		cfg.QuotaRecovery = QuotaRecoveryPoll // 默认 poll,保持现有行为
 	}
 	if scheduler == nil {
 		scheduler = &RoundRobinScheduler{}
@@ -271,6 +291,13 @@ func (p *Pool) ReportError(k *Key, errType string) {
 		// 其他厂商 thinking 块、tool 格式差异等),不是 key 有问题 —
 		// 只计数,不禁用。禁用会把整条链打死且无恢复路径
 	case "quota_exceeded":
+		if p.cfg.QuotaRecovery == QuotaRecoveryProbe {
+			// B-probe-quota: 无 balancer 的 api 厂商(glm/qwen/gemini)没有轮询
+			// 恢复通道 — 标 QUOTA_EXCEEDED 就是永久死 key。只计数不标记,
+			// 每次请求重新探测:余额不足期间 failover 到其他 provider,
+			// 充值后自动恢复(代价:每次请求先打一次上游拿错误,毫秒级)
+			break
+		}
 		// P68: 配额耗尽(402 / 429 quota / 403 quota) — 标 QUOTA_EXCEEDED
 		// 让 quotacheck.Manager 探测恢复后调 RestoreQuota 回到 ACTIVE
 		fromStatus = k.Status

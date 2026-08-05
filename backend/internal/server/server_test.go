@@ -15,6 +15,8 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	// P-provider-vendor: init() 注册 deepseek / deepseek-anthropic(vendor=deepseek)
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
+	// TestVendorHasBalancer 用:glm 无 balancer(对照 deepseek 有)
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm"
 )
 
 // fakeProvider 最小 Provider 实现 — Manager.SetForTesting 用
@@ -101,5 +103,16 @@ func TestReloadProviderPool_FullRebuildVendorGrouped(t *testing.T) {
 	}
 	if got := s.pools["deepseek"].Size(); got != 1 {
 		t.Errorf("rebuilt pool Size = %d, want 1", got)
+	}
+}
+
+// TestVendorHasBalancer — B-probe-quota: 有余额查询 balancer 的 vendor
+// (deepseek)→ poll 模式;无 balancer 的(glm)→ probe 模式,配额耗尽不永久标记
+func TestVendorHasBalancer(t *testing.T) {
+	if !vendorHasBalancer("deepseek") {
+		t.Error("deepseek: want has-balancer=true (both faces register balancers)")
+	}
+	if vendorHasBalancer("glm") {
+		t.Error("glm: want has-balancer=false (no official balance API)")
 	}
 }
