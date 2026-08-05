@@ -79,6 +79,7 @@ import {
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
 import { api, type VendorInfo } from '../api/client'
+import { fmtDateTime } from '../utils/time'
 
 interface ProviderKeyView {
   id: number
@@ -225,7 +226,7 @@ const columns: DataTableColumns<ProviderKeyView> = [
       return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)
     },
   },
-  { title: '创建时间', key: 'created_at', width: 200 },
+  { title: '创建时间', key: 'created_at', width: 200, render: (row: any) => fmtDateTime(row.created_at) },
   {
     // P-quota-display: 列名"额度";渲染按 quota_kind:
     //   percent → "43%"(取整);currency/空 → "¥12.34"

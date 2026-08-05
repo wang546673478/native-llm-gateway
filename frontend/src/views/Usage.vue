@@ -29,6 +29,7 @@
 import { h, onMounted, reactive, ref } from 'vue'
 import { NButton, NCard, NDataTable, NInput, NSpace, NSpin, NText, NTag } from 'naive-ui'
 import { api, type AggregateRow, type ModelProviderRow } from '../api/client'
+import { fmtDateTime } from '../utils/time'
 
 const rows = ref<AggregateRow[]>([])
 const records = ref<any[]>([])
@@ -120,7 +121,7 @@ const columns = [
 ]
 
 const recordColumns = [
-  { title: '时间', key: 'created_at' },
+  { title: '时间', key: 'created_at', render: (row: any) => fmtDateTime(row.created_at) },
   { title: 'Provider', key: 'provider_name' },
   { title: 'Model', key: 'model_id' },
   { title: 'Protocol', key: 'protocol' },

@@ -74,7 +74,7 @@
       <n-drawer-content :title="`Trace ${detail?.metadata.trace_id ?? ''}`" closable>
         <div v-if="detail">
           <n-descriptions :column="1" bordered size="small" style="margin-bottom: 16px">
-            <n-descriptions-item label="时间">{{ detail.metadata.created_at }}</n-descriptions-item>
+            <n-descriptions-item label="时间">{{ fmtDateTime(detail.metadata.created_at) }}</n-descriptions-item>
             <n-descriptions-item label="状态">
               <n-tag :type="statusTagType(detail.metadata.status_code)">
                 {{ detail.metadata.status_code }} {{ detail.metadata.error_type }}
@@ -210,6 +210,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns, DataTableCreateRowProps } from 'naive-ui'
 import { api, type AccessLog, type AccessLogDetailResp } from '../api/client'
+import { fmtDateTime, fmtTime } from '../utils/time'
 
 const message = useMessage()
 const records = ref<AccessLog[]>([])
@@ -355,7 +356,8 @@ const columns: DataTableColumns<AccessLog> = [
     title: '时间',
     key: 'created_at',
     width: 180,
-    render: row => row.created_at.substring(11, 19),
+    // 后端返回 UTC(RFC3339),substring 直接抠字符串会显示 UTC 墙钟(差 8h)— 转本地
+    render: row => fmtTime(row.created_at),
   },
   {
     title: '状态',
