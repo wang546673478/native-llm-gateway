@@ -344,6 +344,8 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 			DefaultModel: p.DefaultModel,
 			// P-responses: Responses API 能力 — 热重载时同步
 			ResponsesAPI: p.ResponsesAPI,
+			// P-deepseek-thinking: 强制 thinking=disabled — 热重载时同步
+			ForceThinkingDisabled: p.ForceThinkingDisabled,
 		}
 	}
 	return mcfg

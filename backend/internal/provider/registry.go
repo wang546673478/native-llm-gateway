@@ -26,6 +26,9 @@ type ProviderConfig struct {
 	FailureThreshold int
 	FailureWindow    time.Duration
 	OpenTimeout      time.Duration
+	// ForceThinkingDisabled P-deepseek-thinking: 上行前强制 thinking=disabled
+	// (DeepSeek /anthropic 在 thinking 模式下校验历史 thinking 块,compact 会触发 400)
+	ForceThinkingDisabled bool
 }
 
 // RegisteredInfo 单个注册名的注册元数据(vendor 用于前端按厂商聚合)

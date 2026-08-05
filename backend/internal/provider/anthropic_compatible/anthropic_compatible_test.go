@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -178,5 +179,323 @@ func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
 	}
 	if got := pool.Status().QuotaExceededKeys; got != 1 {
 		t.Errorf("quota_exceeded keys = %d, want 1", got)
+	}
+}
+
+// TestSendRequest_ForceThinkingDisabled P-deepseek-thinking: deepseek-anthropic 开启
+// force_thinking_disabled 时,上行 body 的 thinking 字段必须被重写成 disabled —
+// DeepSeek /anthropic 在 thinking 模式下校验历史 assistant 消息必须回带 thinking 块
+// (Claude Code compact 会剥离),否则 400 "content[].thinking ... must be passed back"
+func TestSendRequest_ForceThinkingDisabled(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"m1","type":"message","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	// 开启 ForceThinkingDisabled
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool, ForceThinkingDisabled: true})
+
+	_, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		// 模拟 Claude Code:thinking adaptive(DeepSeek 不认 adaptive,按 enabled 处理 → 严格校验)
+		Body: []byte(`{"model":"m","max_tokens":1,"thinking":{"type":"adaptive"},"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("SendRequest failed: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(gotBody, &req); err != nil {
+		t.Fatalf("unmarshal upstream body: %v", err)
+	}
+	th, ok := req["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("upstream body thinking = %v, want map", req["thinking"])
+	}
+	if th["type"] != "disabled" {
+		t.Errorf("thinking.type = %v, want disabled", th["type"])
+	}
+}
+
+// TestSendRequest_NoForceThinkingDisabled 对照:不开 flag 时 thinking 原样透传
+func TestSendRequest_NoForceThinkingDisabled(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"m1","type":"message","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	_, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"thinking":{"type":"adaptive"},"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("SendRequest failed: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(gotBody, &req); err != nil {
+		t.Fatalf("unmarshal upstream body: %v", err)
+	}
+	th, ok := req["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("upstream body thinking = %v, want map", req["thinking"])
+	}
+	if th["type"] != "adaptive" {
+		t.Errorf("thinking.type = %v, want adaptive (passthrough)", th["type"])
+	}
+}
+
+// TestSendStreamRequest_ForceThinkingDisabled 流式路径同样重写 thinking —
+// Claude Code 的真实请求都是 stream=true,deepseek 校验在两条路径都生效
+func TestSendStreamRequest_ForceThinkingDisabled(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"))
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool, ForceThinkingDisabled: true})
+
+	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"thinking":{"type":"adaptive"},"messages":[],"stream":true}`),
+	})
+	if err != nil {
+		t.Fatalf("SendStreamRequest failed: %v", err)
+	}
+	if resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("resp = %+v, want 200", resp)
+	}
+	// drain channel
+	for range ch {
+	}
+	var req map[string]any
+	if err := json.Unmarshal(gotBody, &req); err != nil {
+		t.Fatalf("unmarshal upstream body: %v", err)
+	}
+	th, ok := req["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("upstream body thinking = %v, want map", req["thinking"])
+	}
+	if th["type"] != "disabled" {
+		t.Errorf("thinking.type = %v, want disabled", th["type"])
+	}
+}
+
+// markKeyHealthy P-quota-guard 测试辅助:模拟 balancer 刚轮询过、余额充足
+func markKeyHealthy(t *testing.T, pool *keypool.Pool) {
+	t.Helper()
+	ks := pool.KeyPtrs()
+	if len(ks) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(ks))
+	}
+	ks[0].Remaining = 99
+	ks[0].LastPolledAt = time.Now()
+}
+
+// TestSendRequest_BalanceGuardQuotaToRateLimit P-quota-guard:
+// 有余额(99%)却收到 MiniMax 2056(套餐耗尽) → 降级 rate_limit,key 不被误杀成 QUOTA_EXCEEDED
+func TestSendRequest_BalanceGuardQuotaToRateLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"base_resp":{"status_code":2056,"status_msg":"已达到 Token Plan 用量上限"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	markKeyHealthy(t, pool)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	resp, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[]}`),
+	})
+	if resp != nil {
+		t.Fatalf("resp should be nil, got %+v", resp)
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeRateLimit {
+		t.Errorf("error type = %q, want rate_limit (balance guard downgrade)", pe.ErrorType)
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 0 {
+		t.Errorf("quota_exceeded keys = %d, want 0 (key must not be killed)", got)
+	}
+}
+
+// TestSendRequest_BalanceGuardExhaustedStillQE 对照:余额 0 的 key 收到 2056 → 照常 QUOTA_EXCEEDED
+func TestSendRequest_BalanceGuardExhaustedStillQE(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"base_resp":{"status_code":2056,"status_msg":"已达到 Token Plan 用量上限"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t) // Remaining=0 且从未轮询 → 守卫不通过
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	_, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[]}`),
+	})
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeQuotaExceeded {
+		t.Errorf("error type = %q, want quota_exceeded (no balance → trust upstream)", pe.ErrorType)
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 1 {
+		t.Errorf("quota_exceeded keys = %d, want 1", got)
+	}
+}
+
+// TestSendRequest_RetryOnRateLimit P-quota-guard-retry: 限流 429 → 等 1s 重试一次 → 200
+func TestSendRequest_RetryOnRateLimit(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(429)
+			w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"rate limit exceeded"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"m1","type":"message","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	resp, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("SendRequest failed: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("upstream requests = %d, want 2 (one retry)", requests)
+	}
+	if resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("resp = %+v, want 200", resp)
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 0 {
+		t.Errorf("quota_exceeded keys = %d, want 0", got)
+	}
+}
+
+// TestSendRequest_GuardDowngradeThenRetry 用户场景完整链:healthy key + 429(2056 文本)
+// → 守卫降级 rate_limit → 重试 → 200,请求留在本 provider
+func TestSendRequest_GuardDowngradeThenRetry(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(429)
+			// MiniMax 瞬时限流:429 + rate_limit_error + 2056 文本(关键词拦不住)
+			w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"},"request_id":"x"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"m1","type":"message","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	markKeyHealthy(t, pool)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	resp, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("SendRequest failed: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("upstream requests = %d, want 2 (downgrade → retry)", requests)
+	}
+	if resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("resp = %+v, want 200", resp)
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 0 {
+		t.Errorf("quota_exceeded keys = %d, want 0", got)
+	}
+}
+
+// TestSendStreamRequest_GuardDowngradeThenRetry 流式路径:peek 到 2056 + healthy key
+// → 守卫降级 rate_limit → 重试 → 200 流
+func TestSendStreamRequest_GuardDowngradeThenRetry(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			w.Write([]byte(`{"base_resp":{"status_code":2056,"status_msg":"已达到 Token Plan 用量上限"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	markKeyHealthy(t, pool)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[],"stream":true}`),
+	})
+	if err != nil {
+		t.Fatalf("SendStreamRequest failed: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("upstream requests = %d, want 2", requests)
+	}
+	if resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("resp = %+v, want 200", resp)
+	}
+	for range ch {
+	}
+	if got := pool.Status().QuotaExceededKeys; got != 0 {
+		t.Errorf("quota_exceeded keys = %d, want 0", got)
 	}
 }

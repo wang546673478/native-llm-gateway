@@ -54,6 +54,10 @@ func NewAnthropic(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Endpoint: cfg.Endpoint,
 			Timeout:  cfg.Timeout,
 			Pool:     toPool(cfg.Pool),
+			// P-deepseek-thinking: DeepSeek /anthropic 的 thinking 校验会拒绝
+			// compact 后的历史(400 content[].thinking ... must be passed back),
+			// 强制 disabled 绕开(flash 本来就是非 thinking 模型)
+			ForceThinkingDisabled: cfg.ForceThinkingDisabled,
 		}),
 		cfg: cfg,
 	}, nil

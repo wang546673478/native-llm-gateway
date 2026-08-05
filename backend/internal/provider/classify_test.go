@@ -38,3 +38,14 @@ func TestClassifyErrorWithBody_Glm1113Quota(t *testing.T) {
 		t.Errorf("classify(429, GLM 1113 body) = %q, want quota_exceeded", got)
 	}
 }
+
+// P-quota-minimax-429-fix 回归:纯限流 429("rate limit exceeded")不能升级成
+// quota_exceeded — 否则 healthy key 被误杀到 poll 恢复,期间 token_plan 桶空
+// 整链掉到 api 层(2026-08-05 实测:双 key 同时不可用 → 直接 failover 到 deepseek)
+func TestClassifyErrorWithBody_PlainRateLimit429StaysRateLimit(t *testing.T) {
+	body := []byte(`{"error":{"type":"rate_limit_error","message":"rate limit exceeded, please retry later"}}`)
+	got := ClassifyErrorWithBody(429, body)
+	if got != ErrorTypeRateLimit {
+		t.Errorf("classify(429, plain rate-limit body) = %q, want rate_limit", got)
+	}
+}

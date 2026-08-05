@@ -121,6 +121,10 @@ type Provider struct {
 	// Gateway 不做 quota 跟踪,quota 由上游平台 UI 管理;这里只是标记
 	// 用于 dashboard 区分"这个月 token_plan 用了多少 vs api 用了多少"
 	BillingSource string `mapstructure:"billing_source"`
+	// ForceThinkingDisabled P-deepseek-thinking: 上行前强制 thinking=disabled。
+	// DeepSeek /anthropic 把 Claude Code 的 thinking:adaptive 当 enabled 处理,严格校验
+	// 历史 thinking 块(compact 会剥离) → 400 "content[].thinking ... must be passed back"
+	ForceThinkingDisabled bool `mapstructure:"force_thinking_disabled"`
 }
 
 // ProviderModel Provider 模型声明

@@ -97,6 +97,10 @@ providers:
   # 文档:https://api-docs.deepseek.com/zh-cn/ (Anthropic 协议部分)
   deepseek-anthropic:
     enabled: true
+    # P-deepseek-thinking: DeepSeek /anthropic 的 thinking 校验会拒绝 compact 后的历史
+    # (Claude Code 剥离 thinking 块 → 400 "content[].thinking ... must be passed back"),
+    # 强制 thinking=disabled 绕开 — flash 本来就是非 thinking 模型,无能力损失
+    force_thinking_disabled: true
     endpoint: "https://api.deepseek.com/anthropic"
     protocol: "anthropic"
     timeout: 90s

@@ -286,6 +286,13 @@ func ClassifyErrorWithBody(statusCode int, body []byte) ErrorType {
 
 // looksLikeQuotaError 检测 body 是否含 quota/usage limit 相关关键字
 // 兼容各 provider 的英文/中文错误信息
+//
+// P-quota-minimax-429-fix: 只保留「强配额标记」,去掉 rate limit / exceeded
+// 这类通用限流词 — 否则 MiniMax 纯限流 429(如 "rate limit exceeded")
+// 会被升级成 QUOTA_EXCEEDED,把 healthy key 误杀到 poll 恢复(≤60s),
+// 期间 token_plan 桶空 → 整链掉到 api 层。
+// MiniMax 真套餐耗尽 429 的 message 是 "已达到 Token Plan 用量上限 (2056)",
+// 靠 "token plan" / "用量上限" 仍能命中,不依赖通用词。
 func looksLikeQuotaError(body []byte) bool {
 	if len(body) == 0 {
 		return false
@@ -298,9 +305,7 @@ func looksLikeQuotaError(body []byte) bool {
 		"insufficient",
 		"余额", "额度", "配额",
 		"balance",
-		"exceeded",
 		"out of quota",
-		"rate limit", // 部分 provider 混用 — 慎用,容易被 rate limit 命中
 		// P-quota-minimax-429: MiniMax anthropic 面把套餐耗尽报成
 		// HTTP 429 + {"error":{"type":"rate_limit_error","message":"已达到
 		// Token Plan 用量上限:请升级 Token Plan 套餐或购买积分补充用量。(2056)"}}

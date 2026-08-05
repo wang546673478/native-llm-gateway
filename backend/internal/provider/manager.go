@@ -37,6 +37,9 @@ type ManagerProviderConfig struct {
 	DefaultModel string
 	// P-responses: 原生支持 OpenAI Responses API(/v1/responses 透传)
 	ResponsesAPI bool
+	// P-deepseek-thinking: 上行前强制 thinking=disabled(DeepSeek /anthropic
+	// 的 thinking 校验会拒绝 compact 后的历史,详见 anthropic_compatible.Config)
+	ForceThinkingDisabled bool
 }
 
 // ModelCost 单个 model 的定价
@@ -124,6 +127,8 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			FailureThreshold: pcfg.Circuit.FailureThreshold,
 			FailureWindow:    pcfg.Circuit.FailureWindow,
 			OpenTimeout:      pcfg.Circuit.OpenTimeout,
+			// P-deepseek-thinking: 透传到 provider 工厂(deepseek-anthropic 用)
+			ForceThinkingDisabled: pcfg.ForceThinkingDisabled,
 		}
 
 		// P37: 填充定价表

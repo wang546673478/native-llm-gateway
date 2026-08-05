@@ -25,6 +25,12 @@ type Config struct {
 	Endpoint string // e.g. https://api.minimax.chat
 	Timeout  time.Duration
 	Pool     *keypool.Pool
+	// ForceThinkingDisabled P-deepseek-thinking: 上行前把 body 的 thinking 强制写成
+	// {"type":"disabled"}。DeepSeek /anthropic 把 adaptive(Claude Code 发的)当 enabled 处理,
+	// 严格校验历史里每个 assistant tool_use 消息必须回带 thinking 块 — Claude Code compact
+	// 会剥离 thinking 块,导致 400 "content[].thinking ... must be passed back"(实测复现)。
+	// deepseek-v4-flash 本来就是非 thinking 模型,显式 disabled 不损失能力(实测 200)
+	ForceThinkingDisabled bool
 }
 
 // Base Anthropic 兼容 Provider 的共享实现
@@ -43,6 +49,77 @@ func NewBase(cfg Config) *Base {
 		cfg:    cfg,
 		client: &http.Client{Timeout: timeout},
 	}
+}
+
+// prepareBody 上行前的 body 预处理:ForceThinkingDisabled 时把 thinking 强制写成 disabled。
+// 失败(非法 JSON)时原样返回 — 透传语义不变,让上游自己报错
+func (b *Base) prepareBody(body []byte) []byte {
+	if !b.cfg.ForceThinkingDisabled {
+		return body
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	req["thinking"] = map[string]any{"type": "disabled"}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// balanceGuardHealthy P-quota-guard: 守卫 — key 最近被 balancer 轮询过且显示有余额。
+// 有余额还收到配额错误(MiniMax 瞬时限流 429 的 body 自带 2056 文本,关键词拦不住)
+// → 判为限流而非配额耗尽,避免 healthy key 被误杀到 poll 恢复(≤60s)期间整链掉到 api 层
+func (b *Base) balanceGuardHealthy(key *keypool.Key) bool {
+	if key.Remaining <= 0 {
+		return false
+	}
+	if key.LastPolledAt.IsZero() || time.Since(key.LastPolledAt) > 5*time.Minute {
+		return false // 没轮询过/数据过期 — 不拦,信任上游错误码
+	}
+	return true
+}
+
+// rateLimitRetryDelay 限流重试等待:Retry-After 优先,默认 1s,上限 2s
+// (避免瞬时限流把请求拖太久;超时场景 failover 更合适)
+func rateLimitRetryDelay(retryAfter time.Duration) time.Duration {
+	if retryAfter <= 0 {
+		return time.Second
+	}
+	if retryAfter > 2*time.Second {
+		return 2 * time.Second
+	}
+	return retryAfter
+}
+
+// classifyUpstream 统一分类 Anthropic 兼容上游的失败响应:
+//  1. MiniMax base_resp 错误(藏在 HTTP 200 body)— 1008/2056 → quota,其余 → server_error
+//  2. HTTP >= 400 → ClassifyErrorWithBody
+//
+// P-quota-guard: 分类结果为 quota_exceeded 但 balanceGuardHealthy(key) 通过 →
+// 降级 rate_limit(MiniMax 瞬时限流误报 2056 的兜底)。
+// 返回 (errType, 错误描述);成功(无错误)→ ("", "")
+func (b *Base) classifyUpstream(status int, header http.Header, body []byte, key *keypool.Key) (provider.ErrorType, string) {
+	if code, msg := provider.ParseMiniMaxBaseResp(body); code != 0 {
+		errType := provider.ErrorTypeServerError
+		if provider.IsMiniMaxQuotaCode(code) {
+			errType = provider.ErrorTypeQuotaExceeded
+			if b.balanceGuardHealthy(key) {
+				errType = provider.ErrorTypeRateLimit
+			}
+		}
+		return errType, fmt.Sprintf("upstream base_resp error %d: %s", code, msg)
+	}
+	if status >= 400 {
+		errType := provider.ClassifyErrorWithBody(status, body)
+		if errType == provider.ErrorTypeQuotaExceeded && b.balanceGuardHealthy(key) {
+			errType = provider.ErrorTypeRateLimit
+		}
+		return errType, fmt.Sprintf("upstream returned %d", status)
+	}
+	return "", ""
 }
 
 // Name 由 wrapper 提供
@@ -64,70 +141,72 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
-		bytes.NewReader(req.Body))
-	if err != nil {
-		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
-	}
-	httpReq.Header.Set("x-api-key", key.Key)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-	httpReq.Header.Set("Content-Type", "application/json")
-	if req.TraceID != "" {
-		httpReq.Header.Set("X-Request-Id", req.TraceID)
-	}
-
-	httpResp, err := b.client.Do(httpReq)
-	if err != nil {
-		errType := provider.ErrorTypeConnection
-		if ctx.Err() == context.DeadlineExceeded {
-			errType = provider.ErrorTypeTimeout
+	body := b.prepareBody(req.Body)
+	// P-quota-guard-retry: 限流(含余额守卫降级)等 Retry-After(默认 1s,上限 2s)
+	// 后用同一把 key 重试一次 — 瞬时限流下请求留在本 provider,不落 failover
+	retried := false
+	for {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
+			bytes.NewReader(body))
+		if err != nil {
+			return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
 		}
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, b.newError(0, errType, err.Error())
-	}
-	defer httpResp.Body.Close()
-
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		b.cfg.Pool.ReportError(key, "io_error")
-		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
-	}
-
-	// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
-	// 下面 >= 400 分支看不到它。1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded,
-	// 触发 failover 到下一 provider + key 标记 QUOTA_EXCEEDED;其他非零 → server_error
-	if code, msg := provider.ParseMiniMaxBaseResp(body); code != 0 {
-		errType := provider.ErrorTypeServerError
-		if provider.IsMiniMaxQuotaCode(code) {
-			errType = provider.ErrorTypeQuotaExceeded
+		httpReq.Header.Set("x-api-key", key.Key)
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		httpReq.Header.Set("Content-Type", "application/json")
+		if req.TraceID != "" {
+			httpReq.Header.Set("X-Request-Id", req.TraceID)
 		}
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, b.newError(httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), body)
-	}
 
-	if httpResp.StatusCode >= 400 {
-		// P49: 带 body 检测 quota
-		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
+		httpResp, err := b.client.Do(httpReq)
+		if err != nil {
+			errType := provider.ErrorTypeConnection
+			if ctx.Err() == context.DeadlineExceeded {
+				errType = provider.ErrorTypeTimeout
+			}
+			b.cfg.Pool.ReportError(key, string(errType))
+			return nil, b.newError(0, errType, err.Error())
+		}
+		respBody, readErr := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		if readErr != nil {
+			b.cfg.Pool.ReportError(key, "io_error")
+			return nil, b.newError(0, provider.ErrorTypeConnection, readErr.Error())
+		}
+
+		// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
+		// 1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded;P-quota-guard 见 classifyUpstream
+		errType, msg := b.classifyUpstream(httpResp.StatusCode, httpResp.Header, respBody, key)
 		if errType == provider.ErrorTypeRateLimit {
-			b.cfg.Pool.ReportRateLimit(key, parseRetryAfter(httpResp.Header.Get("Retry-After")))
-		} else {
+			retryAfter := parseRetryAfter(httpResp.Header.Get("Retry-After"))
+			b.cfg.Pool.ReportRateLimit(key, retryAfter)
+			if !retried {
+				retried = true
+				select {
+				case <-time.After(rateLimitRetryDelay(retryAfter)):
+				case <-ctx.Done():
+					return nil, b.newError(0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+				}
+				continue
+			}
+		} else if errType != "" {
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
-		return nil, b.newError(httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
+		if errType != "" {
+			return nil, b.newError(httpResp.StatusCode, errType, msg, respBody)
+		}
+
+		b.cfg.Pool.ReportSuccess(key)
+		usage := parseAnthropicUsage(respBody)
+
+		return &provider.Response{
+			StatusCode: httpResp.StatusCode,
+			Headers:    httpResp.Header,
+			Body:       respBody,
+			Usage:      usage,
+		}, nil
 	}
-
-	b.cfg.Pool.ReportSuccess(key)
-	usage := parseAnthropicUsage(body)
-
-	return &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
-		Body:       body,
-		Usage:      usage,
-	}, nil
 }
 
 // SendStreamRequest 发送流式 Anthropic Messages 请求
@@ -167,144 +246,174 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	}
 	client := &http.Client{Timeout: streamTimeout}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
-		bytes.NewReader(req.Body))
-	if err != nil {
-		return nil, nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
-	}
-	httpReq.Header.Set("x-api-key", key.Key)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if req.TraceID != "" {
-		httpReq.Header.Set("X-Request-Id", req.TraceID)
-	}
-
-	httpResp, err := client.Do(httpReq)
-	if err != nil {
-		errType := provider.ErrorTypeConnection
-		if ctx.Err() == context.DeadlineExceeded {
-			errType = provider.ErrorTypeTimeout
-		}
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, b.newError(0, errType, err.Error())
-	}
-
-	if httpResp.StatusCode >= 400 {
-		body, _ := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		// P49: 带 body 检测 quota
-		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
-		if errType == provider.ErrorTypeRateLimit {
-			b.cfg.Pool.ReportRateLimit(key, 0)
-		} else {
-			b.cfg.Pool.ReportError(key, string(errType))
-		}
-		return nil, nil, b.newError(httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
-	}
-
-	// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
-	// base_resp 错误。peek 前两行解析:确认是 base_resp 错误 → 在客户端收到
-	// 任何字节前直接失败(failover 还来得及);否则把 peeked 行接回 reader 正常流式
-	reader := bufio.NewReader(httpResp.Body)
-	var peeked []byte
-	for i := 0; i < 2; i++ {
-		line, err := reader.ReadBytes('\n')
-		peeked = append(peeked, line...)
+	body := b.prepareBody(req.Body)
+	// P-quota-guard-retry: 与 SendRequest 相同 — 限流等 Retry-After(≤2s)重试一次
+	retried := false
+	for {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
+			bytes.NewReader(body))
 		if err != nil {
-			break
+			return nil, nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
 		}
-	}
-	if code, msg := provider.ParseMiniMaxStreamBaseResp(peeked); code != 0 {
-		httpResp.Body.Close()
-		errType := provider.ErrorTypeServerError
-		if provider.IsMiniMaxQuotaCode(code) {
-			errType = provider.ErrorTypeQuotaExceeded
+		httpReq.Header.Set("x-api-key", key.Key)
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		if req.TraceID != "" {
+			httpReq.Header.Set("X-Request-Id", req.TraceID)
 		}
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, b.newError(httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
-	}
-	// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
-	streamReader := io.MultiReader(bytes.NewReader(peeked), reader)
 
-	b.cfg.Pool.ReportSuccess(key)
-
-	ch := make(chan *provider.StreamChunk, 16)
-	// P42: 收集流中的 usage — Anthropic 在 message_start (input+cache) 和 message_delta (output) 里发
-	// P65: 也从 message_start 抽 model(message.model 字段)
-	var inputTokens, outputTokens, cacheCreation, cacheRead int
-	var upstreamModel string
-	resp := &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
-	}
-	go func() {
-		defer func() {
-			// 在 close(ch) 前填 usage
-			if inputTokens > 0 || outputTokens > 0 || cacheCreation > 0 || cacheRead > 0 {
-				resp.Usage = &provider.Usage{
-					Model:               upstreamModel, // P65
-					PromptTokens:        inputTokens,
-					CompletionTokens:    outputTokens,
-					TotalTokens:         inputTokens + outputTokens + cacheCreation + cacheRead,
-					CacheCreationTokens: cacheCreation,
-					CacheReadTokens:     cacheRead,
-					RawUsage: map[string]interface{}{
-						"input_tokens":                inputTokens,
-						"output_tokens":               outputTokens,
-						"cache_creation_input_tokens": cacheCreation,
-						"cache_read_input_tokens":     cacheRead,
-					},
-				}
+		httpResp, err := client.Do(httpReq)
+		if err != nil {
+			errType := provider.ErrorTypeConnection
+			if ctx.Err() == context.DeadlineExceeded {
+				errType = provider.ErrorTypeTimeout
 			}
-			close(ch)
-		}()
-		defer httpResp.Body.Close()
-		reader := bufio.NewReader(streamReader)
+			b.cfg.Pool.ReportError(key, string(errType))
+			return nil, nil, b.newError(0, errType, err.Error())
+		}
 
-		// Anthropic SSE: 每行以 event: / data: 开头,空行分隔事件
-		// 把整段当作一个 SSE 事件转发(保留原格式)
-		var buf bytes.Buffer
-		for {
-			line, err := reader.ReadBytes('\n')
-			if err != nil {
-				if err == io.EOF {
-					if buf.Len() > 0 {
-						ch <- &provider.StreamChunk{Data: append([]byte{}, buf.Bytes()...)}
+		if httpResp.StatusCode >= 400 {
+			respBody, _ := io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
+			// P49: 带 body 检测 quota + P-quota-guard 降级
+			errType, msg := b.classifyUpstream(httpResp.StatusCode, httpResp.Header, respBody, key)
+			if errType == provider.ErrorTypeRateLimit {
+				retryAfter := parseRetryAfter(httpResp.Header.Get("Retry-After"))
+				b.cfg.Pool.ReportRateLimit(key, retryAfter)
+				if !retried {
+					retried = true
+					select {
+					case <-time.After(rateLimitRetryDelay(retryAfter)):
+					case <-ctx.Done():
+						return nil, nil, b.newError(0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
 					}
-					ch <- &provider.StreamChunk{Err: io.EOF}
-				} else {
-					ch <- &provider.StreamChunk{Err: err}
+					continue
 				}
-				return
+			} else if errType != "" {
+				b.cfg.Pool.ReportError(key, string(errType))
 			}
-			line = bytes.TrimRight(line, "\r\n")
-			// 空行 = 一个 event 结束
-			if len(line) == 0 {
-				if buf.Len() > 0 {
-					eventData := append([]byte{}, buf.Bytes()...)
-					// P42 + P65: 在转发前尝试解析 usage 和 model
-					extractAnthropicStreamUsage(eventData, &inputTokens, &outputTokens, &cacheCreation, &cacheRead, &upstreamModel)
-					eventData = append(eventData, '\n', '\n')
-					ch <- &provider.StreamChunk{Data: eventData}
-					buf.Reset()
-				}
-				continue
-			}
-			// 注释行
-			if bytes.HasPrefix(line, []byte(":")) {
-				continue
-			}
-			// 累积行
-			buf.Write(line)
-			buf.WriteByte('\n')
+			return nil, nil, b.newError(httpResp.StatusCode, errType, msg, respBody)
 		}
-	}()
 
-	return ch, resp, nil
+		// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
+		// base_resp 错误。peek 前两行解析:确认是 base_resp 错误 → 在客户端收到
+		// 任何字节前直接失败(failover 还来得及);否则把 peeked 行接回 reader 正常流式
+		reader := bufio.NewReader(httpResp.Body)
+		var peeked []byte
+		for i := 0; i < 2; i++ {
+			line, err := reader.ReadBytes('\n')
+			peeked = append(peeked, line...)
+			if err != nil {
+				break
+			}
+		}
+		if code, msg := provider.ParseMiniMaxStreamBaseResp(peeked); code != 0 {
+			httpResp.Body.Close()
+			errType := provider.ErrorTypeServerError
+			if provider.IsMiniMaxQuotaCode(code) {
+				errType = provider.ErrorTypeQuotaExceeded
+				if b.balanceGuardHealthy(key) {
+					errType = provider.ErrorTypeRateLimit
+				}
+			}
+			if errType == provider.ErrorTypeRateLimit {
+				b.cfg.Pool.ReportRateLimit(key, 0)
+				if !retried {
+					retried = true
+					select {
+					case <-time.After(rateLimitRetryDelay(0)):
+					case <-ctx.Done():
+						return nil, nil, b.newError(0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+					}
+					continue
+				}
+			} else {
+				b.cfg.Pool.ReportError(key, string(errType))
+			}
+			return nil, nil, b.newError(httpResp.StatusCode, errType,
+				fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
+		}
+		// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
+		streamReader := io.MultiReader(bytes.NewReader(peeked), reader)
+
+		b.cfg.Pool.ReportSuccess(key)
+
+		ch := make(chan *provider.StreamChunk, 16)
+		// P42: 收集流中的 usage — Anthropic 在 message_start (input+cache) 和 message_delta (output) 里发
+		// P65: 也从 message_start 抽 model(message.model 字段)
+		var inputTokens, outputTokens, cacheCreation, cacheRead int
+		var upstreamModel string
+		resp := &provider.Response{
+			StatusCode: httpResp.StatusCode,
+			Headers:    httpResp.Header,
+		}
+		go func() {
+			defer func() {
+				// 在 close(ch) 前填 usage
+				if inputTokens > 0 || outputTokens > 0 || cacheCreation > 0 || cacheRead > 0 {
+					resp.Usage = &provider.Usage{
+						Model:               upstreamModel, // P65
+						PromptTokens:        inputTokens,
+						CompletionTokens:    outputTokens,
+						TotalTokens:         inputTokens + outputTokens + cacheCreation + cacheRead,
+						CacheCreationTokens: cacheCreation,
+						CacheReadTokens:     cacheRead,
+						RawUsage: map[string]interface{}{
+							"input_tokens":                inputTokens,
+							"output_tokens":               outputTokens,
+							"cache_creation_input_tokens": cacheCreation,
+							"cache_read_input_tokens":     cacheRead,
+						},
+					}
+				}
+				close(ch)
+			}()
+			defer httpResp.Body.Close()
+			reader := bufio.NewReader(streamReader)
+
+			// Anthropic SSE: 每行以 event: / data: 开头,空行分隔事件
+			// 把整段当作一个 SSE 事件转发(保留原格式)
+			var buf bytes.Buffer
+			for {
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					if err == io.EOF {
+						if buf.Len() > 0 {
+							ch <- &provider.StreamChunk{Data: append([]byte{}, buf.Bytes()...)}
+						}
+						ch <- &provider.StreamChunk{Err: io.EOF}
+					} else {
+						ch <- &provider.StreamChunk{Err: err}
+					}
+					return
+				}
+				line = bytes.TrimRight(line, "\r\n")
+				// 空行 = 一个 event 结束
+				if len(line) == 0 {
+					if buf.Len() > 0 {
+						eventData := append([]byte{}, buf.Bytes()...)
+						// P42 + P65: 在转发前尝试解析 usage 和 model
+						extractAnthropicStreamUsage(eventData, &inputTokens, &outputTokens, &cacheCreation, &cacheRead, &upstreamModel)
+						eventData = append(eventData, '\n', '\n')
+						ch <- &provider.StreamChunk{Data: eventData}
+						buf.Reset()
+					}
+					continue
+				}
+				// 注释行
+				if bytes.HasPrefix(line, []byte(":")) {
+					continue
+				}
+				// 累积行
+				buf.Write(line)
+				buf.WriteByte('\n')
+			}
+		}()
+
+		return ch, resp, nil
+	} // P-quota-guard-retry: for 循环闭合
 }
 
 // extractAnthropicStreamUsage 从单个 Anthropic SSE 事件中提取 usage

@@ -179,6 +179,8 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 			DefaultModel: p.DefaultModel,
 			// P-responses: Responses API 能力(/v1/responses 透传)
 			ResponsesAPI: p.ResponsesAPI,
+			// P-deepseek-thinking: 强制 thinking=disabled(DeepSeek /anthropic 校验)
+			ForceThinkingDisabled: p.ForceThinkingDisabled,
 			Circuit: provider.ManagerCircuitConfig{
 				FailureThreshold: p.CircuitBreaker.FailureThreshold,
 				FailureWindow:    p.CircuitBreaker.FailureWindow,
