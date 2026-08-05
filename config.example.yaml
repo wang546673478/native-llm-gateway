@@ -424,6 +424,32 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  # --- 智谱 GLM (OpenAI 兼容,端点已含 /api/paas/v4 前缀) ---
+  # 文档:https://docs.bigmodel.cn
+  # glm-5.2:旗舰,1M 上下文/128K 输出;输入 ¥8/M、输出 ¥28/M、缓存命中 ¥2/M
+  glm:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    protocol: "openai"
+    timeout: 60s
+    models:
+      - id: "glm-5.2"
+        aliases: []
+        cost_per_1k_input: 0.008
+        cost_per_1k_output: 0.028
+        cost_per_1k_cache_read: 0.002
+        cost_per_1k_cache_creation: 0.0
+    keys: []
+    responses_api: false   # 官方无 /responses API
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
 # 路由规则(P4 阶段真正生效)
 routing:
   # P39: 共享 provider chain — 定义一次,多个 alias 用 chain_ref 复用

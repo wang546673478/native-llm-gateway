@@ -24,6 +24,7 @@ import (
 
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek" // 触发 init() 注册(OpenAI + Anthropic 两个注册名)
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/gemini"   // Google 协议
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm"      // 智谱 GLM(OpenAI 兼容)
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"  // 触发 init() 注册(Anthropic + OpenAI 两个注册名)
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/qwen"     // 通义千问
 
