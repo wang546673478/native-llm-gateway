@@ -273,6 +273,12 @@ func looksLikeQuotaError(body []byte) bool {
 		"exceeded",
 		"out of quota",
 		"rate limit", // 部分 provider 混用 — 慎用,容易被 rate limit 命中
+		// P-quota-minimax-429: MiniMax anthropic 面把套餐耗尽报成
+		// HTTP 429 + {"error":{"type":"rate_limit_error","message":"已达到
+		// Token Plan 用量上限:请升级 Token Plan 套餐或购买积分补充用量。(2056)"}}
+		// — 必须识别为 quota,否则 key 被误标 COOLING 而非 QUOTA_EXCEEDED
+		// (实测 2026-08-05:双 key 长期冷却,整链掉到 api 层)
+		"token plan", "用量上限", "超套餐",
 	}
 	for _, kw := range keywords {
 		if contains(lower, kw) {
