@@ -23,6 +23,15 @@ backend/internal/provider/deepseek/
 
 ## 分步指南
 
+### Step 0:调研官方文档(先做,防返工)
+
+拉文档站 `/llms.txt` 全量索引,逐项确认四件事:
+
+1. **模型 ID 与能力**:模型页(思考模式 / 工具调用 / 上下文长度)
+2. **Anthropic/Claude 兼容面**:很多厂商有 anthropic 端点但藏在「Claude API 兼容」章节 —— **必须 `grep -i "anthropic\|claude"` 索引**,别只按关键词页碰运气(真实教训:GLM 的 Claude API 兼容页在索引第 117 行,漏查导致第一版只有 openai 面)
+3. **Responses API**:支持 → `responses_api: true` + `ResponsesPath`;不支持 → false(Codex 请求不会路由到它)
+4. **余额查询接口**:有 → 写 balancer;没有 → 不写(qwen/gemini/glm 同款,api 计费)
+
 ### Step 1:写 openai 面(`xxx.go`)
 
 ```go
