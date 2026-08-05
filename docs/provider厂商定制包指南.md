@@ -147,7 +147,7 @@ kimi:
 
 1. `registry_test.go`:断言两个注册名 + 各自的 Protocol/Vendor(复制 deepseek/registry_test.go 改名字)
 2. `go build ./... && go test ./...`
-3. 重启网关 → `/api/v1/providers` 出现新厂商(按 vendor 聚合)
+3. `./gateway-reload.sh` 无感重载(自动编译 + 优雅排空 + 新进程接管,不用手动 kill+起)→ `/api/v1/providers` 出现新厂商(按 vendor 聚合)
 4. 页面加 key(选厂商 → 协议)
 5. E2E:发任意模型名 → 走链命中新厂商;access log 显示厂商名 + 实际使用模型
 

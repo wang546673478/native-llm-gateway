@@ -130,4 +130,4 @@ backend/internal/
 - 同 tier 内多个 provider 时顺序随机(现在只有 minimax 是 token plan,无影响)
 - 上游 400(invalid_request)不禁用 key(只计数);auth 错误才禁用
 - 跨厂商切换时客户端回带的推理块会被网关剥离 + 强制 `effort=none`(DeepSeek 校验)
-- provider 的 endpoint/protocol/models 改动需重启;routing/价格/key 热重载
+- provider 的 endpoint/protocol/models 改动需重载(用 `./gateway-reload.sh` 无感重载,自动编译+优雅排空);routing/价格/key 热重载

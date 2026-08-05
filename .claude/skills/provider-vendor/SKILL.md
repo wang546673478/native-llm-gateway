@@ -24,7 +24,7 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 6. **config.yaml 加块**:enabled/billing_source/endpoint/protocol/models(+default_model / responses_api)
 7. **写 registry_test.go**:断言每个注册名的 Protocol 和 Vendor(复制 deepseek 的改名字)
 8. **构建 + 全量测试**:`cd backend && go build ./... && go test ./...`
-9. **重启网关验证**:`/api/v1/providers` 出现新厂商 → 页面加 key → 发请求 E2E(access log 看厂商名 + 实际模型)
+9. **重载网关验证**:`./gateway-reload.sh`(自动编译 + 优雅排空 + 新进程接管,不用手动 kill+起)→ `/api/v1/providers` 出现新厂商 → 页面加 key → 发请求 E2E(access log 看厂商名 + 实际模型)
 
 ## 检查点(提交前逐项过)
 
