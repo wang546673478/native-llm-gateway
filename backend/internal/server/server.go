@@ -325,6 +325,9 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 				CostPer1kOutput:        m.CostPer1kOutput,
 				CostPer1kCacheRead:     m.CostPer1kCacheRead,
 				CostPer1kCacheCreation: m.CostPer1kCacheCreation,
+				// P-quota-512k: 长上下文悬崖字段透传
+				LongContextInputThreshold: m.LongContextInputThreshold,
+				LongContextMultiplier:     m.LongContextMultiplier,
 			}
 		}
 		mcfg.Providers[name] = provider.ManagerProviderConfig{

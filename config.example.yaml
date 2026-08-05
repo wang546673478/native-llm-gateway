@@ -345,36 +345,55 @@ providers:
     models:
       - id: "MiniMax-M3"              # 1M tokens,旗舰
         aliases: ["MiniMax"]
-        cost_per_1k_input: 0.0072
-        cost_per_1k_output: 0.0576
+        cost_per_1k_input: 0.0021
+        cost_per_1k_output: 0.0084
+        # P-provider-vendor: 缓存价(文档 2026-08-04)— M3 仅自动缓存(读 0.42 元/M),无主动缓存
+        cost_per_1k_cache_read: 0.00042
+        # P-quota-512k: 官方悬崖 — 输入含缓存 > 512k 时输入/输出/缓存全项 ×2(永久五折后价)
+        long_context_input_threshold: 512000
+        long_context_multiplier: 2
       - id: "MiniMax-M2.7"            # 204,800
         aliases: []
-        cost_per_1k_input: 0.005
-        cost_per_1k_output: 0.04
+        cost_per_1k_input: 0.0021
+        cost_per_1k_output: 0.0084
+        cost_per_1k_cache_read: 0.00042
+        cost_per_1k_cache_creation: 0.002625
       - id: "MiniMax-M2.7-highspeed"  # 204,800,更快
         aliases: []
-        cost_per_1k_input: 0.00216
-        cost_per_1k_output: 0.0166
+        cost_per_1k_input: 0.0042
+        cost_per_1k_output: 0.0168
+        cost_per_1k_cache_read: 0.00042
+        cost_per_1k_cache_creation: 0.002625
       - id: "MiniMax-M2.5"            # 204,800
         aliases: []
-        cost_per_1k_input: 0.005
-        cost_per_1k_output: 0.04
+        cost_per_1k_input: 0.0021
+        cost_per_1k_output: 0.0084
+        cost_per_1k_cache_read: 0.00021
+        cost_per_1k_cache_creation: 0.002625
       - id: "MiniMax-M2.5-highspeed"
         aliases: []
-        cost_per_1k_input: 0.00216
-        cost_per_1k_output: 0.0166
+        cost_per_1k_input: 0.0042
+        cost_per_1k_output: 0.0168
+        cost_per_1k_cache_read: 0.00021
+        cost_per_1k_cache_creation: 0.002625
       - id: "MiniMax-M2.1"            # 204,800 早期稳定
         aliases: []
-        cost_per_1k_input: 0.0072
-        cost_per_1k_output: 0.0576
+        cost_per_1k_input: 0.0021
+        cost_per_1k_output: 0.0084
+        cost_per_1k_cache_read: 0.00021
+        cost_per_1k_cache_creation: 0.002625
       - id: "MiniMax-M2.1-highspeed"
         aliases: []
-        cost_per_1k_input: 0.00288
-        cost_per_1k_output: 0.0216
+        cost_per_1k_input: 0.0042
+        cost_per_1k_output: 0.0168
+        cost_per_1k_cache_read: 0.00021
+        cost_per_1k_cache_creation: 0.002625
       - id: "MiniMax-M2"              # 204,800 基础
         aliases: []
-        cost_per_1k_input: 0.0072
-        cost_per_1k_output: 0.0576
+        cost_per_1k_input: 0.0021
+        cost_per_1k_output: 0.0084
+        cost_per_1k_cache_read: 0.00021
+        cost_per_1k_cache_creation: 0.002625
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s

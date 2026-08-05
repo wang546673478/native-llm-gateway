@@ -134,6 +134,34 @@ type Usage struct {
 	RawUsage            map[string]interface{}
 }
 
+// ComputeCost P40 + P-quota-512k: 按定价表算单次请求费用(元,CNY)
+//   - cost = prompt*input + cache_creation*cache_create(0 则 fallback 到 input)
+//   - cache_read*cache_read + completion*output,单位按 /1k tokens
+//   - 长上下文悬崖:LongContextInputThreshold > 0 且「输入含缓存」超过阈值时,
+//     四项费用整体乘 LongContextMultiplier(MiniMax M3:>512k 输入全项 2x)
+//   - 无任何定价时返回 0(不收费的模型/未配置)
+func ComputeCost(c ModelCost, u *Usage) float64 {
+	hasAnyCost := c.CostPer1kInput > 0 || c.CostPer1kOutput > 0 ||
+		c.CostPer1kCacheRead > 0 || c.CostPer1kCacheCreation > 0
+	if !hasAnyCost {
+		return 0
+	}
+	cacheCreateCost := c.CostPer1kCacheCreation
+	if cacheCreateCost == 0 {
+		cacheCreateCost = c.CostPer1kInput // fallback
+	}
+	cost := (float64(u.PromptTokens)/1000.0)*c.CostPer1kInput +
+		(float64(u.CacheCreationTokens)/1000.0)*cacheCreateCost +
+		(float64(u.CacheReadTokens)/1000.0)*c.CostPer1kCacheRead +
+		(float64(u.CompletionTokens)/1000.0)*c.CostPer1kOutput
+	if c.LongContextInputThreshold > 0 {
+		if promptTotal := int64(u.PromptTokens) + int64(u.CacheCreationTokens) + int64(u.CacheReadTokens); promptTotal > c.LongContextInputThreshold {
+			cost *= c.LongContextMultiplier
+		}
+	}
+	return cost
+}
+
 // Provider 所有 LLM Provider 必须实现的接口
 //
 // 设计原则(规格书 1.2 原则 1):Provider 只负责协议细节,

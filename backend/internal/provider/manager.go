@@ -45,11 +45,17 @@ type ManagerProviderConfig struct {
 //   - CostPer1kOutput:        输出
 //   - CostPer1kCacheRead:     cache 命中(读)— 最便宜,DeepSeek v4-flash ¥0.02/M
 //   - CostPer1kCacheCreation: 写入 cache(创建新单元)— 中等,通常 = input * 1.25(Anthropic)
+//
+// P-quota-512k: 长上下文悬崖(MiniMax M3 官方规则 — 输入含缓存 > 阈值,
+// 输入/输出/缓存读取全项乘 multiplier;阈值 0 = 不启用)。单位:threshold = tokens,
+// multiplier = 倍率(如 512000 / 2)。
 type ModelCost struct {
-	CostPer1kInput         float64
-	CostPer1kOutput        float64
-	CostPer1kCacheRead     float64
-	CostPer1kCacheCreation float64
+	CostPer1kInput            float64
+	CostPer1kOutput           float64
+	CostPer1kCacheRead        float64
+	CostPer1kCacheCreation    float64
+	LongContextInputThreshold int64
+	LongContextMultiplier     float64
 }
 
 // ManagerCircuitConfig Circuit Breaker 配置
