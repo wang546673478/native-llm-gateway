@@ -105,7 +105,7 @@ func (c *Collector) IncQuotaPoll(provider, result string) {
 }
 
 // P68: 记录一次 quota-related 状态转换
-// from/to ∈ {"active", "quota_exceeded", "disabled"} (current scope only)
+// from/to ∈ {"active", "quota_exceeded", "cooling"} (P-no-disabled: 无 DISABLED 状态)
 func (c *Collector) IncQuotaKeyTransition(provider, from, to string) {
 	c.quotaKeyTransitions.With(prometheus.Labels{
 		"provider": provider,

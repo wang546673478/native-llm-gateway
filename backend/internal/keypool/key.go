@@ -10,10 +10,12 @@ import (
 type KeyStatus string
 
 const (
-	KeyStatusActive   KeyStatus = "ACTIVE"   // 正常可用
-	KeyStatusCooling  KeyStatus = "COOLING"  // 429 后冷却中
-	KeyStatusLimited  KeyStatus = "LIMITED"  // 配额受限(预留)
-	KeyStatusDisabled KeyStatus = "DISABLED" // 累计冷却超阈值,永久禁用
+	KeyStatusActive  KeyStatus = "ACTIVE"  // 正常可用
+	KeyStatusCooling KeyStatus = "COOLING" // 429 后冷却中
+	KeyStatusLimited KeyStatus = "LIMITED" // 配额受限(预留)
+	// P-no-disabled: 没有 DISABLED 状态 — 终端状态没有恢复路径,瞬时限流/误判
+	// 会永久杀掉 healthy key。所有失败都映射到可恢复状态(COOLING / QUOTA_EXCEEDED),
+	// 由冷却到期或 balancer poll 自动恢复
 	// P68: 配额耗尽(quota_exceeded) — 区别于 DISABLED,worker 可恢复
 	KeyStatusQuotaExceeded KeyStatus = "QUOTA_EXCEEDED"
 )
@@ -58,8 +60,6 @@ func (k *Key) IsUsable(now time.Time) bool {
 		return true
 	case KeyStatusCooling:
 		return now.After(k.CoolingUntil)
-	case KeyStatusDisabled:
-		return false
 	case KeyStatusQuotaExceeded:
 		// P68: 配额耗尽期间不可用,等 worker 探测到恢复才回 ACTIVE
 		return false

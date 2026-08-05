@@ -87,7 +87,7 @@ interface ProviderKeyView {
   name: string
   key_masked: string
   enabled: boolean
-  // P68: 运行时状态 — ACTIVE / COOLING / QUOTA_EXCEEDED / DISABLED
+  // P68: 运行时状态 — ACTIVE / COOLING / QUOTA_EXCEEDED(P-no-disabled:无 DISABLED)
   status: string
   // P48: 计费来源 — token_plan / api / free
   billing_source: string
@@ -213,14 +213,15 @@ const columns: DataTableColumns<ProviderKeyView> = [
     key: 'status',
     width: 130,
     render: (row) => {
-      // P68: 4 个状态 — ACTIVE / COOLING / QUOTA_EXCEEDED / DISABLED
-      // 配额耗尽用橘色警示,worker 会在后台探测恢复。
+      // P68: 3 个运行时状态 — ACTIVE / COOLING / QUOTA_EXCEEDED
+      // P-no-disabled: 没有 DISABLED 终端状态(全部可自动恢复);
+      // DISABLED 显示仅保留给手动关闭(enabled=false)的 key
       const status = (row.status || (row.enabled ? 'ACTIVE' : 'DISABLED')).toUpperCase()
       const map: Record<string, { color: string; label: string }> = {
         ACTIVE:          { color: '#18a058', label: '● 启用' },
         COOLING:         { color: '#2080f0', label: '⏱ 冷却中' },
         QUOTA_EXCEEDED:  { color: '#f0a020', label: '⚠ 配额耗尽' },
-        DISABLED:        { color: '#999',    label: '○ 已禁用' },
+        DISABLED:        { color: '#999',    label: '○ 已关闭' },
       }
       const m = map[status] ?? { color: '#999', label: status }
       return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)

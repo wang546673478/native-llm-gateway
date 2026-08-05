@@ -211,7 +211,6 @@ func buildPools(cfg *config.Config) map[string]*keypool.Pool {
 		}
 		out[name] = keypool.NewPool(name, keys, sched, keypool.Config{
 			CoolingDuration: cfg.KeyPool.CoolingDuration,
-			MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
 		})
 	}
 	return out

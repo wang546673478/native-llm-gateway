@@ -140,8 +140,8 @@ func TestSendRequest_AuthErrorDisablesKey(t *testing.T) {
 	if pe.ErrorType != provider.ErrorTypeAuth {
 		t.Errorf("errType = %s, want auth", pe.ErrorType)
 	}
-	if pool.Status().DisabledKeys != 1 {
-		t.Errorf("expected key disabled, got %+v", pool.Status())
+	if pool.Status().CoolingKeys != 1 {
+		t.Errorf("expected key cooling (auth → cooling, no DISABLED), got %+v", pool.Status())
 	}
 }
 

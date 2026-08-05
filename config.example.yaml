@@ -571,7 +571,6 @@ routing:
 # Key Pool 配置(P3 阶段真正生效)
 keypool:
   cooling_duration: 60s
-  max_cooling_count: 5
   health_check_interval: 30s
   key_rotation: "round_robin"
   # P68: quota polling / restore 全部 flat key(和 KeyPoolConfig struct 的
@@ -580,7 +579,6 @@ keypool:
   quota_probe_initial_delay: 5m
   quota_probe_max_backoff: 30m
   quota_probe_jitter_pct: 20
-  quota_probe_max_attempts: 8
   quota_poll_interval: 5m
   quota_poll_jitter_pct: 10
   quota_warn_threshold_pct: 10

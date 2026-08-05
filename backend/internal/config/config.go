@@ -202,7 +202,6 @@ type AliasRule struct {
 // KeyPoolConfig Key 池配置
 type KeyPoolConfig struct {
 	CoolingDuration     time.Duration `mapstructure:"cooling_duration"`
-	MaxCoolingCount     int           `mapstructure:"max_cooling_count"`
 	HealthCheckInterval time.Duration `mapstructure:"health_check_interval"`
 	KeyRotation         string        `mapstructure:"key_rotation"`
 
@@ -211,7 +210,6 @@ type KeyPoolConfig struct {
 	QuotaProbeInitialDelay time.Duration `mapstructure:"quota_probe_initial_delay"`
 	QuotaProbeMaxBackoff   time.Duration `mapstructure:"quota_probe_max_backoff"`
 	QuotaProbeJitterPct    int           `mapstructure:"quota_probe_jitter_pct"`
-	QuotaProbeMaxAttempts  int           `mapstructure:"quota_probe_max_attempts"`
 	QuotaPollInterval      time.Duration `mapstructure:"quota_poll_interval"`
 	QuotaWarnThresholdPct  int           `mapstructure:"quota_warn_threshold_pct"`
 	QuotaPollJitterPct     int           `mapstructure:"quota_poll_jitter_pct"`

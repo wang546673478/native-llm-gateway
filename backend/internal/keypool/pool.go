@@ -27,7 +27,6 @@ const (
 // Config Pool 配置
 type Config struct {
 	CoolingDuration time.Duration // 默认冷却时长
-	MaxCoolingCount int           // 累计超过此值则 DISABLED
 	// QuotaRecovery 配额耗尽标记策略;空 = poll(保持现有行为)。
 	// 由 server.buildKeyPools 按「该 vendor 是否有 balancer」设置
 	QuotaRecovery QuotaRecoveryMode
@@ -45,16 +44,12 @@ type Pool struct {
 	// 签名带 fromStatus:让 callback 知道状态变之前的值,用于 emit transition metric。
 	OnQuotaExceeded func(*Key, KeyStatus) // 第二参数:状态变之前的 status
 	OnKeyRestored   func(*Key)
-	OnKeyDisabled   func(*Key)
 }
 
 // NewPool 构造 Pool
 func NewPool(providerName string, keys []*Key, scheduler Scheduler, cfg Config) *Pool {
 	if cfg.CoolingDuration <= 0 {
 		cfg.CoolingDuration = 60 * time.Second
-	}
-	if cfg.MaxCoolingCount <= 0 {
-		cfg.MaxCoolingCount = 5
 	}
 	if cfg.QuotaRecovery == "" {
 		cfg.QuotaRecovery = QuotaRecoveryPoll // 默认 poll,保持现有行为
@@ -263,14 +258,13 @@ func (p *Pool) ReportRateLimit(k *Key, retryAfter time.Duration) {
 	k.LastErrorAt = now
 	k.ErrorCount++
 	k.UpdatedAt = now
-
-	if k.CoolingCount > p.cfg.MaxCoolingCount {
-		k.Status = KeyStatusDisabled
-	}
+	// P-no-disabled: 冷却次数不设上限 — 反复限流只会反复冷却(COOLING 期间不参与
+	// 调度,天然自限),不会永久禁用。终端状态没有恢复路径
 }
 
 // ReportError 上报非 429 错误
-//   - auth / invalid_request → 直接 DISABLED
+//   - auth → 冷却 5 分钟(换 key 后自动恢复;P-no-disabled 不设终端状态)
+//   - invalid_request → 仅计数(上游 400 通常是请求内容问题,不是 key 的问题)
 //   - quota_exceeded → P68: 走 quota restore 路径(QUOTA_EXCEEDED + worker 探测)
 //   - 其他 → 仅累计计数
 func (p *Pool) ReportError(k *Key, errType string) {
@@ -284,8 +278,10 @@ func (p *Pool) ReportError(k *Key, errType string) {
 	var fromStatus KeyStatus
 	switch errType {
 	case "auth":
-		// 上游 401/403-auth:key 本身有问题 → 禁用(无自动恢复,需重建)
-		k.Status = KeyStatusDisabled
+		// P-no-disabled: 上游 401/403-auth:key 本身有问题 → 冷却 5 分钟而非禁用。
+		// 冷却期间不参与调度,到期自动重试 — 换 key/修 key 后自动恢复
+		k.Status = KeyStatusCooling
+		k.CoolingUntil = now.Add(5 * time.Minute)
 	case "invalid_request":
 		// P-invalid-req: 上游 400 通常是「这个请求内容它不支持」(agent 回带的
 		// 其他厂商 thinking 块、tool 格式差异等),不是 key 有问题 —
@@ -350,19 +346,6 @@ func (p *Pool) RestoreQuota(k *Key) {
 	}
 }
 
-// MarkDisabledAfterQuota 探测连续失败达到 max attempts → 永久 DISABLED
-func (p *Pool) MarkDisabledAfterQuota(k *Key) {
-	p.mu.Lock()
-	k.Status = KeyStatusDisabled
-	k.UpdatedAt = time.Now()
-	cb := p.OnKeyDisabled
-	p.mu.Unlock()
-
-	if cb != nil {
-		go cb(k)
-	}
-}
-
 // IncQuotaProbeAttempts 探测次数 +1(RESTORE 时由 Manager reset 为 0)
 // 返回新的 attempts 数
 func (p *Pool) IncQuotaProbeAttempts(k *Key) int {
@@ -378,7 +361,6 @@ type PoolStatus struct {
 	TotalKeys         int    `json:"total_keys"`
 	ActiveKeys        int    `json:"active_keys"`
 	CoolingKeys       int    `json:"cooling_keys"`
-	DisabledKeys      int    `json:"disabled_keys"`
 	QuotaExceededKeys int    `json:"quota_exceeded_keys"` // P68
 	// P-quota-balance: 上游 quota polling 的聚合指标
 	QuotaPolledKeys int     `json:"quota_polled_keys"` // 至少 poll 过一次的 key 数
@@ -400,8 +382,6 @@ func (p *Pool) Status() PoolStatus {
 			s.ActiveKeys++
 		case KeyStatusCooling:
 			s.CoolingKeys++
-		case KeyStatusDisabled:
-			s.DisabledKeys++
 		case KeyStatusQuotaExceeded:
 			s.QuotaExceededKeys++
 		}

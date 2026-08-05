@@ -37,10 +37,10 @@ func TestPool_AcquireReturnsUsableKey(t *testing.T) {
 	}
 }
 
-func TestPool_AcquireWhenAllDisabled(t *testing.T) {
+func TestPool_AcquireWhenAllUnusable(t *testing.T) {
 	keys := newTestKeys(2)
-	keys[0].Status = KeyStatusDisabled
-	keys[1].Status = KeyStatusDisabled
+	keys[0].Status = KeyStatusQuotaExceeded
+	keys[1].Status = KeyStatusQuotaExceeded
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 	_, err := pool.Acquire()
 	if !errors.Is(err, ErrNoAvailableKey) {
@@ -90,7 +90,6 @@ func TestPool_ReportRateLimitTriggersCooling(t *testing.T) {
 	keys := newTestKeys(1)
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{
 		CoolingDuration: 30 * time.Second,
-		MaxCoolingCount: 3,
 	})
 	k := keys[0]
 
@@ -111,21 +110,28 @@ func TestPool_ReportRateLimitTriggersCooling(t *testing.T) {
 		t.Errorf("cooling_count = %d, want 2", k.CoolingCount)
 	}
 
-	// 第 4 次应该超过 max=3 → DISABLED
+	// P-no-disabled: 反复 429 只会反复冷却,不会永久禁用
 	pool.ReportRateLimit(k, 0)
-	pool.ReportRateLimit(k, 0) // 第 4 次
-	if k.Status != KeyStatusDisabled {
-		t.Errorf("after 4x 429 (max=3): status = %q, want DISABLED", k.Status)
+	pool.ReportRateLimit(k, 0)
+	if k.Status != KeyStatusCooling {
+		t.Errorf("after repeated 429: status = %q, want COOLING (no DISABLED state)", k.Status)
+	}
+	if k.CoolingCount != 4 {
+		t.Errorf("cooling_count = %d, want 4", k.CoolingCount)
 	}
 }
 
-func TestPool_ReportErrorDisablesOnAuth(t *testing.T) {
+func TestPool_ReportErrorAuthCooling(t *testing.T) {
 	keys := newTestKeys(1)
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 
 	pool.ReportError(keys[0], "auth")
-	if keys[0].Status != KeyStatusDisabled {
-		t.Errorf("after auth error: status = %q, want DISABLED", keys[0].Status)
+	// P-no-disabled: auth 失败冷却 5 分钟(换 key 后自动恢复),不永久禁用
+	if keys[0].Status != KeyStatusCooling {
+		t.Errorf("after auth error: status = %q, want COOLING", keys[0].Status)
+	}
+	if !keys[0].CoolingUntil.After(time.Now().Add(4 * time.Minute)) {
+		t.Error("auth cooling should be ~5 minutes")
 	}
 }
 
@@ -191,7 +197,7 @@ func TestPool_Status(t *testing.T) {
 	keys[1].Status = KeyStatusActive
 	keys[2].Status = KeyStatusCooling
 	keys[2].CoolingUntil = time.Now().Add(time.Minute)
-	keys[3].Status = KeyStatusDisabled
+	keys[3].Status = KeyStatusQuotaExceeded
 
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 	s := pool.Status()
@@ -204,8 +210,8 @@ func TestPool_Status(t *testing.T) {
 	if s.CoolingKeys != 1 {
 		t.Errorf("CoolingKeys = %d, want 1", s.CoolingKeys)
 	}
-	if s.DisabledKeys != 1 {
-		t.Errorf("DisabledKeys = %d, want 1", s.DisabledKeys)
+	if s.QuotaExceededKeys != 1 {
+		t.Errorf("QuotaExceededKeys = %d, want 1", s.QuotaExceededKeys)
 	}
 }
 
@@ -268,7 +274,7 @@ func TestAcquire_BackwardCompatibleTierFallback(t *testing.T) {
 	now := time.Now()
 	tpKey := &Key{
 		ID: "z", ProviderName: "test", Name: "kz", Key: "sk",
-		Status: KeyStatusDisabled, BillingSource: "token_plan",
+		Status: KeyStatusQuotaExceeded, BillingSource: "token_plan",
 		CreatedAt: now, UpdatedAt: now,
 	}
 	apiKey := &Key{
@@ -454,14 +460,14 @@ func TestPool_StatusCountsQuotaExceeded(t *testing.T) {
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
 	pool.ReportError(keys[0], "quota_exceeded")
 	pool.ReportError(keys[1], "quota_exceeded")
-	pool.ReportError(keys[2], "auth") // DISABLED
+	pool.ReportError(keys[2], "auth") // P-no-disabled: auth → 冷却,不是禁用
 
 	s := pool.Status()
 	if s.QuotaExceededKeys != 2 {
 		t.Errorf("QuotaExceededKeys = %d, want 2", s.QuotaExceededKeys)
 	}
-	if s.DisabledKeys != 1 {
-		t.Errorf("DisabledKeys = %d, want 1", s.DisabledKeys)
+	if s.CoolingKeys != 1 {
+		t.Errorf("CoolingKeys = %d, want 1 (auth → cooling, no DISABLED)", s.CoolingKeys)
 	}
 	if s.ActiveKeys != 0 {
 		t.Errorf("ActiveKeys = %d, want 0", s.ActiveKeys)
@@ -573,8 +579,8 @@ func TestPool_StatusIncludesQuotaSummary(t *testing.T) {
 	keys := []*Key{
 		mk("a", KeyStatusActive, 10.0, true),
 		mk("b", KeyStatusActive, 5.5, true),
-		mk("c", KeyStatusActive, 0, false),   // 还没 poll 过
-		mk("d", KeyStatusDisabled, 99, true), // 已 DISABLED,仍要算
+		mk("c", KeyStatusActive, 0, false),        // 还没 poll 过
+		mk("d", KeyStatusQuotaExceeded, 99, true), // QE 但仍 poll 过,要算
 	}
 	pool := NewPool("test", keys, nil, Config{})
 

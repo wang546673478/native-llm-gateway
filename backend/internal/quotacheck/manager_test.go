@@ -97,8 +97,8 @@ func TestManager_ProbeRestoredCallsRestoreQuota(t *testing.T) {
 	}
 }
 
-// Test 2: StillExhausted → backoff + 重复入堆,达到 max_attempts → DISABLED
-func TestManager_StillExhaustedBackoffAndMaxAttempts(t *testing.T) {
+// Test 2: P-no-disabled: StillExhausted → 保持 QE + backoff 重调度,永不 DISABLED
+func TestManager_StillExhaustedStaysQE(t *testing.T) {
 	keys := []*keypool.Key{
 		{ID: "1", Name: "k1", Status: keypool.KeyStatusActive, CreatedAt: time.Now(), UpdatedAt: time.Now(), BillingSource: "api"},
 	}
@@ -106,7 +106,6 @@ func TestManager_StillExhaustedBackoffAndMaxAttempts(t *testing.T) {
 	pool.ReportError(keys[0], "quota_exceeded")
 
 	cfg := DefaultManagerConfig()
-	cfg.ProbeMaxAttempts = 3
 	cfg.ProbeInitialDelay = 100 * time.Millisecond
 	cfg.ProbeMaxBackoff = 500 * time.Millisecond
 	cfg.ProbeJitterPct = 0
@@ -121,20 +120,20 @@ func TestManager_StillExhaustedBackoffAndMaxAttempts(t *testing.T) {
 	}
 	m.rand = rand.New(rand.NewSource(42))
 
-	// 模拟 3 次失败
-	m.handleProbeResult("test", "1", ResultStillExhausted)
-	if keys[0].Status != keypool.KeyStatusQuotaExceeded {
-		t.Errorf("after 1st still_exhausted: status = %s, want QUOTA_EXCEEDED", keys[0].Status)
+	// 反复 still_exhausted(远超旧的 max attempts=8)→ 仍保持 QE,不 DISABLED
+	for i := 0; i < 10; i++ {
+		m.handleProbeResult("test", "1", ResultStillExhausted)
 	}
-	m.handleProbeResult("test", "1", ResultStillExhausted)
-	m.handleProbeResult("test", "1", ResultStillExhausted) // 第 3 次 = max attempts
-	if keys[0].Status != keypool.KeyStatusDisabled {
-		t.Errorf("after max attempts: status = %s, want DISABLED", keys[0].Status)
+	if keys[0].Status != keypool.KeyStatusQuotaExceeded {
+		t.Errorf("after repeated still_exhausted: status = %s, want QUOTA_EXCEEDED (no DISABLED)", keys[0].Status)
+	}
+	if m.sched.pendingCount() != 1 {
+		t.Errorf("pending = %d, want 1 (still rescheduled)", m.sched.pendingCount())
 	}
 }
 
-// Test 3: AuthFailed → 立即 DISABLED
-func TestManager_AuthFailedImmediateDisabled(t *testing.T) {
+// Test 3: P-no-disabled: AuthFailed → 保持 QE + 重调度,不 DISABLED(换 key 后自动恢复)
+func TestManager_AuthFailedStaysQE(t *testing.T) {
 	keys := []*keypool.Key{
 		{ID: "1", Name: "k1", Status: keypool.KeyStatusActive, CreatedAt: time.Now(), UpdatedAt: time.Now(), BillingSource: "api"},
 	}
@@ -151,8 +150,11 @@ func TestManager_AuthFailedImmediateDisabled(t *testing.T) {
 	}
 	m.handleProbeResult("test", "1", ResultAuthFailed)
 
-	if keys[0].Status != keypool.KeyStatusDisabled {
-		t.Errorf("after auth_failed: status = %s, want DISABLED", keys[0].Status)
+	if keys[0].Status != keypool.KeyStatusQuotaExceeded {
+		t.Errorf("after auth_failed: status = %s, want QUOTA_EXCEEDED (no DISABLED)", keys[0].Status)
+	}
+	if m.sched.pendingCount() != 1 {
+		t.Errorf("pending = %d, want 1 (still rescheduled)", m.sched.pendingCount())
 	}
 }
 
@@ -483,7 +485,6 @@ func TestManager_StillExhaustedWithBalancerNotDisabled(t *testing.T) {
 	})
 
 	cfg := DefaultManagerConfig()
-	cfg.ProbeMaxAttempts = 3
 	cfg.ProbeInitialDelay = 100 * time.Millisecond
 	cfg.ProbeMaxBackoff = 500 * time.Millisecond
 	cfg.ProbeJitterPct = 0

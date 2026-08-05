@@ -167,7 +167,6 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		ProbeInitialDelay: cfg.KeyPool.QuotaProbeInitialDelay,
 		ProbeMaxBackoff:   cfg.KeyPool.QuotaProbeMaxBackoff,
 		ProbeJitterPct:    cfg.KeyPool.QuotaProbeJitterPct,
-		ProbeMaxAttempts:  cfg.KeyPool.QuotaProbeMaxAttempts,
 		PollInterval:      cfg.KeyPool.QuotaPollInterval,
 		PollJitterPct:     cfg.KeyPool.QuotaPollJitterPct,
 		HTTPTimeout:       cfg.KeyPool.QuotaHTTPTimeout,
@@ -232,7 +231,6 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		if !ok {
 			poolCfg := keypool.Config{
 				CoolingDuration: cfg.KeyPool.CoolingDuration,
-				MaxCoolingCount: cfg.KeyPool.MaxCoolingCount,
 			}
 			// B-probe-quota: 该 vendor 没有任何注册名有余额查询 balancer
 			// (glm / qwen / gemini)→ probe 模式:配额耗尽不永久标记,每次请求
@@ -712,7 +710,6 @@ func (s *Server) Reload(newCfg *config.Config) {
 			ProbeInitialDelay: newCfg.KeyPool.QuotaProbeInitialDelay,
 			ProbeMaxBackoff:   newCfg.KeyPool.QuotaProbeMaxBackoff,
 			ProbeJitterPct:    newCfg.KeyPool.QuotaProbeJitterPct,
-			ProbeMaxAttempts:  newCfg.KeyPool.QuotaProbeMaxAttempts,
 			PollInterval:      newCfg.KeyPool.QuotaPollInterval,
 			WarnThresholdPct:  newCfg.KeyPool.QuotaWarnThresholdPct,
 			PollJitterPct:     newCfg.KeyPool.QuotaPollJitterPct,
@@ -734,7 +731,6 @@ func (s *Server) ReloadProviderPool(providerName string) {
 	sched := keypool.NewScheduler(s.cfg.KeyPool.KeyRotation)
 	poolCfg := keypool.Config{
 		CoolingDuration: s.cfg.KeyPool.CoolingDuration,
-		MaxCoolingCount: s.cfg.KeyPool.MaxCoolingCount,
 	}
 	store := auth.NewProviderKeyStore(s.db)
 	ctx := context.Background()

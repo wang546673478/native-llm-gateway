@@ -40,7 +40,6 @@ type ManagerConfig struct {
 	ProbeInitialDelay time.Duration // 第一次探测延迟(默认 5m)
 	ProbeMaxBackoff   time.Duration // 探测间隔上限(默认 30m)
 	ProbeJitterPct    int           // ±N% 抖动(默认 20)
-	ProbeMaxAttempts  int           // 超过则永久 DISABLED(默认 8)
 
 	// Poll (有 balance API 的 provider 用)
 	PollInterval  time.Duration // 主动 poll 周期(默认 60s)
@@ -61,7 +60,6 @@ func DefaultManagerConfig() ManagerConfig {
 		ProbeInitialDelay: 5 * time.Minute,
 		ProbeMaxBackoff:   30 * time.Minute,
 		ProbeJitterPct:    20,
-		ProbeMaxAttempts:  8,
 		PollInterval:      60 * time.Second,
 		PollJitterPct:     10,
 		HTTPTimeout:       10 * time.Second,
@@ -125,9 +123,6 @@ func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, metric
 	}
 	if cfg.ProbeMaxBackoff <= 0 {
 		cfg.ProbeMaxBackoff = 30 * time.Minute
-	}
-	if cfg.ProbeMaxAttempts <= 0 {
-		cfg.ProbeMaxAttempts = 8
 	}
 	if cfg.ProbeJitterPct < 0 {
 		cfg.ProbeJitterPct = 0
@@ -201,7 +196,7 @@ func (m *Manager) Start(ctx context.Context) {
 // 也会在 ReloadProviderPool 后再次调用
 // P-provider-vendor: 同一 vendor 共享 pool 后,多个注册名(deepseek / deepseek-anthropic)
 // 指向同一 *Pool — 按 pool 指针去重,只注入一次 callback,避免 QUOTA_EXCEEDED key
-// 以两个名字各入堆一次(双倍探测 / QuotaProbeAttempts 双倍增长提前 DISABLE)。
+// 以两个名字各入堆一次(双倍探测 / QuotaProbeAttempts 双倍增长)。
 func (m *Manager) injectCallbacks() {
 	seen := make(map[*keypool.Pool]bool)
 	for name, pool := range m.pools.Get() {
@@ -227,13 +222,6 @@ func (m *Manager) injectOneCallback(providerName string, p *keypool.Pool) {
 			zap.String("provider", providerName),
 			zap.String("key_id", k.ID),
 			zap.String("tier", k.BillingSource),
-		)
-	}
-	p.OnKeyDisabled = func(k *keypool.Key) {
-		m.logger.Info("key disabled after quota probe",
-			zap.String("provider", providerName),
-			zap.String("key_id", k.ID),
-			zap.Int("attempts", k.QuotaProbeAttempts),
 		)
 	}
 	// 把已经是 QUOTA_EXCEEDED 的 key 重新入堆(防止 reload 丢失状态)
@@ -324,38 +312,23 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 		m.sched.removeKey(providerName, keyID)
 
 	case ResultStillExhausted:
-		// P-quota-probe-disable: 有 balancer 的 provider 以 poll(60s)为恢复通道 —
-		// 充值/续费后 poll 发现 HasQuota 自动 RestoreQuota。探测计数禁 key 会把
-		// MiniMax token plan 变成永久 DISABLED(无恢复路径),这里直接跳过
-		// (不计数、不重调度;poll 兜底恢复,探测对 balancer provider 本来就冗余)
-		if LookupBalancer(providerName) != nil {
-			return
-		}
+		// P-no-disabled: 不因探测次数禁用任何 key(终端状态无恢复路径)。
+		// 一直保持 QE + 重调度:有 balancer 的 provider 由 poll(60s)恢复,
+		// 无 balancer 的靠探测恢复;探测间隔有 backoff 上限,不会打爆上游
 		attempts := pool.IncQuotaProbeAttempts(k)
-		if attempts >= m.cfg.ProbeMaxAttempts {
-			m.logger.Info("probe exhausted max attempts, marking disabled",
-				zap.String("provider", providerName),
-				zap.String("key_id", keyID),
-				zap.Int("attempts", attempts),
-			)
-			pool.MarkDisabledAfterQuota(k)
-			m.metricsTransition(providerName, fromStatus, string(keypool.KeyStatusDisabled))
-			m.sched.removeKey(providerName, keyID)
-			return
-		}
-		// exp backoff, capped at ProbeMaxBackoff
-		backoff := m.backoff(k.QuotaProbeAttempts)
+		backoff := m.backoff(attempts)
 		nextAt := m.now().Add(m.jitter(backoff, m.cfg.ProbeJitterPct))
-		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, k.QuotaProbeAttempts)
+		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, attempts)
 
 	case ResultAuthFailed:
-		m.logger.Info("probe auth failed, marking disabled",
+		m.logger.Info("probe auth failed, keep quota_exceeded",
 			zap.String("provider", providerName),
 			zap.String("key_id", keyID),
 		)
-		pool.MarkDisabledAfterQuota(k)
-		m.metricsTransition(providerName, fromStatus, string(keypool.KeyStatusDisabled))
-		m.sched.removeKey(providerName, keyID)
+		// P-no-disabled: auth 失败同样不禁用 — 保持 QE 重调度,换 key 后自动恢复
+		backoff := m.backoff(k.QuotaProbeAttempts + 1)
+		nextAt := m.now().Add(m.jitter(backoff, m.cfg.ProbeJitterPct))
+		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, k.QuotaProbeAttempts+1)
 
 	case ResultTransportError:
 		// 网络问题,不消耗 attempt
@@ -604,10 +577,6 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				if effective != tier {
 					continue
 				}
-				if k.Status == keypool.KeyStatusDisabled {
-					continue
-				}
-
 				bal, err := balancer.FetchBalance(ctx, baseURL, k)
 				if err != nil {
 					m.logger.Warn("poll balance err",
