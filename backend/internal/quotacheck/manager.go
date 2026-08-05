@@ -590,34 +590,41 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				k.QuotaKind = bal.Kind
 				k.LastPolledAt = time.Now()
 
-				switch {
-				case !bal.HasQuota && k.Status == keypool.KeyStatusActive:
-					// 真正确认耗尽 → 写 0 + 标记 QE
-					k.Remaining = bal.Raw
-					m.logger.Info("poll: quota exhausted",
-						zap.String("provider", vendorName),
-						zap.String("key_id", k.ID),
-						zap.Float64("remaining", bal.Raw))
-					pool.ReportQuotaExceeded(k)
-					m.metricsPollInc(vendorName, "exhausted")
-				case bal.HasQuota && k.Status == keypool.KeyStatusQuotaExceeded:
-					k.Remaining = bal.Raw
-					m.logger.Info("poll: quota restored",
-						zap.String("provider", vendorName),
-						zap.String("key_id", k.ID),
-						zap.Float64("remaining", bal.Raw))
-					pool.RestoreQuota(k)
-					m.metricsPollInc(vendorName, "restored")
-				default:
-					// P-quota-guard-poison: 不写 Remaining — 上游余额 API 瞬时抖动
-					// 读到的 0 不覆盖上次已知正值(2026-08-05 实测:MiniMax 账户侧
-					// 瞬态窗口内聊天/余额 API 同时报耗尽,COOLING key 走此分支被写 0,
-					// 毒化 balanceGuard → healthy key 被误标 QE → 整链掉到 api 层)。
-					// 有额度的读值仍更新(UI 显示用);无额度但未标记耗尽 → 保留旧值
-					if bal.HasQuota {
-						k.Remaining = bal.Raw
+				// P-quota-poll-guard: 只有「有额度」或「连续 2 轮确认无额度」才写 Remaining /
+				// 标 QE。单次瞬态 0 读不覆盖上次已知正值、不标记 — 2026-08-05 实测:
+				// MiniMax 余额 API 对 healthy key-1 瞬态读 0,poll 直接标 QE,
+				// key-1 整晚趴着,流量全落到 weige 直到它耗尽 → 整链掉 deepseek
+				if !bal.HasQuota {
+					// 无额度:连续 2 轮确认才标 QE;单次瞬态 0 保留上次已知余额
+					if k.Status == keypool.KeyStatusActive {
+						k.QuotaZeroStreak++
+						if k.QuotaZeroStreak >= 2 {
+							k.Remaining = bal.Raw
+							m.logger.Info("poll: quota exhausted (2 consecutive)",
+								zap.String("provider", vendorName),
+								zap.String("key_id", k.ID),
+								zap.Float64("remaining", bal.Raw))
+							pool.ReportQuotaExceeded(k)
+							m.metricsPollInc(vendorName, "exhausted")
+						} else {
+							m.metricsPollInc(vendorName, "ok")
+						}
 					}
-					m.metricsPollInc(vendorName, "ok")
+					// 非 ACTIVE(QE/COOLING):不写不标,保留旧值
+				} else {
+					// 有额度:正常更新 + 恢复 QE key
+					k.QuotaZeroStreak = 0
+					k.Remaining = bal.Raw
+					if k.Status == keypool.KeyStatusQuotaExceeded {
+						m.logger.Info("poll: quota restored",
+							zap.String("provider", vendorName),
+							zap.String("key_id", k.ID),
+							zap.Float64("remaining", bal.Raw))
+						pool.RestoreQuota(k)
+						m.metricsPollInc(vendorName, "restored")
+					} else {
+						m.metricsPollInc(vendorName, "ok")
+					}
 				}
 
 				select {

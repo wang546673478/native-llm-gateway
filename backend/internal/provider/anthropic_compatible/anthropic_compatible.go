@@ -71,13 +71,16 @@ func (b *Base) prepareBody(body []byte) []byte {
 
 // balanceGuardHealthy P-quota-guard: 守卫 — key 最近被 balancer 轮询过且显示有余额。
 // 有余额还收到配额错误(MiniMax 瞬时限流 429 的 body 自带 2056 文本,关键词拦不住)
-// → 判为限流而非配额耗尽,避免 healthy key 被误杀到 poll 恢复(≤60s)期间整链掉到 api 层
+// → 判为限流而非配额耗尽,避免 healthy key 被误杀到 poll 恢复(≤60s)期间整链掉到 api 层。
+// 从未轮询过(启动窗口,Remaining=0 是默认值不是真余额)→ 宽松放行 — 真耗尽由
+// poll 连续 2 轮确认后标 QE,瞬态 2056 不误杀(2026-08-05 实测:重启后 60s 内
+// key-1 被 2056 误标 QE,直到首轮 poll 恢复)
 func (b *Base) balanceGuardHealthy(key *keypool.Key) bool {
-	if key.Remaining <= 0 {
-		return false
+	if key.LastPolledAt.IsZero() {
+		return true // 启动窗口:无数据 → 不杀,宁可按限流冷却
 	}
-	if key.LastPolledAt.IsZero() || time.Since(key.LastPolledAt) > 5*time.Minute {
-		return false // 没轮询过/数据过期 — 不拦,信任上游错误码
+	if key.Remaining <= 0 || time.Since(key.LastPolledAt) > 5*time.Minute {
+		return false // 有轮询数据(0 或过期)→ 信任上游错误码
 	}
 	return true
 }

@@ -399,7 +399,8 @@ func TestPollAllBalancers_PolledAllStatusesNotJustQuotaExceeded(t *testing.T) {
 }
 
 func TestPollAllBalancers_HasQuotaFalseOnActivePushedToQuotaExceeded(t *testing.T) {
-	// HasQuota=false 且 Status=ACTIVE → 自动 ReportQuotaExceeded
+	// P-quota-poll-guard: HasQuota=false 且 Status=ACTIVE → 连续 2 轮才 ReportQuotaExceeded
+	// (单次瞬态 0 不误杀 healthy key)
 	pool := keypool.NewPool("p", []*keypool.Key{
 		{ID: "active-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan"},
 	}, nil, keypool.Config{})
@@ -417,10 +418,13 @@ func TestPollAllBalancers_HasQuotaFalseOnActivePushedToQuotaExceeded(t *testing.
 
 	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
 	m.pollAllBalancers(context.Background())
-
+	if got := pool.KeyPtrs()[0].Status; got != keypool.KeyStatusActive {
+		t.Errorf("Status after 1st poll = %s, want ACTIVE (not yet confirmed)", got)
+	}
+	m.pollAllBalancers(context.Background())
 	got := pool.KeyPtrs()[0].Status
 	if got != keypool.KeyStatusQuotaExceeded {
-		t.Errorf("Status after poll = %s, want QUOTA_EXCEEDED", got)
+		t.Errorf("Status after 2nd poll = %s, want QUOTA_EXCEEDED", got)
 	}
 }
 
@@ -543,7 +547,7 @@ func TestPollAllBalancers_TransientZeroDoesNotPoisonRemaining(t *testing.T) {
 	}
 }
 
-// 对照:ACTIVE key 确认无额度 → 正常写 0 + 标 QE(真耗尽路径不受影响)
+// 对照:ACTIVE key 连续 2 轮确认无额度 → 写 0 + 标 QE(真耗尽路径不受影响)
 func TestPollAllBalancers_GenuineExhaustedStillWritesZero(t *testing.T) {
 	keys := []*keypool.Key{
 		{ID: "tp-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan"},
@@ -563,11 +567,90 @@ func TestPollAllBalancers_GenuineExhaustedStillWritesZero(t *testing.T) {
 
 	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
 	m.pollAllBalancers(context.Background())
-
+	// 第 1 轮:瞬态疑似 → 不标记
+	if keys[0].Status != keypool.KeyStatusActive {
+		t.Errorf("after 1st zero read: status = %s, want ACTIVE (not yet confirmed)", keys[0].Status)
+	}
+	m.pollAllBalancers(context.Background())
+	// 第 2 轮:连续确认 → 写 0 + 标 QE
 	if keys[0].Remaining != 0 {
 		t.Errorf("Remaining = %v, want 0", keys[0].Remaining)
 	}
 	if keys[0].Status != keypool.KeyStatusQuotaExceeded {
-		t.Errorf("status = %s, want QUOTA_EXCEEDED", keys[0].Status)
+		t.Errorf("status = %s, want QUOTA_EXCEEDED (after 2 consecutive)", keys[0].Status)
+	}
+}
+
+// P-quota-poll-guard: 单次瞬态 0 读(ACTIVE key)不标记 QE、不覆盖已知余额
+func TestPollAllBalancers_SingleZeroReadDoesNotMarkQE(t *testing.T) {
+	now := time.Now()
+	keys := []*keypool.Key{
+		{ID: "tp-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan",
+			Remaining: 97, LastPolledAt: now.Add(-30 * time.Second)},
+	}
+	pool := keypool.NewPool("p", keys, nil, keypool.Config{})
+
+	b := &fakeBalancer{bal: Balance{HasQuota: false, Raw: 0}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+	m.pollAllBalancers(context.Background())
+
+	if keys[0].Status != keypool.KeyStatusActive {
+		t.Errorf("status = %s, want ACTIVE (single transient 0 must not mark QE)", keys[0].Status)
+	}
+	if keys[0].Remaining != 97 {
+		t.Errorf("Remaining = %v, want 97 (known balance preserved)", keys[0].Remaining)
+	}
+	if keys[0].QuotaZeroStreak != 1 {
+		t.Errorf("QuotaZeroStreak = %d, want 1", keys[0].QuotaZeroStreak)
+	}
+}
+
+// P-quota-poll-guard: 0 读后恢复有额度 → streak reset,永不误标
+func TestPollAllBalancers_ZeroThenPositiveResetsStreak(t *testing.T) {
+	now := time.Now()
+	keys := []*keypool.Key{
+		{ID: "tp-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan",
+			Remaining: 97, LastPolledAt: now.Add(-30 * time.Second)},
+	}
+	pool := keypool.NewPool("p", keys, nil, keypool.Config{})
+
+	b := &fakeBalancer{}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+
+	// 第 1 轮:瞬态 0
+	b.bal = Balance{HasQuota: false, Raw: 0}
+	m.pollAllBalancers(context.Background())
+	// 第 2 轮:恢复有额度
+	b.bal = Balance{HasQuota: true, Raw: 99}
+	m.pollAllBalancers(context.Background())
+	// 第 3 轮:再来一次 0 — streak 已 reset,仍不应标记
+	b.bal = Balance{HasQuota: false, Raw: 0}
+	m.pollAllBalancers(context.Background())
+
+	if keys[0].Status != keypool.KeyStatusActive {
+		t.Errorf("status = %s, want ACTIVE (streak reset between 0 reads)", keys[0].Status)
+	}
+	if keys[0].QuotaZeroStreak != 1 {
+		t.Errorf("QuotaZeroStreak = %d, want 1 (reset after positive read)", keys[0].QuotaZeroStreak)
 	}
 }

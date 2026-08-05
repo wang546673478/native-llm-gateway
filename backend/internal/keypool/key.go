@@ -42,8 +42,12 @@ type Key struct {
 	UpdatedAt     time.Time
 	// P68: quota restore worker 用 — 第一次被标记 QUOTA_EXCEEDED 的时间
 	QuotaExceededSince time.Time
-	// P68: 探测次数(成功 Restore 时 reset 为 0;max attempts 触发 DISABLED)
+	// P68: 探测次数(成功 Restore 时 reset 为 0)
 	QuotaProbeAttempts int
+	// P-quota-poll-guard: poll 连续读到无额度的次数(读到有额度时 reset 为 0)。
+	// 连续 >=2 轮才确认耗尽标 QE — 单次瞬态 0 读不误杀 healthy key
+	// (2026-08-05 实测:MiniMax 余额 API 瞬态 0 → key-1 被标 QE 一晚上趴着)
+	QuotaZeroStreak int
 	// P-quota-balance: 上游 quota polling 写入的余额快照与时间戳(runtime, 不落 DB)
 	Remaining    float64
 	LastPolledAt time.Time

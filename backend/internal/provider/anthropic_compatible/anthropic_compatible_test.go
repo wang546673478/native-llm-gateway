@@ -121,6 +121,10 @@ func TestSendRequest_MiniMaxBaseRespQuota(t *testing.T) {
 	defer upstream.Close()
 
 	pool := newTestPool(t)
+	// 最近轮询确认余额 0(真耗尽)— 启动窗口宽松不适用于此
+	ks := pool.KeyPtrs()
+	ks[0].Remaining = 0
+	ks[0].LastPolledAt = time.Now()
 	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
 
 	resp, err := b.SendRequest(context.Background(), &provider.Request{
@@ -152,6 +156,10 @@ func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
 	defer upstream.Close()
 
 	pool := newTestPool(t)
+	// 最近轮询确认余额 0(真耗尽)— 启动窗口宽松不适用于此
+	ks := pool.KeyPtrs()
+	ks[0].Remaining = 0
+	ks[0].LastPolledAt = time.Now()
 	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
 
 	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
@@ -345,7 +353,8 @@ func TestSendRequest_BalanceGuardQuotaToRateLimit(t *testing.T) {
 	}
 }
 
-// TestSendRequest_BalanceGuardExhaustedStillQE 对照:余额 0 的 key 收到 2056 → 照常 QUOTA_EXCEEDED
+// TestSendRequest_BalanceGuardExhaustedStillQE 对照:最近轮询确认余额 0 的 key
+// 收到 2056 → 照常 QUOTA_EXCEEDED(真耗尽路径不受宽松守卫影响)
 func TestSendRequest_BalanceGuardExhaustedStillQE(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -354,7 +363,11 @@ func TestSendRequest_BalanceGuardExhaustedStillQE(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	pool := newTestPool(t) // Remaining=0 且从未轮询 → 守卫不通过
+	pool := newTestPool(t)
+	// 最近轮询过且余额确实是 0(真耗尽)
+	ks := pool.KeyPtrs()
+	ks[0].Remaining = 0
+	ks[0].LastPolledAt = time.Now()
 	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
 
 	_, err := b.SendRequest(context.Background(), &provider.Request{
