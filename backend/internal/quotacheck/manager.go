@@ -324,6 +324,13 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 		m.sched.removeKey(providerName, keyID)
 
 	case ResultStillExhausted:
+		// P-quota-probe-disable: 有 balancer 的 provider 以 poll(60s)为恢复通道 —
+		// 充值/续费后 poll 发现 HasQuota 自动 RestoreQuota。探测计数禁 key 会把
+		// MiniMax token plan 变成永久 DISABLED(无恢复路径),这里直接跳过
+		// (不计数、不重调度;poll 兜底恢复,探测对 balancer provider 本来就冗余)
+		if LookupBalancer(providerName) != nil {
+			return
+		}
 		attempts := pool.IncQuotaProbeAttempts(k)
 		if attempts >= m.cfg.ProbeMaxAttempts {
 			m.logger.Info("probe exhausted max attempts, marking disabled",

@@ -460,3 +460,49 @@ func TestPollAllBalancers_DedupSharedPool(t *testing.T) {
 		t.Fatalf("balancer calls = %d, want 1 (shared pool dedup)", got)
 	}
 }
+
+// P-quota-probe-disable: 有 balancer 的 provider 的 QE key 不能被探测次数禁掉 —
+// poll(60s) 才是恢复通道,充值/续费后自动 ACTIVE;DISABLED 没有恢复路径
+// (2026-08-05 实测:weige 0% 余额被 probe 8 次 → 永久 DISABLED,续费也救不回)
+func TestManager_StillExhaustedWithBalancerNotDisabled(t *testing.T) {
+	keys := []*keypool.Key{
+		{ID: "1", Name: "k1", Status: keypool.KeyStatusActive, CreatedAt: time.Now(), UpdatedAt: time.Now(), BillingSource: "api"},
+	}
+	pool := keypool.NewPool("baltest", keys, nil, keypool.Config{})
+	pool.ReportError(keys[0], "quota_exceeded")
+
+	b := &fakeBalancer{bal: Balance{HasQuota: false, Raw: 0}}
+	originalReg := balancerRegistry["baltest"]
+	RegisterBalancer("baltest", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["baltest"] = originalReg
+		} else {
+			delete(balancerRegistry, "baltest")
+		}
+	})
+
+	cfg := DefaultManagerConfig()
+	cfg.ProbeMaxAttempts = 3
+	cfg.ProbeInitialDelay = 100 * time.Millisecond
+	cfg.ProbeMaxBackoff = 500 * time.Millisecond
+	cfg.ProbeJitterPct = 0
+
+	m := &Manager{
+		logger: zap.NewNop(),
+		cfg:    cfg,
+		pools:  NewPoolsRef(map[string]*keypool.Pool{"baltest": pool}),
+		prov:   &fakeProviderLookup{endpoints: map[string]string{"baltest": "http://x"}},
+		sched:  NewScheduler(),
+		now:    time.Now,
+	}
+	m.rand = rand.New(rand.NewSource(42))
+
+	// 超过 max attempts 多次仍不 DISABLED
+	for i := 0; i < 5; i++ {
+		m.handleProbeResult("baltest", "1", ResultStillExhausted)
+	}
+	if keys[0].Status != keypool.KeyStatusQuotaExceeded {
+		t.Errorf("after repeated still_exhausted with balancer: status = %s, want QUOTA_EXCEEDED (not DISABLED)", keys[0].Status)
+	}
+}
