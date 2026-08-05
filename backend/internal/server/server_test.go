@@ -15,8 +15,9 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	// P-provider-vendor: init() 注册 deepseek / deepseek-anthropic(vendor=deepseek)
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
-	// TestVendorHasBalancer 用:glm 无 balancer(对照 deepseek 有)
+	// TestVendorHasBalancer 用:glm 有 balancer(官方 monitor 端点)、qwen 没有
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm"
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/qwen"
 )
 
 // fakeProvider 最小 Provider 实现 — Manager.SetForTesting 用
@@ -106,13 +107,16 @@ func TestReloadProviderPool_FullRebuildVendorGrouped(t *testing.T) {
 	}
 }
 
-// TestVendorHasBalancer — B-probe-quota: 有余额查询 balancer 的 vendor
-// (deepseek)→ poll 模式;无 balancer 的(glm)→ probe 模式,配额耗尽不永久标记
+// TestVendorHasBalancer — 有余额查询 balancer 的 vendor(deepseek/glm)→
+// poll 模式;无 balancer 的(qwen)→ probe 模式,配额耗尽不永久标记
 func TestVendorHasBalancer(t *testing.T) {
 	if !vendorHasBalancer("deepseek") {
 		t.Error("deepseek: want has-balancer=true (both faces register balancers)")
 	}
-	if vendorHasBalancer("glm") {
-		t.Error("glm: want has-balancer=false (no official balance API)")
+	if !vendorHasBalancer("glm") {
+		t.Error("glm: want has-balancer=true (official monitor quota endpoint)")
+	}
+	if vendorHasBalancer("qwen") {
+		t.Error("qwen: want has-balancer=false (no balance API)")
 	}
 }

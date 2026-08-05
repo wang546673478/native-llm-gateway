@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 )
 
 func TestRegistration_TwoProtocols(t *testing.T) {
@@ -34,5 +35,13 @@ func TestRegistration_TwoProtocols(t *testing.T) {
 	}
 	if ga.Vendor != "glm" {
 		t.Errorf("%s vendor = %q, want glm", anthropicName, ga.Vendor)
+	}
+
+	// B-glm-quota: 两个注册名都必须注册 balancer — 漏一个 → 该协议面额度永不
+	// 标记/恢复(server.vendorHasBalancer 据此决定 poll vs probe 模式)
+	for _, n := range []string{name, anthropicName} {
+		if quotacheck.LookupBalancer(n) == nil {
+			t.Errorf("balancer not registered for %q", n)
+		}
 	}
 }

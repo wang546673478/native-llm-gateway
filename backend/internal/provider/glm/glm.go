@@ -11,7 +11,9 @@
 //     响应 choices[].message / 流式 delta 带 reasoning_content
 //  5. 上下文缓存自动生效,usage 结构与 OpenAI 一致
 //  6. 官方文档无 /responses API → 不配 ResponsesPath,responses_api: false
-//  7. 无官方余额查询接口 → 不注册 balancer(qwen/gemini 同款,api 计费)
+//  7. 额度查询:官方插件(zai-org/zai-coding-plugins)暴露的 monitor 端点
+//     GET {host}/api/monitor/usage/quota/limit,标准 API key 可用 → 注册 balancer,
+//     poll 模式:百分比展示 + 滚动窗口重置后自动恢复(见 balancer.go)
 //  8. 模型:glm-5.2(旗舰,1M 上下文 / 128K 输出)、glm-5.1、glm-5、glm-5-turbo、
 //     glm-4.7、glm-4.6、glm-4.5
 //
