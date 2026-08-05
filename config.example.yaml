@@ -450,6 +450,30 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  # --- 智谱 GLM Anthropic 兼容(给 Claude Code / Anthropic SDK 用户) ---
+  # 与 glm 共用同一组 Provider Key(同一 vendor,key 池共享)
+  glm-anthropic:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://open.bigmodel.cn/api/anthropic"
+    protocol: "anthropic"
+    timeout: 60s
+    models:
+      - id: "glm-5.2"
+        aliases: []
+        cost_per_1k_input: 0.008
+        cost_per_1k_output: 0.028
+        cost_per_1k_cache_read: 0.002
+        cost_per_1k_cache_creation: 0.0
+    keys: []
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
 # 路由规则(P4 阶段真正生效)
 routing:
   # P39: 共享 provider chain — 定义一次,多个 alias 用 chain_ref 复用

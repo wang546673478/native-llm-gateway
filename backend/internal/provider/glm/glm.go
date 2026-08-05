@@ -1,8 +1,8 @@
-// Package glm 实现 GLM Provider(智谱 AI,OpenAI 兼容)
+// Package glm 实现 GLM Provider(智谱 AI,OpenAI + Anthropic 两种协议)
 //
 // 基于官方文档 https://docs.bigmodel.cn(2026-08-05 全量调研)实现:
 //
-// 关键事实:
+// OpenAI 面关键事实:
 //  1. 端点 https://open.bigmodel.cn/api/paas/v4(已含 /api/paas/v4 版本前缀,
 //     chat path 用 /chat/completions,不是 /v1/chat/completions)
 //  2. 认证:标准 Bearer(与 OpenAI 一致)
@@ -10,10 +10,13 @@
 //  4. GLM-5.2 支持思考模式:请求 thinking + reasoning_effort(默认 max),
 //     响应 choices[].message / 流式 delta 带 reasoning_content
 //  5. 上下文缓存自动生效,usage 结构与 OpenAI 一致
-//  6. 官方文档索引无 /responses API → 不配 ResponsesPath,responses_api: false
+//  6. 官方文档无 /responses API → 不配 ResponsesPath,responses_api: false
 //  7. 无官方余额查询接口 → 不注册 balancer(qwen/gemini 同款,api 计费)
 //  8. 模型:glm-5.2(旗舰,1M 上下文 / 128K 输出)、glm-5.1、glm-5、glm-5-turbo、
 //     glm-4.7、glm-4.6、glm-4.5
+//
+// Anthropic 面(anthropic.go,注册名 "glm-anthropic"):
+//   - base URL https://open.bigmodel.cn/api/anthropic,与 openai 面共用同一 API key
 //
 // 注意:GLM Coding Plan 套餐需配置专属 Coding 端点(见官方文档),本包只做标准 API 计费
 package glm
@@ -102,8 +105,10 @@ func (p *Provider) SetPool(pool *keypool.Pool) {
 func (p *Provider) Close() error { return p.base.Close() }
 
 // init 自动注册到 Registry(vendor = 厂商名)
+// 官方 Claude API 兼容 → anthropic 面也要注册,两个注册名共享同一 key 池
 func init() {
 	provider.RegisterGlobalWithProtocolVendor(name, New, provider.ProtocolOpenAI, name)
+	provider.RegisterGlobalWithProtocolVendor(anthropicName, NewAnthropic, provider.ProtocolAnthropic, name)
 }
 
 // toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
