@@ -19,7 +19,7 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 1. **读模板**:`backend/internal/provider/deepseek/` 全套(deepseek.go / anthropic.go / balancer.go / registry_test.go)作为模板复制
 2. **写 openai 面**(继承 `openai_compatible.Base`):协议校验、endpoint 校验、ChatPath/ResponsesPath、StreamUsage: true
 3. **写 anthropic 面**(可选,继承 `anthropic_compatible.Base`)
-4. **注册**:`init()` 里 `RegisterGlobalWithProtocolVendor` 每个协议面一条,vendor = 厂商名
+4. **注册**:`init()` 里 `RegisterGlobalWithProtocolVendor` 每个协议面一条,vendor = 厂商名;**同时 `cmd/gateway/main.go` 加一行 blank import** 触发 init(Go 只编译被 import 的包,漏了它新厂商不进二进制、`/providers` 不出现)
 5. **balancer**(可选但推荐):`RegisterBalancer` 每个注册名一条;余额接口先实测(错误可能藏在 HTTP 200 body)
 6. **config.yaml 加块**:enabled/billing_source/endpoint/protocol/models(+default_model / responses_api)
 7. **写 registry_test.go**:断言每个注册名的 Protocol 和 Vendor(复制 deepseek 的改名字)
@@ -29,6 +29,7 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 ## 检查点(提交前逐项过)
 
 - [ ] 每个协议面的注册名都有 `RegisterGlobalWithProtocolVendor`,vendor 都是厂商名
+- [ ] `cmd/gateway/main.go` 有该厂商的 blank import(漏了 init() 不跑,不进二进制)
 - [ ] 每个注册名都有 `RegisterBalancer`(有余额查询的厂商)
 - [ ] 同厂商所有 config 块 `billing_source` 一致
 - [ ] `responses_api` 与官方支持矩阵一致;支持的话 `ResponsesPath` 不拼错 /v1(端点已含 /v1 用 `/responses`)
@@ -43,3 +44,4 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 - 400 invalid_request **不禁用 key**(auth 才禁用)— 别把逻辑改回去
 - 跨厂商推理块由网关统一剥离,厂商包无需处理
 - 白名单选择语义:厂商声明过白名单模型就用白名单模型——新厂商的模型没进白名单,链上不会用它
+- 注册了但 `/providers` 不出现 → 忘了 main.go 的 blank import(Go 只编译被 import 的包)

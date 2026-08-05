@@ -102,6 +102,14 @@ func init() {
 > - `VendorFor(注册名)` 归一(key 绑定/白名单/access log 都按厂商)
 > - 同 vendor 共享 key 池(server.buildKeyPools 按 vendor 复用)
 
+**关键:还要在 `cmd/gateway/main.go` 加 blank import** — Go 只编译被 import 的包,
+厂商包靠 `init()` 自注册;不加这行,新厂商不会进二进制,`/api/v1/providers` 里
+死活不出现它。在现有四个 blank import 后面加一行:
+
+```go
+_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm" // 触发 init() 注册(OpenAI + Anthropic 两个注册名)
+```
+
 ### Step 4:余额查询(可选,`balancer.go`)
 
 ```go
@@ -153,3 +161,4 @@ kimi:
 | 跨厂商推理块 | 客户端回带上家 reasoning → 网关自动剥离 + effort=none,厂商包无需处理 |
 | 注册名都要注册 balancer | 漏一个 → 该协议面额度永不标记 |
 | vendor 参数别填错 | 填错 → key 池不共享 / 绑定归一失效 / access log 厂商名错乱 |
+| 注册了但新厂商不生效 | 忘了 `cmd/gateway/main.go` 的 blank import —— Go 只编译被 import 的包,`init()` 不跑,不进二进制 |
