@@ -654,3 +654,83 @@ func TestPollAllBalancers_ZeroThenPositiveResetsStreak(t *testing.T) {
 		t.Errorf("QuotaZeroStreak = %d, want 1 (reset after positive read)", keys[0].QuotaZeroStreak)
 	}
 }
+
+// perKeyBalancer 按 key 返回不同余额的 fake(模拟真实场景:key-1 健康、weige 1%)
+type perKeyBalancer struct{ byID map[string]Balance }
+
+func (f *perKeyBalancer) FetchBalance(_ context.Context, _ string, k *keypool.Key) (Balance, error) {
+	return f.byID[k.ID], nil
+}
+
+// P-quota-window-refresh: 模拟完整生命周期 — healthy key 正常服务,1% key 被
+// poll 连续 2 轮确认标 QE 并退出调度,5h 窗口刷新(余额回升 100%)后 poll 自动
+// 恢复并重新参与调度(2026-08-06 场景:weige 1% QE,05:00 窗口滚动应自动回归)
+func TestPollAllBalancers_ExhaustedThenWindowRefreshRestores(t *testing.T) {
+	now := time.Now()
+	keys := []*keypool.Key{
+		{ID: "healthy", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan",
+			Remaining: 97, QuotaKind: "percent", LastPolledAt: now},
+		{ID: "dead", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan",
+			Remaining: 1, QuotaKind: "percent", LastPolledAt: now},
+	}
+	pool := keypool.NewPool("p", keys, nil, keypool.Config{})
+
+	b := &perKeyBalancer{byID: map[string]Balance{
+		"healthy": {HasQuota: true, Raw: 97, Kind: "percent"},
+		"dead":    {HasQuota: false, Raw: 1, Kind: "percent"},
+	}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+
+	// 阶段 1:第 1 轮 poll — 1% 的 key 只累计不标记(瞬态保护)
+	m.pollAllBalancers(context.Background())
+	if keys[1].Status != keypool.KeyStatusActive {
+		t.Fatalf("after 1st poll: dead status = %s, want ACTIVE (not yet confirmed)", keys[1].Status)
+	}
+	// 阶段 2:第 2 轮 poll — 连续确认 → QE
+	m.pollAllBalancers(context.Background())
+	if keys[1].Status != keypool.KeyStatusQuotaExceeded {
+		t.Fatalf("after 2nd poll: dead status = %s, want QUOTA_EXCEEDED", keys[1].Status)
+	}
+	// QE 后 acquire 必须跳过它 — healthy key 独扛
+	for i := 0; i < 3; i++ {
+		k, err := pool.AcquireFromTier("token_plan", nil, "")
+		if err != nil {
+			t.Fatalf("AcquireFromTier: %v", err)
+		}
+		if k.ID != "healthy" {
+			t.Fatalf("acquire %d: got %q, want healthy (dead must be skipped)", i, k.ID)
+		}
+	}
+
+	// 阶段 3:05:00 窗口刷新 → 余额回升 100% → poll 恢复
+	b.byID["dead"] = Balance{HasQuota: true, Raw: 100, Kind: "percent"}
+	m.pollAllBalancers(context.Background())
+	if keys[1].Status != keypool.KeyStatusActive {
+		t.Fatalf("after refresh: dead status = %s, want ACTIVE (auto-restored)", keys[1].Status)
+	}
+	if keys[1].Remaining != 100 {
+		t.Errorf("dead Remaining = %v, want 100", keys[1].Remaining)
+	}
+	// 恢复后重新参与调度
+	seen := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		k, err := pool.AcquireFromTier("token_plan", nil, "")
+		if err != nil {
+			t.Fatalf("AcquireFromTier after refresh: %v", err)
+		}
+		seen[k.ID] = true
+	}
+	if !seen["dead"] {
+		t.Error("dead key should be usable again after window refresh")
+	}
+}
