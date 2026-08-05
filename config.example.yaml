@@ -5,7 +5,9 @@ server:
   host: "0.0.0.0"
   port: 8080
   read_timeout: 30s
-  write_timeout: 120s       # 流式响应需要较长写超时
+  # 非流式响应的绝对写上限;流式响应按 chunk 续期(proxy.doStream 的
+  # SetWriteDeadline),实际语义变成「上游静默多久才算断流」— 活跃流不被掐断
+  write_timeout: 300s
   idle_timeout: 120s
   shutdown_timeout: 30s
   # P67: 接入日志(P67 接入日志模块)

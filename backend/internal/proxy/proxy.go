@@ -39,6 +39,11 @@ type Engine struct {
 	authn         *auth.Authenticator // P19: Provider binding 检查
 	accessLog     *accesslog.Recorder // P67: 接入日志 Recorder(可选,启用时为非 nil)
 	maxRetry      int
+	// writeTimeout 流式写 deadline 的续期预算(取 server.write_timeout)。
+	// http.Server.WriteTimeout 是「响应整体绝对上限」,流式场景下长生成会被
+	// 120s 掐断(Claude Code 报 Connection closed mid-response);doStream 每个
+	// chunk 后用 SetWriteDeadline 续期,把绝对上限变成「空闲超时」。
+	writeTimeout time.Duration
 	// streamBuf 持有当前正在累积的流式响应 buffer,key 是 traceID。
 	// Task 7: 配合 streamCnt 实现 F4 全局 1000 上限。
 	streamBuf sync.Map
@@ -66,6 +71,9 @@ type Config struct {
 	Authenticator *auth.Authenticator // P19: 可选,绑定 Provider 检查
 	AccessLog     *accesslog.Recorder // P67: 可选,nil 表示未启用
 	MaxRetry      int                 // 最大 failover 次数,默认 3
+	// WriteTimeout 流式写 deadline 续期预算(取 server.write_timeout)。
+	// 非流式响应仍是绝对上限;流式场景按 chunk 续期成空闲超时。<=0 时默认 2min。
+	WriteTimeout time.Duration
 }
 
 // NewEngine 构造 Proxy Engine
@@ -85,6 +93,9 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.MaxRetry <= 0 {
 		cfg.MaxRetry = 3
 	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = 2 * time.Minute
+	}
 	return &Engine{
 		logger:        cfg.Logger,
 		router:        cfg.Router,
@@ -95,6 +106,7 @@ func NewEngine(cfg Config) *Engine {
 		authn:         cfg.Authenticator,
 		accessLog:     cfg.AccessLog,
 		maxRetry:      cfg.MaxRetry,
+		writeTimeout:  cfg.WriteTimeout,
 	}
 }
 
@@ -166,7 +178,12 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			return
 		}
 		entry.StatusCode = c.Writer.Status()
-		entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr, gatewayValidation)
+		// doStream 可能已预设 error_type(流中途错误 stream_interrupted /
+		// 客户端断开 client_disconnected)— 预设优先,classifyError 只补未预设的。
+		// 否则流式 200(头已发出,状态码锁死)会把中途失败伪装成 ok。
+		if entry.ErrorType == "" {
+			entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr, gatewayValidation)
+		}
 		// 无论成功还是失败,只要命中过 provider 就记录 — 成功路径同样需要可观测性(spec §1.2 F2/F5)
 		// P-provider-vendor: 按厂商归一 — 路由侧是注册名(deepseek-anthropic /
 		// minimax-openai 协议面),日志/UI/导出统一显示厂商名,协议面看 protocol 列
@@ -384,7 +401,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result, entry)
 			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 			if ok {
-				e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", isStream, streamUsage)
+				e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, entryErrorType(entry), isStream, streamUsage)
 				lastProviderName = result.ProviderName
 				return
 			}
@@ -561,13 +578,23 @@ func (e *Engine) doStream(
 
 	flusher, _ := c.Writer.(http.Flusher)
 	canFlush := flusher != nil
+	// 流式写超时续期:http.Server.WriteTimeout 是「响应整体绝对上限」,长生成
+	// (>120s)会被服务器掐断;每个 chunk 后把写 deadline 续期到 write_timeout 之后,
+	// 把绝对上限变成「空闲超时」— 活跃流永不掐断,上游卡死静默 write_timeout 后断。
+	// gin 1.10 的 responseWriter 实现 Unwrap,ResponseController(Go 1.20+)可用。
+	rc := http.NewResponseController(c.Writer)
 
 	for chunk := range chunkCh {
 		if chunk.Err != nil {
 			if errors.Is(chunk.Err, io.EOF) {
 				break
 			}
-			// 流中途错误:写一个 error event 给客户端,然后退出
+			// 流中途错误(上游断流 / 连接被杀 / context canceled):
+			// 写一个 error event 给客户端,然后退出。HTTP 头已发出、状态码锁死 200,
+			// 无法改状态,但 access log 必须标 stream_interrupted,不能伪装成 ok。
+			if entry != nil {
+				entry.ErrorType = "stream_interrupted"
+			}
 			e.logger.Warn("stream mid-error",
 				zap.String("provider", result.ProviderName),
 				zap.Error(chunk.Err))
@@ -589,6 +616,9 @@ func (e *Engine) doStream(
 			// 客户端断开 / 写失败 — 立刻 break 但要返 ProviderError 让
 			// caller 知道这不是正常结束,access_log error_type 标 client_disconnected
 			// (非 retryable,不需要 failover 到下一个 provider — 问题在 client)
+			if entry != nil {
+				entry.ErrorType = "client_disconnected"
+			}
 			e.logger.Warn("write stream chunk (client likely disconnected)",
 				zap.String("provider", result.ProviderName),
 				zap.Error(err))
@@ -602,6 +632,8 @@ func (e *Engine) doStream(
 		if canFlush {
 			flusher.Flush()
 		}
+		// 续期写 deadline — 失败说明连接已不可写,后续 Write 会报错,忽略即可
+		_ = rc.SetWriteDeadline(time.Now().Add(e.writeTimeout))
 	}
 
 	// P42: headerResp.Usage 由各 provider 的 goroutine 在 close(ch) 前填好
@@ -758,6 +790,16 @@ func (e *Engine) handleAllFailed(
 
 	writeJSONError(c, http.StatusBadGateway, "gateway_error",
 		fmt.Sprintf("all providers failed: %s", lastErr.Message))
+}
+
+// entryErrorType 取 access entry 上已预设的 error_type。
+// 流中途错误由 doStream 预设(stream_interrupted / client_disconnected),
+// 正常完成时为空字符串。entry 可为 nil(未启用 accesslog)。
+func entryErrorType(entry *accesslog.AccessEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return entry.ErrorType
 }
 
 // recordUsage 异步上报用量(无 token 计数)
@@ -991,7 +1033,7 @@ func (e *Engine) tryOneCandidate(
 		ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result, entry)
 		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 		if ok {
-			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, "", true, streamUsage)
+			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, entryErrorType(entry), true, streamUsage)
 			*outProviderName = result.ProviderName
 			return true
 		}

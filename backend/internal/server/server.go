@@ -148,6 +148,9 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		Authenticator: authn,                       // P19: Provider 绑定检查
 		AccessLog:     accessR,                     // P67: 接入日志
 		MaxRetry:      cfg.Retry.MaxAttempts,
+		// 流式写 deadline 续期预算 — 与 http.Server.WriteTimeout 同源,
+		// 流式场景下按 chunk 续期成空闲超时(非流式仍是绝对上限)
+		WriteTimeout: cfg.Server.WriteTimeout,
 	})
 	// P30:把 DB Pool 注入到每个 Provider(Manager.LoadFromConfig 时 Pool 还是 nil)
 	injectPools(manager, pools, logger)

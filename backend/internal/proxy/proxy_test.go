@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
@@ -33,6 +35,8 @@ type fakeProvider struct {
 	respHdrs   http.Header
 	// stream chunks(每个一行 SSE data: ...)
 	streamChunks [][]byte
+	// 流中途错误:设置后,数据 chunk 发完后、EOF 之前发一个 Err chunk
+	streamMidErr error
 	// 触发错误的 error(如果设置,SendRequest 返回这个)
 	err error
 	// 记录收到的请求
@@ -87,9 +91,13 @@ func (p *fakeProvider) SendStreamRequest(ctx context.Context, req *provider.Requ
 	if p.err != nil {
 		return nil, nil, p.err
 	}
-	ch := make(chan *provider.StreamChunk, len(p.streamChunks)+1)
+	ch := make(chan *provider.StreamChunk, len(p.streamChunks)+2)
 	for _, c := range p.streamChunks {
 		ch <- &provider.StreamChunk{Data: c}
+	}
+	if p.streamMidErr != nil {
+		// 模拟流中途错误(上游断流 / 连接被杀):数据 chunk 之后、EOF 之前
+		ch <- &provider.StreamChunk{Err: p.streamMidErr}
 	}
 	ch <- &provider.StreamChunk{Err: io.EOF}
 	close(ch)
@@ -102,7 +110,8 @@ func (p *fakeProvider) HealthCheck(ctx context.Context) error { return nil }
 func (p *fakeProvider) Close() error                          { return nil }
 
 // buildEngine 构造一个挂上 fake provider + 路由的 Engine
-func buildEngine(t *testing.T, p *fakeProvider, aliases map[string]router.AliasConfig) *Engine {
+// 返回 (engine, rec) — rec 记录所有用量上报,测试断言用
+func buildEngine(t *testing.T, p *fakeProvider, aliases map[string]router.AliasConfig) (*Engine, *recordingUsage) {
 	t.Helper()
 	gin.SetMode(gin.ReleaseMode)
 
@@ -129,36 +138,44 @@ func buildEngine(t *testing.T, p *fakeProvider, aliases map[string]router.AliasC
 	})
 
 	// 一个记录用量的 fake recorder
-	var usageCalls []*UsageRecord
-	var usageMu sync.Mutex
-	rec := &recordingUsage{onRecord: func(r *UsageRecord) {
-		usageMu.Lock()
-		defer usageMu.Unlock()
-		usageCalls = append(usageCalls, r)
-	}}
+	rec := &recordingUsage{}
+
+	// no-op accesslog recorder:使 entry 非 nil(与生产一致),doStream 才能把
+	// 流中途错误预设到 entry.ErrorType,usage 记录据此上报 error_type
+	accessR, err := accesslog.NewRecorder(accesslog.RecorderConfig{}, nil, zap.NewNop())
+	if err != nil {
+		t.Fatalf("new accesslog recorder: %v", err)
+	}
 
 	engine := NewEngine(Config{
-		Router:  r,
-		Logger:  zap.NewNop(),
-		Usage:   rec,
-		Metrics: NoopMetricsRecorder{},
-		Breaker: NoopCircuitReporter{},
+		Router:    r,
+		Logger:    zap.NewNop(),
+		Usage:     rec,
+		Metrics:   NoopMetricsRecorder{},
+		Breaker:   NoopCircuitReporter{},
+		AccessLog: accessR,
 	})
 
-	t.Cleanup(func() {
-		usageMu.Lock()
-		t.Setenv("_USAGE_CALLS", "") // noop
-		_ = usageCalls
-	})
-
-	return engine
+	return engine, rec
 }
 
 type recordingUsage struct {
-	onRecord func(*UsageRecord)
+	mu      sync.Mutex
+	records []*UsageRecord
 }
 
-func (r *recordingUsage) Record(u *UsageRecord) { r.onRecord(u) }
+func (r *recordingUsage) Record(u *UsageRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, u)
+}
+
+// snapshot 返回已记录用量的副本(测试断言用)
+func (r *recordingUsage) snapshot() []*UsageRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]*UsageRecord(nil), r.records...)
+}
 
 func TestProxy_NonStream_PassesThroughBodyAndAuth(t *testing.T) {
 	p := &fakeProvider{
@@ -166,7 +183,7 @@ func TestProxy_NonStream_PassesThroughBodyAndAuth(t *testing.T) {
 		respStatus: 200,
 		respBody:   `{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"}}]}`,
 	}
-	e := buildEngine(t, p, map[string]router.AliasConfig{
+	e, _ := buildEngine(t, p, map[string]router.AliasConfig{
 		"coding-model": {Strategy: "priority", Providers: []router.ProviderRoute{
 			{Name: "fake", Model: "deepseek-chat", Priority: 1},
 		}},
@@ -209,7 +226,7 @@ func TestProxy_NonStream_HonorsExistingTraceID(t *testing.T) {
 		name: "fake", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		respStatus: 200, respBody: `{"ok":true}`,
 	}
-	e := buildEngine(t, p, map[string]router.AliasConfig{
+	e, _ := buildEngine(t, p, map[string]router.AliasConfig{
 		"coding-model": {Strategy: "priority", Providers: []router.ProviderRoute{
 			{Name: "fake", Model: "m", Priority: 1},
 		}},
@@ -234,7 +251,7 @@ func TestProxy_NonStream_ProtocolFilter_MessagesToOpenAIBlocked(t *testing.T) {
 		name: "fake", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		respStatus: 200, respBody: `{}`,
 	}
-	e := buildEngine(t, p, map[string]router.AliasConfig{
+	e, _ := buildEngine(t, p, map[string]router.AliasConfig{
 		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
 			{Name: "fake", Model: "m", Priority: 1},
 		}},
@@ -263,7 +280,7 @@ func TestProxy_NonStream_InvalidRequest_NoFailover(t *testing.T) {
 			Message: "bad model",
 		},
 	}
-	e := buildEngine(t, p, map[string]router.AliasConfig{
+	e, _ := buildEngine(t, p, map[string]router.AliasConfig{
 		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
 			{Name: "fake", Model: "m", Priority: 1},
 		}},
@@ -290,7 +307,7 @@ func TestProxy_Stream_EmitsSSEChunks(t *testing.T) {
 		name: "fake", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		streamChunks: chunks,
 	}
-	e := buildEngine(t, p, map[string]router.AliasConfig{
+	e, _ := buildEngine(t, p, map[string]router.AliasConfig{
 		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
 			{Name: "fake", Model: "m", Priority: 1},
 		}},
@@ -315,6 +332,61 @@ func TestProxy_Stream_EmitsSSEChunks(t *testing.T) {
 	}
 	if !strings.Contains(body, "[DONE]") {
 		t.Errorf("body missing [DONE]: %s", body)
+	}
+}
+
+// TestProxy_Stream_MidError_NotMaskedAsOK — 流中途错误(上游断流 / 连接被杀,
+// 如 server write_timeout 掐断)必须:
+//  1. 不触发 failover / 重试(HTTP 头已发出、状态码锁死 200,换 provider 也没用)
+//  2. 给客户端写 error event(而不是静默结束流)
+//  3. 用量记录的 error_type = stream_interrupted(access log 不再伪装成 ok)
+//
+// 回归:2026-08-05 Claude Code "Connection closed mid-response" —
+// 网关 120s 掐断流后 access log 记 200 ok,失败完全隐身。
+func TestProxy_Stream_MidError_NotMaskedAsOK(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"choices":[{"delta":{"content":"Hello"}}]}` + "\n\n"),
+	}
+	p := &fakeProvider{
+		name: "fake", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		streamChunks: chunks,
+		streamMidErr: errors.New("context canceled"),
+	}
+	e, rec := buildEngine(t, p, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "fake", Model: "m", Priority: 1},
+		}},
+	})
+	r := gin.New()
+	r.POST("/v1/chat/completions", e.HandleStreamRequest)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"x","stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// 1. 状态码只能是 200(头已发出)——错误通过 error event 表达
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (headers already committed)", w.Code)
+	}
+	// 2. 客户端必须收到 error event
+	if !strings.Contains(w.Body.String(), `"type":"stream_error"`) {
+		t.Errorf("body missing stream_error event: %s", w.Body.String())
+	}
+	// 3. 不重试 / 不 failover(链上只有 1 个 provider,调用次数必须为 1)
+	p.mu.Lock()
+	calls := p.callCount
+	p.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider called %d times, want 1 (no failover after stream starts)", calls)
+	}
+	// 4. 用量记录必须带 error_type,不能是空(伪装成 ok)
+	recs := rec.snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("usage records = %d, want 1", len(recs))
+	}
+	if recs[0].ErrorType != "stream_interrupted" {
+		t.Errorf("usage error_type = %q, want %q", recs[0].ErrorType, "stream_interrupted")
 	}
 }
 
