@@ -587,12 +587,13 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 					continue
 				}
 
-				k.Remaining = bal.Raw
 				k.QuotaKind = bal.Kind
 				k.LastPolledAt = time.Now()
 
 				switch {
 				case !bal.HasQuota && k.Status == keypool.KeyStatusActive:
+					// 真正确认耗尽 → 写 0 + 标记 QE
+					k.Remaining = bal.Raw
 					m.logger.Info("poll: quota exhausted",
 						zap.String("provider", vendorName),
 						zap.String("key_id", k.ID),
@@ -600,6 +601,7 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 					pool.ReportQuotaExceeded(k)
 					m.metricsPollInc(vendorName, "exhausted")
 				case bal.HasQuota && k.Status == keypool.KeyStatusQuotaExceeded:
+					k.Remaining = bal.Raw
 					m.logger.Info("poll: quota restored",
 						zap.String("provider", vendorName),
 						zap.String("key_id", k.ID),
@@ -607,6 +609,14 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 					pool.RestoreQuota(k)
 					m.metricsPollInc(vendorName, "restored")
 				default:
+					// P-quota-guard-poison: 不写 Remaining — 上游余额 API 瞬时抖动
+					// 读到的 0 不覆盖上次已知正值(2026-08-05 实测:MiniMax 账户侧
+					// 瞬态窗口内聊天/余额 API 同时报耗尽,COOLING key 走此分支被写 0,
+					// 毒化 balanceGuard → healthy key 被误标 QE → 整链掉到 api 层)。
+					// 有额度的读值仍更新(UI 显示用);无额度但未标记耗尽 → 保留旧值
+					if bal.HasQuota {
+						k.Remaining = bal.Raw
+					}
 					m.metricsPollInc(vendorName, "ok")
 				}
 

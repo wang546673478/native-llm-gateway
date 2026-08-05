@@ -507,3 +507,67 @@ func TestManager_StillExhaustedWithBalancerNotDisabled(t *testing.T) {
 		t.Errorf("after repeated still_exhausted with balancer: status = %s, want QUOTA_EXCEEDED (not DISABLED)", keys[0].Status)
 	}
 }
+
+// P-quota-guard-poison 回归:COOLING key 遇到余额 API 瞬态 0 读值 → Remaining
+// 不被覆盖(保留上次已知正值),避免毒化 balanceGuard 导致 healthy key 被误标 QE
+func TestPollAllBalancers_TransientZeroDoesNotPoisonRemaining(t *testing.T) {
+	now := time.Now()
+	keys := []*keypool.Key{
+		// COOLING 中的 healthy key(上次 poll 已知余额 97,后来被限流冷却)
+		{ID: "cool-1", ProviderName: "p", Status: keypool.KeyStatusCooling,
+			CoolingUntil: now.Add(time.Minute), BillingSource: "token_plan",
+			Remaining: 97, LastPolledAt: now.Add(-30 * time.Second)},
+	}
+	pool := keypool.NewPool("p", keys, nil, keypool.Config{})
+
+	// 余额 API 瞬态抖动:读到的值是 0 / HasQuota=false
+	b := &fakeBalancer{bal: Balance{HasQuota: false, Raw: 0}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+	m.pollAllBalancers(context.Background())
+
+	if keys[0].Remaining != 97 {
+		t.Errorf("Remaining = %v, want 97 (transient 0 must not overwrite known balance)", keys[0].Remaining)
+	}
+	if keys[0].Status != keypool.KeyStatusCooling {
+		t.Errorf("status = %s, want COOLING (transient 0 must not mark QE)", keys[0].Status)
+	}
+}
+
+// 对照:ACTIVE key 确认无额度 → 正常写 0 + 标 QE(真耗尽路径不受影响)
+func TestPollAllBalancers_GenuineExhaustedStillWritesZero(t *testing.T) {
+	keys := []*keypool.Key{
+		{ID: "tp-1", ProviderName: "p", Status: keypool.KeyStatusActive, BillingSource: "token_plan"},
+	}
+	pool := keypool.NewPool("p", keys, nil, keypool.Config{})
+
+	b := &fakeBalancer{bal: Balance{HasQuota: false, Raw: 0}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+	m.pollAllBalancers(context.Background())
+
+	if keys[0].Remaining != 0 {
+		t.Errorf("Remaining = %v, want 0", keys[0].Remaining)
+	}
+	if keys[0].Status != keypool.KeyStatusQuotaExceeded {
+		t.Errorf("status = %s, want QUOTA_EXCEEDED", keys[0].Status)
+	}
+}
