@@ -13,7 +13,8 @@ import (
 // 2026-08-05: GLM monitor 端点实测 schema(官方插件 zai-org/zai-coding-plugins
 // glm-plan-usage 同款):limits[] 滚动额度窗,percentage=已用百分比。
 
-// TestGlmBalancer_HasRoom — 所有窗口都有剩余 → HasQuota=true,Raw=最紧窗口百分比
+// TestGlmBalancer_HasRoom — 所有窗口都有剩余 → HasQuota=true,
+// Raw=最紧窗口的剩余百分比(与 minimax 同语义:percent 的 Raw 是剩余量)
 func TestGlmBalancer_HasRoom(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -37,8 +38,8 @@ func TestGlmBalancer_HasRoom(t *testing.T) {
 	if !got.HasQuota {
 		t.Errorf("HasQuota = false, want true (both windows have room)")
 	}
-	if got.Raw != 80 {
-		t.Errorf("Raw = %v, want 80 (tightest window percentage)", got.Raw)
+	if got.Raw != 20 {
+		t.Errorf("Raw = %v, want 20 (100 - tightest used 80 = remaining)", got.Raw)
 	}
 	if got.Kind != "percent" {
 		t.Errorf("Kind = %q, want %q", got.Kind, "percent")
@@ -70,12 +71,12 @@ func TestGlmBalancer_AnyWindowExhausted(t *testing.T) {
 	if got.HasQuota {
 		t.Error("HasQuota = true, want false (3h window exhausted)")
 	}
-	if got.Raw != 100 {
-		t.Errorf("Raw = %v, want 100 (exhausted window)", got.Raw)
+	if got.Raw != 0 {
+		t.Errorf("Raw = %v, want 0 (exhausted window, 0 remaining)", got.Raw)
 	}
 }
 
-// TestGlmBalancer_NoLimits — 无窗口限制(正式付费账户)→ HasQuota=true
+// TestGlmBalancer_NoLimits — 无窗口限制(正式付费账户)→ HasQuota=true,Raw=100
 func TestGlmBalancer_NoLimits(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -92,6 +93,9 @@ func TestGlmBalancer_NoLimits(t *testing.T) {
 	}
 	if !got.HasQuota {
 		t.Error("HasQuota = false, want true (no limits = nothing blocks)")
+	}
+	if got.Raw != 100 {
+		t.Errorf("Raw = %v, want 100 (no limits = 100%% remaining)", got.Raw)
 	}
 }
 

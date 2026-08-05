@@ -17,7 +17,8 @@
 //   - limits[] 是多个滚动额度窗(unit=小时);任一窗耗尽,请求就会失败(1113 余额不足)
 //   - percentage = 已用百分比(100 = 耗尽);remaining = 窗内剩余额度
 //   - HasQuota = 所有窗都有剩余(max(percentage) < 100)
-//   - Raw = 最紧窗口的 percentage(显示用;dashboard 按 percent 展示)
+//   - Raw = 最紧窗口的「剩余百分比」(100 - 最大已用)— 与 minimax balancer 同语义:
+//     percent 类型的 Raw 一律是剩余百分比(0 = 耗尽,100 = 满),UI 直接展示
 //   - 认证:Authorization 直接放原始 token(官方插件即此用法;实测 Bearer 也可)
 package glm
 
@@ -128,16 +129,16 @@ func (b *glmBalancer) FetchBalance(ctx context.Context, baseURL string, k *keypo
 	}
 
 	// 任一窗耗尽(percentage>=100)→ 请求会 1113 → HasQuota=false;
-	// Raw 取最紧窗口的 percentage(显示用;limits 为空 = 无窗口限制 → 可用)
-	var maxPct float64
+	// Raw = 最紧窗口的剩余百分比(100-已用;limits 为空 = 无窗口限制 → 100% 可用)
+	var maxUsedPct float64
 	for _, l := range parsed.Data.Limits {
-		if l.Percentage > maxPct {
-			maxPct = l.Percentage
+		if l.Percentage > maxUsedPct {
+			maxUsedPct = l.Percentage
 		}
 	}
 	return quotacheck.Balance{
-		Raw:      maxPct,
-		HasQuota: maxPct < 100,
+		Raw:      100 - maxUsedPct,
+		HasQuota: maxUsedPct < 100,
 		Source:   "glm:/api/monitor/usage/quota/limit",
 		Kind:     "percent",
 	}, nil
