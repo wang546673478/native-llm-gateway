@@ -170,3 +170,49 @@ func TestMiniMaxBalancer_AuthError(t *testing.T) {
 		t.Error("err = nil, want HTTP 401 err")
 	}
 }
+
+// P-quota-prefer: 1% 余额 = 耗尽(MiniMax chat API 对 1% 直接报 2056 用量上限)
+func TestMiniMaxBalancer_OnePercentIsExhausted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"model_remains": []map[string]interface{}{
+				{"model_name": "general", "current_interval_remaining_percent": 1.0},
+			},
+			"base_resp": map[string]interface{}{"status_code": 0, "status_msg": "success"},
+		})
+	}))
+	defer srv.Close()
+	t.Cleanup(withMockQuotaHost(t, srv.URL))
+
+	b := newMiniMaxBalancer()
+	got, err := b.FetchBalance(context.Background(), "", &keypool.Key{ID: "1", Key: "good-key"})
+	if err != nil {
+		t.Fatalf("FetchBalance: %v", err)
+	}
+	if got.HasQuota {
+		t.Errorf("HasQuota = true, want false (1%% = exhausted per chat API)")
+	}
+}
+
+// P-quota-prefer: 2% 仍有额度
+func TestMiniMaxBalancer_TwoPercentHasQuota(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"model_remains": []map[string]interface{}{
+				{"model_name": "general", "current_interval_remaining_percent": 2.0},
+			},
+			"base_resp": map[string]interface{}{"status_code": 0, "status_msg": "success"},
+		})
+	}))
+	defer srv.Close()
+	t.Cleanup(withMockQuotaHost(t, srv.URL))
+
+	b := newMiniMaxBalancer()
+	got, err := b.FetchBalance(context.Background(), "", &keypool.Key{ID: "1", Key: "good-key"})
+	if err != nil {
+		t.Fatalf("FetchBalance: %v", err)
+	}
+	if !got.HasQuota {
+		t.Errorf("HasQuota = false, want true (2%% > 1%%)")
+	}
+}

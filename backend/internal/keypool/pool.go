@@ -193,6 +193,13 @@ func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}, prot
 			bs = "api" // 兜底
 		}
 		if bs == tier {
+			// P-quota-prefer: 跳过「已轮询且余额耗尽」的 key — 否则 round-robin
+			// 会把请求轮流分给已死的 key(如 MiniMax weige 1%),每轮 429 →
+			// failover deepseek,而 healthy key 在旁边空转(2026-08-06 实测)。
+			// 未轮询过的不跳过(启动窗口);余额回升后自动恢复参与
+			if k.IsPolledAndExhausted() {
+				continue
+			}
 			bucket = append(bucket, k)
 		}
 	}

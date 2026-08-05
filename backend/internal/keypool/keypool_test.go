@@ -664,3 +664,69 @@ func TestPool_ReportErrorQuotaPoll_MarksQuotaExceeded(t *testing.T) {
 		t.Error("Acquire after quota mark: want error (key unusable until poll restores)")
 	}
 }
+
+// P-quota-prefer: round-robin 不再把请求分给「已轮询且余额耗尽」的 key —
+// healthy key 应始终被选(MiniMax weige 1% 场景,2026-08-06 实测)
+func TestAcquireFromTier_SkipsPolledExhaustedKey(t *testing.T) {
+	now := time.Now()
+	mk := func(id string, remaining float64, kind string) *Key {
+		return &Key{
+			ID: id, ProviderName: "test", Name: id, Key: "sk",
+			Status: KeyStatusActive, BillingSource: "token_plan",
+			Remaining: remaining, QuotaKind: kind,
+			LastPolledAt: now.Add(-30 * time.Second),
+			CreatedAt:    now, UpdatedAt: now,
+		}
+	}
+	keys := []*Key{mk("healthy", 99, "percent"), mk("dead", 1, "percent")}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	// 连续 4 次获取,都应命中 healthy — 不再轮流分给 dead(1% → MiniMax 直接拒)
+	for i := 0; i < 4; i++ {
+		k, err := pool.AcquireFromTier("token_plan", nil, "")
+		if err != nil {
+			t.Fatalf("AcquireFromTier #%d: %v", i, err)
+		}
+		if k.ID != "healthy" {
+			t.Errorf("call %d: got %q, want healthy (dead key must be skipped)", i, k.ID)
+		}
+	}
+}
+
+// P-quota-prefer: 未轮询过的 key(启动窗口,Remaining=0 是默认值)不跳过
+func TestAcquireFromTier_NeverPolledNotSkipped(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "a", ProviderName: "test", Name: "a", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "token_plan",
+			Remaining: 0, CreatedAt: now, UpdatedAt: now}, // 从未 poll
+		{ID: "b", ProviderName: "test", Name: "b", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "token_plan",
+			Remaining: 0, CreatedAt: now, UpdatedAt: now},
+	}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+	for i := 0; i < 3; i++ {
+		if _, err := pool.AcquireFromTier("token_plan", nil, ""); err != nil {
+			t.Fatalf("AcquireFromTier #%d: %v (never-polled keys must remain usable)", i, err)
+		}
+	}
+}
+
+// P-quota-prefer: currency 单位余额 > 0 不跳过(deepseek ¥ 余量仍可用)
+func TestAcquireFromTier_CurrencyLowBalanceNotSkipped(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "a", ProviderName: "test", Name: "a", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api",
+			Remaining: 0.5, QuotaKind: "currency", LastPolledAt: now.Add(-30 * time.Second),
+			CreatedAt: now, UpdatedAt: now},
+	}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+	k, err := pool.AcquireFromTier("api", nil, "")
+	if err != nil {
+		t.Fatalf("AcquireFromTier: %v (currency 0.5 must remain usable)", err)
+	}
+	if k.ID != "a" {
+		t.Errorf("got %q, want a", k.ID)
+	}
+}

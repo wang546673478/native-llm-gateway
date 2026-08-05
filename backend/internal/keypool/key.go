@@ -57,6 +57,24 @@ type Key struct {
 	Protocols string
 }
 
+// IsPolledAndExhausted P-quota-prefer: 已轮询确认余额耗尽的 key —
+// 任意单位 Remaining <= 0,或 percent 单位 <= 1(MiniMax 自己的 chat API
+// 对 1% 就报 2056 用量上限,实测 2026-08-06)。未轮询过的 key(Remaining=0
+// 是默认值不是真余额,启动窗口)不算 — 交给请求路径和 poll 确认。
+// 窗口刷新/充值后 Remaining 回升 → 自动恢复参与调度
+func (k *Key) IsPolledAndExhausted() bool {
+	if k.LastPolledAt.IsZero() {
+		return false
+	}
+	if k.Remaining <= 0 {
+		return true
+	}
+	if k.QuotaKind == "percent" && k.Remaining <= 1 {
+		return true
+	}
+	return false
+}
+
 // IsUsable 在给定时间点判断 Key 是否可用于调度
 func (k *Key) IsUsable(now time.Time) bool {
 	switch k.Status {

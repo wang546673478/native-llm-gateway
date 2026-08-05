@@ -182,8 +182,11 @@ func (b *miniMaxBalancer) FetchBalance(ctx context.Context, _ string, k *keypool
 	}
 
 	return quotacheck.Balance{
-		Raw:      minPct,
-		HasQuota: minPct > 0,
+		Raw: minPct,
+		// P-quota-prefer: 阈值对齐 chat API 行为 — MiniMax 对 1% 余额的 key
+		// 直接报 429 "已达到 Token Plan 用量上限 (2056)"(实测 2026-08-06,
+		// weige 1% 被拒),所以 1% 视为耗尽;配合 poll 连续 2 轮确认标 QE
+		HasQuota: minPct > 1,
 		Source:   "minimax:/v1/token_plan/remains",
 		Kind:     "percent",
 	}, nil

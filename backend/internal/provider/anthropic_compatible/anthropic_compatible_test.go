@@ -121,10 +121,10 @@ func TestSendRequest_MiniMaxBaseRespQuota(t *testing.T) {
 	defer upstream.Close()
 
 	pool := newTestPool(t)
-	// 最近轮询确认余额 0(真耗尽)— 启动窗口宽松不适用于此
+	// 余额 5%(可被获取)但 poll 数据过期 >5min → 守卫不拦,2056 仍分类 quota
 	ks := pool.KeyPtrs()
-	ks[0].Remaining = 0
-	ks[0].LastPolledAt = time.Now()
+	ks[0].Remaining = 5
+	ks[0].LastPolledAt = time.Now().Add(-10 * time.Minute)
 	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
 
 	resp, err := b.SendRequest(context.Background(), &provider.Request{
@@ -156,10 +156,10 @@ func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
 	defer upstream.Close()
 
 	pool := newTestPool(t)
-	// 最近轮询确认余额 0(真耗尽)— 启动窗口宽松不适用于此
+	// 余额 5%(可被获取)但 poll 数据过期 >5min → 守卫不拦,2056 仍分类 quota
 	ks := pool.KeyPtrs()
-	ks[0].Remaining = 0
-	ks[0].LastPolledAt = time.Now()
+	ks[0].Remaining = 5
+	ks[0].LastPolledAt = time.Now().Add(-10 * time.Minute)
 	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
 
 	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
@@ -364,10 +364,11 @@ func TestSendRequest_BalanceGuardExhaustedStillQE(t *testing.T) {
 	defer upstream.Close()
 
 	pool := newTestPool(t)
-	// 最近轮询过且余额确实是 0(真耗尽)
+	// 余额 5%(可被获取)但 poll 数据过期 >5min → 守卫不拦,2056 仍分类 quota
+	// (真耗尽 key 现在会被获取逻辑直接跳过,这条路径由 poll 连续 2 轮确认 QE 接管)
 	ks := pool.KeyPtrs()
-	ks[0].Remaining = 0
-	ks[0].LastPolledAt = time.Now()
+	ks[0].Remaining = 5
+	ks[0].LastPolledAt = time.Now().Add(-10 * time.Minute)
 	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
 
 	_, err := b.SendRequest(context.Background(), &provider.Request{
