@@ -249,7 +249,7 @@ providers:
     billing_source: "token_plan"   # 包月套餐,优先路由,quota 用完自动降级到 api 层
     endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
-    timeout: 90s
+    timeout: 30s
     models:
       - id: "MiniMax-M3"              # 1M tokens,旗舰
         aliases: ["MiniMax"]
@@ -315,7 +315,7 @@ providers:
     billing_source: "token_plan"
     endpoint: "https://api.minimaxi.com/v1"
     protocol: "openai"
-    timeout: 90s
+    timeout: 30s
     responses_api: true
     models:
       - id: "MiniMax-M3"            # 与 minimax(anthropic)共享模型列表

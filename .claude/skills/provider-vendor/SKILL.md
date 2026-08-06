@@ -13,6 +13,7 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 - `RegisterGlobalWithProtocolVendor(注册名, 工厂, 协议, 厂商)` — vendor 参数决定共享/归一
 - 每个注册名都要 `quotacheck.RegisterBalancer`(token_plan 厂商必须有余额查询)
 - 原生支持 Responses API 的厂商标 `responses_api: true` + 配 `ResponsesPath`
+- 请求路径主动查额度走统一入口 quotacheck.CheckQuota(复用 RegisterBalancer 注册表),厂商包不需要写自己的查询调用
 
 ## 执行顺序
 
