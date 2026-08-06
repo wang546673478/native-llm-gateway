@@ -910,6 +910,10 @@ func (e *Engine) runCandidateLoop(
 		quotaEvidenceInTier = false
 		tierSawFailure = false
 		currentTier = newTier
+		// I-2:每层重置尝试预算 — 层切换的两条路径(自然推进 / valve 封顶
+		// fetch-ahead)都经 acceptTier,在此重置才两条全覆盖。总界 =
+		// 每层 maxRetry × 每候选最多 2 次 key 尝试(原 key + 换 key 重试)
+		attempts = 0
 		return true
 	}
 
@@ -942,7 +946,7 @@ func (e *Engine) runCandidateLoop(
 			if !acceptTier(peek.Tier) {
 				return
 			}
-			attempts = 0 // 新层重置尝试预算(封顶退化为每层安全阀)
+			// 尝试预算已在 acceptTier 内重置(I-2:层切换两条路径统一重置)
 			result = peek
 		} else {
 			result, err = next()
@@ -1072,7 +1076,7 @@ func (e *Engine) tryCandidate(
 	// 需要换 key 重试的类:网络类 + auth(决策表 row 3;ModelNotAllowed 除外 —
 	// 白名单是 model 级,换 key 无用)
 	if isNetworkClass(pe) || pe.ErrorType == provider.ErrorTypeAuth {
-		if e.swapToOtherKey(req, result) {
+		if e.swapToOtherKey(c, req, result) {
 			// 换 key 后重发 — result.Key 已更新为真正发请求的 key,
 			// 429 冷却/熔断上报都会标到这把新 key 上(踩坑 #15)
 			if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
@@ -1084,6 +1088,12 @@ func (e *Engine) tryCandidate(
 			}
 			if !errorIsRetryable(pe2) {
 				return outcomeFatal, false, true
+			}
+			// I-1:换 key 后二次尝试返回额度类错误 — 与首次额度类错误同权:
+			// token_plan 层记证据,允许层切换降档(网络源 / auth 源都走这里,
+			// 必须在 auth 分支和 !isNetworkClass 分支之前判定,否则证据被丢弃)
+			if isQuotaClass(pe2) && result.Tier == "token_plan" {
+				return outcomeContinue, true, true
 			}
 			// auth 源:换 key 穷尽 → 无证据继续、不查额度(决策表 row 3)
 			if pe.ErrorType == provider.ErrorTypeAuth {
@@ -1203,7 +1213,9 @@ func (e *Engine) bindKey(req *provider.Request, result *router.RouteResult) {
 // 再 acquire 一把,成功时更新 result.Key / req.Key / Authorization 并返回 true
 // (result.Key 同步更新 — reportKeyError / recordUsage 都引用它,必须指向真正
 // 发请求的 key,429 冷却才标得准)。拿不到其他 key → false。
-func (e *Engine) swapToOtherKey(req *provider.Request, result *router.RouteResult) bool {
+// I-3 / P34:换 key 同样不能跨出 GatewayKey 绑定的 ProviderKey ID 子集 —
+// 与 RouteIterator.Next 的 idSet 过滤一致(参考 router.go Next() 的用法)
+func (e *Engine) swapToOtherKey(c *gin.Context, req *provider.Request, result *router.RouteResult) bool {
 	if result.Key == nil {
 		return false
 	}
@@ -1211,7 +1223,16 @@ func (e *Engine) swapToOtherKey(req *provider.Request, result *router.RouteResul
 	if pool == nil {
 		return false
 	}
-	k, err := pool.AcquireFromTierExcluding(result.Tier, result.Key.ID, string(result.Protocol))
+	var idSet map[uint]struct{}
+	if gkVal, ok := c.Get("gateway_key"); ok {
+		if gk, ok := gkVal.(*auth.GatewayKey); ok && len(gk.ProviderKeyIDs) > 0 {
+			idSet = make(map[uint]struct{}, len(gk.ProviderKeyIDs))
+			for _, id := range gk.ProviderKeyIDs {
+				idSet[id] = struct{}{}
+			}
+		}
+	}
+	k, err := pool.AcquireFromTierExcludingIDs(result.Tier, result.Key.ID, idSet, string(result.Protocol))
 	if err != nil || k == nil {
 		return false
 	}

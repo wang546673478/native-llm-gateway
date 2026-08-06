@@ -194,6 +194,13 @@ func (p *Pool) AcquireFromTierExcluding(tier, excludeID string, proto string) (*
 	return p.acquireFromTierLocked(tier, nil, excludeID, proto)
 }
 
+// AcquireFromTierExcludingIDs 同 AcquireFromTierExcluding,额外限定 allowedIDSet
+// (P34:换 key 重试也不能跨出 GatewayKey 绑定的 ProviderKey ID 子集 —
+// 与 Router RouteIterator.Next 的 idSet 过滤语义一致)
+func (p *Pool) AcquireFromTierExcludingIDs(tier, excludeID string, allowedIDSet map[uint]struct{}, proto string) (*Key, error) {
+	return p.acquireFromTierLocked(tier, allowedIDSet, excludeID, proto)
+}
+
 // acquireFromTierLocked AcquireFromTier / AcquireFromTierExcluding 的公共实现。
 // 在 allowedIDSet 过滤后追加 exclude 检查:excludeID 非空时排除 ID 等于它的 key
 // (parseKeyIDUint 转换比较,与 allowedIDSet 过滤一致;excludeID 是 DB 数字 ID 字符串)

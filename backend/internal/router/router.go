@@ -380,6 +380,8 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 				k, err = pool.AcquireFromTier(c.Tier, nil, string(pv.Protocol()))
 			}
 			if err != nil {
+				// 已知缝隙:整层熔断 OPEN 时所有候选都在此静默跳过、直落 api 层 —
+				// 这是分层降档不变式的 30s 窗口缝隙,勿当作 bug 改出可用性问题
 				continue
 			}
 			return &RouteResult{

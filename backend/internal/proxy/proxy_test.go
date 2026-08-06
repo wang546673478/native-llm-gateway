@@ -872,6 +872,120 @@ func TestProxy_WhitelistSkip_AdvancesTier(t *testing.T) {
 	}
 }
 
+// 11) 第二轮审阅 I-1:换 key 后二次尝试返回额度类错误 → 证据不能丢(网络源)
+//     mm(token_plan) key-1 connection 错 → 换 key-2 → key-2 quota_exceeded;
+//     ds(api) healthy → 200 经 ds(swap 尝试的额度证据驱动降档)
+func TestProxy_SwapQuotaError_DowngradesToApi(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey: map[string]error{
+			"1": &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"},
+			"2": &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusPaymentRequired, ErrorType: provider.ErrorTypeQuotaExceeded, Message: "quota exceeded"},
+		}}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(换 key 后的额度错误也是降档证据); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ds-ok") {
+		t.Errorf("response = %s, want deepseek 的响应(swap 尝试的额度证据应驱动降档)", w.Body.String())
+	}
+	if mm.callCount != 2 {
+		t.Errorf("minimax called %d times, want 2(key-1 connection + key-2 quota)", mm.callCount)
+	}
+	if ds.callCount != 1 {
+		t.Errorf("deepseek called %d times, want 1(证据确认后降档)", ds.callCount)
+	}
+}
+
+// 12) 第二轮审阅 I-2:降档后每层重置 maxRetry 预算(自然切换路径)
+//     tp 2 候选全 quota_exceeded(消耗 2 次 < maxRetry=3,经自然路径跨层)+
+//     api 2 候选(api-a 错、api-b healthy)→ 200 经 api-b
+//     (不重置时 api 层只剩 maxRetry-2=1 次机会,api-b 永远轮不到)
+func TestProxy_DowngradeResetsRetryBudget(t *testing.T) {
+	mkQuotaProvider := func(name string) *fakeProvider {
+		return &fakeProvider{name: name, proto: provider.ProtocolOpenAI, models: []string{"m"},
+			err: &provider.ProviderError{ProviderName: name, StatusCode: http.StatusPaymentRequired, ErrorType: provider.ErrorTypeQuotaExceeded, Message: "quota exceeded"}}
+	}
+	q1 := mkQuotaProvider("q1")
+	q2 := mkQuotaProvider("q2")
+	apiA := &fakeProvider{name: "api-a", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		err: &provider.ProviderError{ProviderName: "api-a", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}}
+	apiB := &fakeProvider{name: "api-b", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"api-b-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{q1, q2, apiA, apiB}, map[string]*keypool.Pool{
+		"q1":    mkPool("q1", []string{"1"}, "token_plan"),
+		"q2":    mkPool("q2", []string{"1"}, "token_plan"),
+		"api-a": mkPool("api-a", []string{"1"}, "api"),
+		"api-b": mkPool("api-b", []string{"1"}, "api"),
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "q1", Model: "m", Priority: 1},
+			{Name: "q2", Model: "m", Priority: 2},
+			{Name: "api-a", Model: "m", Priority: 3},
+			{Name: "api-b", Model: "m", Priority: 4},
+		}},
+	})
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(降档后 api 层预算重置,maxRetry=2 也应试到 api-b); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "api-b-ok") {
+		t.Errorf("response = %s, want api-b 的响应(降档后 api 层两个候选都被试)", w.Body.String())
+	}
+	for _, q := range []*fakeProvider{q1, q2} {
+		if q.callCount != 1 {
+			t.Errorf("provider %s called %d times, want 1", q.name, q.callCount)
+		}
+	}
+	if apiA.callCount != 1 || apiB.callCount != 1 {
+		t.Errorf("api call counts: api-a=%d api-b=%d, want 1/1", apiA.callCount, apiB.callCount)
+	}
+}
+
+// 13) 第二轮审阅 I-3:换 key 重试不跨出 GatewayKey 绑定的 ProviderKeyIDs(P34)
+//     mm 2 把 key:key-1 connection 错且在集合内,key-2 healthy 但不在集合
+//     (gk.ProviderKeyIDs=[1])→ 502,mm.callCount==1(换 key 未跨出集合)
+func TestProxy_SwapToOtherKey_RespectsProviderKeyIDs(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey: map[string]error{"1": &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}},
+		respStatus: 200, respBody: `{"id":"mm-ok"}`}
+	gk := &auth.GatewayKey{ID: "k1", Name: "test-key", ProviderKeyIDs: []uint{1}}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "mm", Model: "m", Priority: 1},
+		}},
+	})
+
+	gr := gin.New()
+	gr.Use(func(c *gin.Context) {
+		c.Set("gateway_key", gk)
+		c.Set("gateway_key_id", gk.ID)
+	})
+	gr.POST("/v1/chat/completions", e.HandleRequest)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	gr.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502(换 key 不能跨出 ProviderKeyIDs 集合); body = %s", w.Code, w.Body.String())
+	}
+	if mm.callCount != 1 {
+		t.Errorf("minimax called %d times, want 1(集合外 healthy key-2 不得被 swap 使用)", mm.callCount)
+	}
+}
+
 // TestStreamBuffer_NoLeakAcrossChunks 验证 F4 streamCnt 不会因为 per-chunk
 // 调用而泄漏 — 这是旧实现里的一个 critical bug:
 //
