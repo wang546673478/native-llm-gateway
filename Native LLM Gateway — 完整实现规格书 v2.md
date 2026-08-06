@@ -412,7 +412,7 @@ providers:
 
   minimax:
     enabled: true
-    endpoint: "https://api.minimax.chat"
+    endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
     models:
@@ -1556,7 +1556,7 @@ CREATE TABLE IF NOT EXISTS gateway_keys (
   - DeepSeek:  endpoint = https://api.deepseek.com
   - GLM:       endpoint = https://open.bigmodel.cn/api/paas/v4
   - Qwen:      endpoint = https://dashscope.aliyuncs.com/compatible-mode/v1
-  - MiniMax:   endpoint = https://api.minimax.chat/v1
+  - MiniMax:   endpoint = https://api.minimaxi.com/v1
 
 协议: OpenAI Chat Completions API
 认证: Authorization: Bearer {api_key}
@@ -1794,7 +1794,7 @@ func (p *OpenAICompatible) Close() error {
 /*
 Provider: MiniMax
 Protocol: anthropic
-Endpoint: https://api.minimax.chat
+Endpoint: https://api.minimaxi.com/anthropic
 
 认证方式:
   x-api-key: {api_key}
@@ -3098,7 +3098,7 @@ providers:
 
   minimax:
     enabled: true
-    endpoint: "https://api.minimax.chat"
+    endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
     models:
