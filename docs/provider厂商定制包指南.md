@@ -37,14 +37,15 @@ backend/internal/provider/deepseek/
 - 入口:优先拉 `/llms.txt` 全量索引(抓不到就抓首页)
 - WebSearch 限定站内定位章节
 - **必须 `grep -i "anthropic\|claude"` 索引** —— anthropic 兼容面常藏在「Claude API 兼容」章节(真实教训:GLM 的 Claude API 兼容页在索引第 117 行,漏查导致第一版只有 openai 面)
+- llms.txt + 首页都失败或站内定位不到 → 回 0.2 请用户换 URL,不要自行出站找替代来源
 
 **0.4 提取 6 类信息**(对话内速查表,每项标消费方):
 
 | # | 提取项 | 消费方 |
 |---|--------|--------|
 | ① 协议面 | openai/anthropic base URL、Responses 支持与路径(端点是否已含 `/v1`)、鉴权方式 | ChatPath/ResponsesPath、config 块、`responses_api` |
-| ② 模型与能力 | 真实模型 ID、上下文窗口(512k 悬崖)、思考模式(默认开/关、effort、thinking 参数名)、工具调用(带 tools 的回传要求)、流式格式、JSON output 触发条件 | config `models[].id`、`default_model`、包代码 |
-| ③ 定价 | input/output 单价(**单位换算**:元/M → ÷1000 得 `cost_per_1k`)、缓存 read/creation 有无与数值、缓存计费语义(`prompt_tokens` 含不含 cached)、峰谷价 | `cost_per_1k_input/output/cache_read/cache_creation` |
+| ② 模型与能力 | 真实模型 ID、上下文窗口(512k 悬崖)、思考模式(默认开/关、reasoning_effort、thinking 参数名)、工具调用(带 tools 的回传要求)、流式格式、JSON output 触发条件 | config `models[].id`、`default_model`、包代码 |
+| ③ 定价 | input/output 单价(**单位换算**:元/M → ÷1000 得 `cost_per_1k`;美元单价还要按汇率换算)、缓存 read/creation 有无与数值、缓存计费语义(`prompt_tokens` 含不含 cached)、峰谷价 | `cost_per_1k_input/output/cache_read/cache_creation` |
 | ④ 余额 | 官方余额 API 端点与响应字段;没有 → 替代方案(如未文档化 token_plan);额度错误藏 200 body? | `balancer.go`、`RegisterBalancer` |
 | ⑤ 定制特性 | 响应包裹格式(base_resp)、reasoning 字段名与回传规则、缓存机制差异、厂商专属参数(service_tier 等)、429 语义(套餐耗尽 vs 真限流) | 包 header 注释 |
 | ⑥ 入口 | `/llms.txt` 索引、模型表/定价表/协议章节各自 URL | 遍历路线 |
