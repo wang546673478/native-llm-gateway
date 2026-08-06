@@ -1244,3 +1244,76 @@ func TestStripResponsesReasoning(t *testing.T) {
 		t.Errorf("no-tool-rounds strip = %s, want 不注入 reasoning", out2)
 	}
 }
+
+
+// TestProxy_CatchAll_ModelNotFoundFailsOver P-catch-all-mismatch:
+// catch_all 场景(客户端模型名是标签,候选目标模型 ≠ 客户端名)下,候选返回
+// model_not_found(400 Unsupported model / 404 image input 类)→ 不 fatal,
+// 继续同层下一个候选 — 2026-08-07 实测:Claude Code 历史带截图 image 块,
+// mimo-v2.5-pro(不支持图片输入)404,原逻辑整请求失败,minimax 本可承接
+func TestProxy_CatchAll_ModelNotFoundFailsOver(t *testing.T) {
+	strict := &fakeProvider{
+		name: "mimo-token-plan-anthropic", proto: provider.ProtocolAnthropic, models: []string{"mimo-v2.5-pro"},
+		err: &provider.ProviderError{
+			ProviderName: "mimo-token-plan-anthropic", StatusCode: http.StatusNotFound,
+			ErrorType: provider.ErrorTypeModelNotFound,
+			Message:   "No endpoints found that support image input",
+		},
+	}
+	lenient := &fakeProvider{
+		name: "minimax", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"},
+		respStatus: http.StatusOK,
+		respBody:   `{"id":"x","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]}`,
+	}
+	pools := map[string]*keypool.Pool{
+		"mimo-token-plan-anthropic": mkPool("mimo-token-plan-anthropic", []string{"1"}, "token_plan"),
+		"minimax":                   mkPool("minimax", []string{"2"}, "token_plan"),
+	}
+	gin.SetMode(gin.ReleaseMode)
+	reg := provider.NewRegistry()
+	for _, p := range []*fakeProvider{strict, lenient} {
+		p := p
+		reg.Register(p.Name(), func(cfg provider.ProviderConfig) (provider.Provider, error) { return p, nil })
+	}
+	mgr := provider.NewManager(reg, zap.NewNop())
+	provCfg := map[string]provider.ManagerProviderConfig{
+		"mimo-token-plan-anthropic": {Enabled: true, Protocol: strict.Protocol(), Models: strict.models, APIKeys: []string{"sk-test"}},
+		"minimax":                   {Enabled: true, Protocol: lenient.Protocol(), Models: lenient.models, APIKeys: []string{"sk-test"}},
+	}
+	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{Providers: provCfg}); err != nil {
+		t.Fatalf("LoadFromConfig: %v", err)
+	}
+	r := router.NewRouter(zap.NewNop(), mgr, pools, router.Config{
+		Aliases:  map[string]router.AliasConfig{},
+		CatchAll: &router.AliasConfig{Alias: "*"}, // catch_all 自动模式
+	})
+	rec := &recordingUsage{}
+	accessR, err := accesslog.NewRecorder(accesslog.RecorderConfig{}, nil, zap.NewNop())
+	if err != nil {
+		t.Fatalf("new accesslog recorder: %v", err)
+	}
+	e := NewEngine(Config{Router: r, Logger: zap.NewNop(), Usage: rec, Metrics: NoopMetricsRecorder{}, AccessLog: accessR})
+
+	gr := gin.New()
+	gr.POST("/v1/messages", e.HandleRequest)
+	// 客户端发探测名 claude-opus-5(标签)— catch_all 映射到各候选默认模型
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	gr.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s (request must survive candidate mismatch)", w.Code, w.Body.String())
+	}
+	if strict.callCount != 1 {
+		t.Errorf("strict provider called %d times, want 1 (tried, then failover)", strict.callCount)
+	}
+	if lenient.callCount != 1 {
+		t.Errorf("lenient provider called %d times, want 1 (should serve the request)", lenient.callCount)
+	}
+	// 第二个候选收到的 body 模型名被改写为它的目标模型(MiniMax-M3),不是客户端标签
+	if !strings.Contains(string(lenient.gotBody), `"model":"MiniMax-M3"`) {
+		t.Errorf("lenient got body model = %s, want rewritten MiniMax-M3", lenient.gotBody)
+	}
+}

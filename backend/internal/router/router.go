@@ -5,6 +5,7 @@ package router
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 
@@ -179,11 +180,20 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		if model == "" {
 			continue
 		}
-		routes = append(routes, ProviderRoute{Name: name, Model: model})
+		routes = append(routes, ProviderRoute{
+			Name: name, Model: model,
+			BillingSource: r.manager.BillingSourceFor(name), // P-mixed-tier-pool
+		})
 	}
 	if len(routes) == 0 {
 		return nil, ErrNoRoute
 	}
+	// P-catch-all-order: manager.GetAll() 是 Go map,迭代顺序随机 — 不排序则每次
+	// 请求候选顺序都不同,同层 provider 谁先被尝试不可复现(2026-08-07 实测:
+	// Claude Code 相邻两条相同请求一条先打 mimo、一条先打 minimax)。
+	// 按 name 确定性排序:同 tier 内稳定、可解释;想要自定义顺序配显式
+	// catch_all providers 列表(如 ["minimax", "mimo-token-plan"])
+	sort.Slice(routes, func(i, j int) bool { return routes[i].Name < routes[j].Name })
 	keyCandidates := buildKeyCandidates(routes, r.pools)
 	return &RouteIterator{
 		alias:          aliasName,
@@ -276,7 +286,10 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 			if reqProto != "" && p.Protocol() != reqProto {
 				continue
 			}
-			candidates = append(candidates, ProviderRoute{Name: name, Model: modelID})
+			candidates = append(candidates, ProviderRoute{
+				Name: name, Model: modelID,
+				BillingSource: r.manager.BillingSourceFor(name), // P-mixed-tier-pool
+			})
 		}
 	}
 	if len(candidates) == 0 {
@@ -308,6 +321,8 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 			continue
 		}
 		// P-per-key-circuit: provider 级健康过滤已移除 — 熔断器在 keypool(per-key)
+		// P-mixed-tier-pool: 补块级计费来源(显式 alias providers 列表里没写这个字段)
+		p.BillingSource = r.manager.BillingSourceFor(p.Name)
 		out = append(out, p)
 	}
 	return out
@@ -418,12 +433,29 @@ func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool) 
 	}
 
 	for _, r := range routes {
+		// P-mixed-tier-pool: 候选 tier = 池 tiers ∩ 块声明 billing_source。
+		// 同一 vendor 共享 pool 混层时(mimo sk-/tp- 两套 key 一个池),pool.Tiers()
+		// 是并集 [token_plan, api],直接用会把 api 块的候选错放进 token_plan 桶、
+		// tp- key 发到 api 端点(401,2026-08-07 实测)。交集为空(池里没有该块
+		// 声明的层 — 块未声明 billing 默认 api 但池全 token_plan)→ 回退池并集,
+		// 保持旧行为。空 route(没填 BillingSource)→ 也走池并集
 		var tiers []string
 		if pool, ok := pools[r.Name]; ok && pool != nil {
 			tiers = pool.Tiers()
 		}
 		if len(tiers) == 0 {
 			tiers = []string{"api"} // 兜底
+		}
+		if r.BillingSource != "" {
+			inter := make([]string, 0, len(tiers))
+			for _, t := range tiers {
+				if t == r.BillingSource {
+					inter = append(inter, t)
+				}
+			}
+			if len(inter) > 0 {
+				tiers = inter
+			}
 		}
 		for _, t := range tiers {
 			buckets[t] = append(buckets[t], KeyCandidate{ProviderRoute: r, Tier: t})

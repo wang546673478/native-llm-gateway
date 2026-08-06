@@ -1070,6 +1070,17 @@ func (e *Engine) tryCandidate(
 
 	// 不可重试(invalid_request / model_not_found / client_disconnected)→ 直接失败
 	if !errorIsRetryable(pe) {
+		// P-catch-all-mismatch: 候选目标模型 ≠ 客户端模型名时(客户端名只是标签),
+		// 上游「不认识模型」(400 Unsupported model)/「不支持输入类型」
+		// (404 image input — MiMo v2.5-pro 实测)是**候选不适配**,不是请求致命 —
+		// 继续同层下一个候选(minimax 等宽容厂商能接住)。真实模型直连
+		// (result.ModelID == req.Model)时保持 fatal:模型真不存在,重试无用。
+		// 2026-08-07 实测:Claude Code 历史带截图 image 块,mimo-v2.5-pro 404
+		// image input,原逻辑整请求失败,minimax 本可正常承接
+		if result.ModelID != req.Model &&
+			(pe.ErrorType == provider.ErrorTypeModelNotFound || pe.ErrorType == provider.ErrorTypeInvalidRequest) {
+			return outcomeContinue, false, true
+		}
 		return outcomeFatal, false, true
 	}
 
@@ -1087,6 +1098,11 @@ func (e *Engine) tryCandidate(
 				return outcomeContinue, false, true
 			}
 			if !errorIsRetryable(pe2) {
+				// 同首次尝试:catch_all 标签模型场景的模型类错误 = 候选不适配,继续
+				if result.ModelID != req.Model &&
+					(pe2.ErrorType == provider.ErrorTypeModelNotFound || pe2.ErrorType == provider.ErrorTypeInvalidRequest) {
+					return outcomeContinue, false, true
+				}
 				return outcomeFatal, false, true
 			}
 			// I-1:换 key 后二次尝试返回额度类错误 — 与首次额度类错误同权:

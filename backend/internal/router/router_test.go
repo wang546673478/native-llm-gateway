@@ -796,3 +796,119 @@ func TestRouter_CatchAllAuto_ResponsesFilter(t *testing.T) {
 		t.Errorf("chat chain should have candidates: %v", err)
 	}
 }
+
+// TestRouter_CatchAllAuto_DeterministicOrder P-catch-all-order:
+// catch_all 自动模式的候选顺序必须确定性。manager.GetAll() 是 Go map,迭代
+// 顺序随机 — 不排序则同层 provider 谁先被尝试不可复现(2026-08-07 实测:
+// Claude Code 相邻两条相同请求一条先打 mimo、一条先打 minimax)。
+// 修复后按 name 排序 + tier 分桶:同输入两次 Route 顺序一致。
+func TestRouter_CatchAllAuto_DeterministicOrder(t *testing.T) {
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "minimax", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+		&fakeProvider{name: "mimo-token-plan-anthropic", proto: provider.ProtocolAnthropic, models: []string{"mimo-v2.5-pro"}},
+		&fakeProvider{name: "deepseek-anthropic", proto: provider.ProtocolAnthropic, models: []string{"deepseek-v4-flash"}},
+	)
+	now := time.Now()
+	mkKey := func(providerName, tier string) *keypool.Key {
+		return &keypool.Key{ID: providerName + "-1", ProviderName: providerName, Name: "k", Key: "x",
+			Status: keypool.KeyStatusActive, BillingSource: tier, CreatedAt: now, UpdatedAt: now}
+	}
+	pools := map[string]*keypool.Pool{
+		"minimax":                  keypool.NewPool("minimax", []*keypool.Key{mkKey("minimax", "token_plan")}, nil, keypool.Config{}),
+		"mimo-token-plan-anthropic": keypool.NewPool("mimo-token-plan-anthropic", []*keypool.Key{mkKey("mimo-token-plan-anthropic", "token_plan")}, nil, keypool.Config{}),
+		"deepseek-anthropic":       keypool.NewPool("deepseek-anthropic", []*keypool.Key{mkKey("deepseek-anthropic", "api")}, nil, keypool.Config{}),
+	}
+	r := NewRouter(zap.NewNop(), mgr, pools, Config{
+		Aliases:  map[string]AliasConfig{},
+		CatchAll: &AliasConfig{Alias: "*"}, // 空规则 = 自动模式
+	})
+
+	collect := func() []string {
+		req := &provider.Request{Model: "claude-opus-5", Path: "/v1/messages"}
+		it, err := r.Route(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		var names []string
+		for {
+			res, err := it.Next()
+			if err != nil {
+				break
+			}
+			names = append(names, res.ProviderName)
+		}
+		return names
+	}
+
+	first := collect()
+	second := collect()
+	if len(first) != 3 {
+		t.Fatalf("expected 3 candidates, got %v", first)
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("order differs between runs: %v vs %v", first, second)
+		}
+	}
+	// 期望:name 排序 + tier 分桶 → token_plan 桶 [mimo-token-plan-anthropic, minimax]
+	// (mimo-token-plan-anthropic < minimax 按字典序),再 api 桶 [deepseek-anthropic]
+	want := []string{"mimo-token-plan-anthropic", "minimax", "deepseek-anthropic"}
+	for i, w := range want {
+		if first[i] != w {
+			t.Errorf("order[%d] = %q, want %q (full: %v)", i, first[i], w, first)
+		}
+	}
+}
+
+// TestBuildKeyCandidates_MixedTierPool_BlockBillingIntersects P-mixed-tier-pool:
+// 同一 vendor 共享 pool 混层(mimo sk-/tp- 两套 key 一个池)时,候选 tier =
+// 池 tiers ∩ 块声明 billing — api 块不能生成 token_plan 候选(否则 tp- key
+// 被发到 api 端点 401,2026-08-07 实测 key 12 被误标 COOLING)
+func TestBuildKeyCandidates_MixedTierPool_BlockBillingIntersects(t *testing.T) {
+	now := time.Now()
+	mkKey := func(tier string) *keypool.Key {
+		return &keypool.Key{ID: "1", ProviderName: "mimo", Name: "k", Key: "x",
+			Status: keypool.KeyStatusActive, BillingSource: tier, CreatedAt: now, UpdatedAt: now}
+	}
+	shared := keypool.NewPool("mimo", []*keypool.Key{mkKey("token_plan"), mkKey("api")}, nil, keypool.Config{})
+	pools := map[string]*keypool.Pool{
+		"mimo":                        shared,
+		"mimo-token-plan":             shared,
+		"mimo-anthropic":              shared,
+		"mimo-token-plan-anthropic":   shared,
+	}
+	routes := []ProviderRoute{
+		{Name: "mimo-anthropic", Model: "mimo-v2.5", BillingSource: "api"},
+		{Name: "mimo-token-plan-anthropic", Model: "mimo-v2.5-pro", BillingSource: "token_plan"},
+	}
+	out := buildKeyCandidates(routes, pools)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 candidates (one per block billing), got %+v", out)
+	}
+	// 顺序:token_plan 桶在前 → mimo-token-plan-anthropic;api 桶 → mimo-anthropic
+	if out[0].Name != "mimo-token-plan-anthropic" || out[0].Tier != "token_plan" {
+		t.Errorf("out[0] = %s/%s, want mimo-token-plan-anthropic/token_plan", out[0].Name, out[0].Tier)
+	}
+	if out[1].Name != "mimo-anthropic" || out[1].Tier != "api" {
+		t.Errorf("out[1] = %s/%s, want mimo-anthropic/api", out[1].Name, out[1].Tier)
+	}
+}
+
+// TestBuildKeyCandidates_BlockBillingNotInPool_FallsBackToPoolTiers:
+// 块声明 billing 与池 key 完全无交集(池全 token_plan,块未声明/默认 api)→
+// 回退池并集(旧行为,保持兼容)
+func TestBuildKeyCandidates_BlockBillingNotInPool_FallsBackToPoolTiers(t *testing.T) {
+	now := time.Now()
+	mkKey := func(tier string) *keypool.Key {
+		return &keypool.Key{ID: "1", ProviderName: "mm", Name: "k", Key: "x",
+			Status: keypool.KeyStatusActive, BillingSource: tier, CreatedAt: now, UpdatedAt: now}
+	}
+	pools := map[string]*keypool.Pool{
+		"mm": keypool.NewPool("mm", []*keypool.Key{mkKey("token_plan")}, nil, keypool.Config{}),
+	}
+	// mm 块声明 api,但池只有 token_plan key → 交集空 → 回退 [token_plan]
+	out := buildKeyCandidates([]ProviderRoute{{Name: "mm", Model: "m", BillingSource: "api"}}, pools)
+	if len(out) != 1 || out[0].Tier != "token_plan" {
+		t.Errorf("expected fallback (mm, token_plan), got %+v", out)
+	}
+}

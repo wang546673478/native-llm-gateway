@@ -13,6 +13,11 @@ type ProviderRoute struct {
 	Model    string
 	Priority int
 	Weight   int
+	// BillingSource P-mixed-tier-pool: 该 config 块的计费来源("token_plan"/"api"/"free")。
+	// buildKeyCandidates 按它过滤候选 tier — 同一 vendor 共享 pool 混层时
+	// (mimo 的 sk-/tp- 两套 key 在一个池),不用 pool.Tiers() 并集,否则 api 块
+	// 会生成 token_plan 候选、把 tp- key 发到 api 端点(401,2026-08-07 实测)
+	BillingSource string
 }
 
 // AliasConfig 单个别名的路由规则
