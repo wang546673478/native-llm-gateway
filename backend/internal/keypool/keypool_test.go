@@ -847,3 +847,51 @@ func TestAcquireFromTier_PerKeyCircuitRateLimitNotCounted(t *testing.T) {
 		t.Fatalf("AcquireFromTier after 5 rate_limits: %v (429 must not trip circuit)", err)
 	}
 }
+
+// P-state-persist: 快照导出/恢复 — QE/未过期 COOLING/余额恢复,过期 COOLING 不恢复
+func TestPool_SnapshotApplyRestoresState(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "k1", ProviderName: "test", Name: "k1", Key: "sk",
+			Status: KeyStatusQuotaExceeded, BillingSource: "api",
+			QuotaExceededSince: now.Add(-10 * time.Minute),
+			Remaining:          0, QuotaKind: "percent", LastPolledAt: now.Add(-30 * time.Second),
+			CreatedAt: now, UpdatedAt: now},
+		{ID: "k2", ProviderName: "test", Name: "k2", Key: "sk",
+			Status: KeyStatusCooling, BillingSource: "api",
+			CoolingUntil: now.Add(5 * time.Minute), // 未过期 → 恢复
+			CreatedAt:    now, UpdatedAt: now},
+		{ID: "k3", ProviderName: "test", Name: "k3", Key: "sk",
+			Status: KeyStatusCooling, BillingSource: "api",
+			CoolingUntil: now.Add(-5 * time.Minute), // 已过期 → 不恢复(ACTIVE)
+			CreatedAt:    now, UpdatedAt: now},
+	}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	// 导出 → 新 pool 恢复(模拟 reload)
+	states := pool.Snapshot()
+	pool2 := NewPool("test", []*Key{
+		{ID: "k1", ProviderName: "test", Name: "k1", Key: "sk", Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+		{ID: "k2", ProviderName: "test", Name: "k2", Key: "sk", Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+		{ID: "k3", ProviderName: "test", Name: "k3", Key: "sk", Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+	}, NewScheduler("round_robin"), Config{})
+	pool2.ApplySnapshot(states)
+
+	ks := pool2.Keys()
+	byID := map[string]Key{}
+	for _, k := range ks {
+		byID[k.ID] = k
+	}
+	if byID["k1"].Status != KeyStatusQuotaExceeded {
+		t.Errorf("k1 status = %q, want QUOTA_EXCEEDED (restored)", byID["k1"].Status)
+	}
+	if byID["k1"].Remaining != 0 || byID["k1"].QuotaKind != "percent" || byID["k1"].LastPolledAt.IsZero() {
+		t.Errorf("k1 balance snapshot not restored: %+v", byID["k1"])
+	}
+	if byID["k2"].Status != KeyStatusCooling {
+		t.Errorf("k2 status = %q, want COOLING (unexpired cooling restored)", byID["k2"].Status)
+	}
+	if byID["k3"].Status != KeyStatusActive {
+		t.Errorf("k3 status = %q, want ACTIVE (expired cooling must not restore)", byID["k3"].Status)
+	}
+}

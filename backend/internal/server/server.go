@@ -4,8 +4,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -51,6 +54,10 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	// P3+P4+P5: 构造 KeyPool map + Router + Proxy
 	// P30:从 DB (provider_api_keys 表) 读 key 而不是 config.yaml
 	pools := buildKeyPools(cfg, db, logger)
+	// P-state-persist: 恢复上次优雅关停的 key 状态(QE/COOLING/余额)。
+	// 必须在 quotacheck.NewManager(injectCallbacks)之前 — QE key 恢复后
+	// 立即被 callback 重入堆,不等 poll 重新确认
+	restoreKeyStateSnapshots(pools, cfg, logger)
 	r := router.NewRouter(logger, manager, pools, router.Config{
 		Aliases:         toRouterAliases(cfg.Routing.Aliases, cfg.Routing.Chains),
 		DefaultStrategy: cfg.Routing.DefaultStrategy,
@@ -471,7 +478,11 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.accessR != nil {
 			_ = s.accessR.Close() // flush buffer + stop retention
 		}
-		return s.shutdown()
+		shutdownErr := s.shutdown()
+		// P-state-persist: 排空完成(在飞请求全部结束)后写快照 — 状态最准。
+		// reload(SIGTERM)不丢 QE/COOLING/余额,重启后无需 poll 重新确认 2 轮
+		s.saveKeyStateSnapshot()
+		return shutdownErr
 	case err := <-errCh:
 		if err != nil {
 			return fmt.Errorf("http server error: %w", err)
@@ -490,6 +501,74 @@ func (s *Server) shutdown() error {
 	defer cancel()
 	s.logger.Info("graceful shutdown", zap.Duration("timeout", timeout))
 	return s.http.Shutdown(ctx)
+}
+
+// keyStateSnapshotPath 快照文件路径 — 与 DB 同目录(/tmp/gateway-data/)。
+// reload(SIGTERM)保留;机器重启 /tmp 清空一起丢(可接受,poll 重新学习)
+func keyStateSnapshotPath(dsn string) string {
+	return filepath.Join(filepath.Dir(dsn), "key-state.json")
+}
+
+// saveKeyStateSnapshot P-state-persist: 把所有 pool 的 key 运行时状态落盘。
+// 原子写(临时文件 + rename)避免半截文件;只导状态,不含明文 key
+func (s *Server) saveKeyStateSnapshot() {
+	path := keyStateSnapshotPath(s.cfg.Database.DSN)
+	states := make([]keypool.KeyState, 0, 8)
+	// P-provider-vendor: 同一 vendor 的多个注册名共享同一 pool — 按指针去重,
+	// 避免 deepseek / deepseek-anthropic 各导出一次(快照文件冗余)
+	seen := make(map[*keypool.Pool]bool)
+	for _, pool := range s.pools {
+		if seen[pool] {
+			continue
+		}
+		seen[pool] = true
+		states = append(states, pool.Snapshot()...)
+	}
+	data, err := json.Marshal(states)
+	if err != nil {
+		s.logger.Warn("key state snapshot marshal failed", zap.Error(err))
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		s.logger.Warn("key state snapshot write failed", zap.Error(err))
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		s.logger.Warn("key state snapshot rename failed", zap.Error(err))
+		return
+	}
+	s.logger.Info("key state snapshot saved",
+		zap.String("path", path), zap.Int("keys", len(states)))
+}
+
+// restoreKeyStateSnapshots P-state-persist: 启动时从快照恢复 key 状态。
+// 必须在 quotacheck.Start(rescanExisting)之前执行 — QE key 恢复后冷启动
+// rescan 会立即入堆探测恢复,不用等 poll 重新确认 2 轮(重启后耗尽 key
+// 立即跳过,不再被打 429 → COOLING 60s 循环)
+func restoreKeyStateSnapshots(pools map[string]*keypool.Pool, cfg *config.Config, logger *zap.Logger) {
+	path := keyStateSnapshotPath(cfg.Database.DSN)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // 无快照(首次启动 / 机器重启)— 正常
+	}
+	var states []keypool.KeyState
+	if err := json.Unmarshal(data, &states); err != nil {
+		logger.Warn("key state snapshot parse failed", zap.Error(err))
+		return
+	}
+	restored := 0
+	// snapshot 的 ProviderName = pool 名(vendor),pools map 里有该注册名
+	for _, st := range states {
+		pool, ok := pools[st.ProviderName]
+		if !ok {
+			continue
+		}
+		pool.ApplySnapshot([]keypool.KeyState{st})
+		restored++
+	}
+	logger.Info("key state snapshot restored",
+		zap.String("path", path), zap.Int("keys", restored))
 }
 
 // registerRoutes 注册路由

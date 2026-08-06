@@ -557,3 +557,85 @@ func (p *Pool) BestTier() string {
 	}
 	return tiers[0]
 }
+
+// KeyState 单把 key 的运行时状态快照(JSON 序列化友好)。
+// P-state-persist: 优雅关停时落盘,重启时恢复 —
+// 否则每次 reload 后 QE/COOLING/余额全丢,耗尽的 key 要等 poll 连续 2 轮
+// 重新确认(~2 分钟),期间请求反复打它(429 → COOLING 60s 循环)。
+type KeyState struct {
+	ProviderName string    `json:"provider_name"`
+	KeyID        string    `json:"key_id"`
+	Status       KeyStatus `json:"status"`
+	CoolingUntil time.Time `json:"cooling_until"`
+	// P68: 配额耗尽时间(恢复后 quotacheck 需要它决定探测节奏)
+	QuotaExceededSince time.Time `json:"quota_exceeded_since"`
+	// P-quota-balance: poll 快照(恢复后 balanceGuardHealthy 立即有数据,
+	// 不再把耗尽 key 的 2056 误判成限流冷却)
+	Remaining       float64   `json:"remaining"`
+	LastPolledAt    time.Time `json:"last_polled_at"`
+	QuotaKind       string    `json:"quota_kind"`
+	QuotaZeroStreak int       `json:"quota_zero_streak"`
+	CoolingCount    int       `json:"cooling_count"`
+}
+
+// Snapshot 导出所有 key 的运行时状态(供优雅关停落盘)。
+// 注意:只导状态,不含明文 key — 快照文件无敏感数据
+func (p *Pool) Snapshot() []KeyState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]KeyState, 0, len(p.keys))
+	for _, k := range p.keys {
+		out = append(out, KeyState{
+			ProviderName:       k.ProviderName,
+			KeyID:              k.ID,
+			Status:             k.Status,
+			CoolingUntil:       k.CoolingUntil,
+			QuotaExceededSince: k.QuotaExceededSince,
+			Remaining:          k.Remaining,
+			LastPolledAt:       k.LastPolledAt,
+			QuotaKind:          k.QuotaKind,
+			QuotaZeroStreak:    k.QuotaZeroStreak,
+			CoolingCount:       k.CoolingCount,
+		})
+	}
+	return out
+}
+
+// ApplySnapshot P-state-persist: 按 keyID 恢复快照(重启后调用)。
+// 规则:
+//   - 已过期的 COOLING 不恢复(acquire 会按 ACTIVE 处理,恢复反而拖住)
+//   - QUOTA_EXCEEDED 恢复后,quotacheck 的冷启动 rescan 会自动入堆恢复
+//   - Remaining/LastPolledAt 恢复 → balanceGuardHealthy 立即生效,
+//     耗尽 key 的 2056 直接标 QE,不再被降级成 60s 冷却循环
+func (p *Pool) ApplySnapshot(states []KeyState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	byID := make(map[string]KeyState, len(states))
+	for _, s := range states {
+		byID[s.KeyID] = s
+	}
+	for _, k := range p.keys {
+		s, ok := byID[k.ID]
+		if !ok {
+			continue
+		}
+		// 只恢复「需要时间判断的状态」;ACTIVE 无状态可恢复
+		if s.Status == KeyStatusCooling && now.Before(s.CoolingUntil) {
+			k.Status = KeyStatusCooling
+			k.CoolingUntil = s.CoolingUntil
+			k.CoolingCount = s.CoolingCount
+		}
+		if s.Status == KeyStatusQuotaExceeded {
+			k.Status = KeyStatusQuotaExceeded
+			k.QuotaExceededSince = s.QuotaExceededSince
+		}
+		// 余额快照无条件恢复(poll 下一轮会刷新;恢复前 balanceGuard 有数据可用)
+		if !s.LastPolledAt.IsZero() {
+			k.Remaining = s.Remaining
+			k.LastPolledAt = s.LastPolledAt
+			k.QuotaKind = s.QuotaKind
+			k.QuotaZeroStreak = s.QuotaZeroStreak
+		}
+	}
+}
