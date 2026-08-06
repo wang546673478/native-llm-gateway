@@ -577,6 +577,14 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				if effective != tier {
 					continue
 				}
+				// P-cooling-display: 冷却过期但没请求触发刷新时(acquire 才惰性
+				// 恢复),poll 顺手恢复 — 否则 dashboard 一直显示 COOLING
+				// (2026-08-06 实测:key-1 显示冷却 7.5 小时,实际早已过期,
+				// 一个请求就刷新回 ACTIVE)
+				if k.Status == keypool.KeyStatusCooling && m.now().After(k.CoolingUntil) {
+					k.Status = keypool.KeyStatusActive
+					k.UpdatedAt = m.now()
+				}
 				bal, err := balancer.FetchBalance(ctx, baseURL, k)
 				if err != nil {
 					m.logger.Warn("poll balance err",

@@ -734,3 +734,64 @@ func TestPollAllBalancers_ExhaustedThenWindowRefreshRestores(t *testing.T) {
 		t.Error("dead key should be usable again after window refresh")
 	}
 }
+
+// P-cooling-display: 冷却过期但无请求触发刷新时,poll 顺手恢复 ACTIVE —
+// 否则 dashboard 一直显示 COOLING(2026-08-06 实测显示 7.5 小时陈旧状态)
+func TestPollAllBalancers_ExpiredCoolingRefreshed(t *testing.T) {
+	now := time.Now()
+	keys := []*keypool.Key{
+		{ID: "cool-1", ProviderName: "p", Status: keypool.KeyStatusCooling,
+			CoolingUntil:  now.Add(-5 * time.Minute), // 早已过期
+			BillingSource: "token_plan", Remaining: 97, QuotaKind: "percent",
+			LastPolledAt: now.Add(-30 * time.Second)},
+	}
+	pool := keypool.NewPool("p", keys, nil, keypool.Config{})
+
+	b := &fakeBalancer{bal: Balance{HasQuota: true, Raw: 97, Kind: "percent"}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+	m.pollAllBalancers(context.Background())
+
+	if keys[0].Status != keypool.KeyStatusActive {
+		t.Errorf("status = %s, want ACTIVE (expired cooling refreshed by poll)", keys[0].Status)
+	}
+}
+
+// 对照:冷却未过期 → poll 不恢复
+func TestPollAllBalancers_UnExpiredCoolingStays(t *testing.T) {
+	now := time.Now()
+	keys := []*keypool.Key{
+		{ID: "cool-1", ProviderName: "p", Status: keypool.KeyStatusCooling,
+			CoolingUntil:  now.Add(5 * time.Minute), // 未过期
+			BillingSource: "token_plan", Remaining: 97, QuotaKind: "percent",
+			LastPolledAt: now.Add(-30 * time.Second)},
+	}
+	pool := keypool.NewPool("p", keys, nil, keypool.Config{})
+
+	b := &fakeBalancer{bal: Balance{HasQuota: true, Raw: 97, Kind: "percent"}}
+	originalReg := balancerRegistry["p"]
+	RegisterBalancer("p", b)
+	t.Cleanup(func() {
+		if originalReg != nil {
+			balancerRegistry["p"] = originalReg
+		} else {
+			delete(balancerRegistry, "p")
+		}
+	})
+
+	m := NewManager(zap.NewNop(), NewPoolsRef(map[string]*keypool.Pool{"p": pool}), &StaticProviderLookup{Endpoints: map[string]string{"p": ""}}, nil, DefaultManagerConfig())
+	m.pollAllBalancers(context.Background())
+
+	if keys[0].Status != keypool.KeyStatusCooling {
+		t.Errorf("status = %s, want COOLING (not yet expired)", keys[0].Status)
+	}
+}
