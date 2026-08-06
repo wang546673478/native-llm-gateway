@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 )
 
 func newTestKeys(n int) []*Key {
@@ -728,5 +730,120 @@ func TestAcquireFromTier_CurrencyLowBalanceNotSkipped(t *testing.T) {
 	}
 	if k.ID != "a" {
 		t.Errorf("got %q, want a", k.ID)
+	}
+}
+
+// P-per-key-circuit: 一把 key 5xx 熔断,同 provider 的 healthy key 照常可用
+// (2026-08-06 之前是 provider 级熔断 — 一把 key 出问题连坐整 provider)
+func TestAcquireFromTier_PerKeyCircuitTripsOnlyBadKey(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "k1", ProviderName: "test", Name: "k1", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+		{ID: "k2", ProviderName: "test", Name: "k2", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+	}
+	cfg := Config{
+		CircuitBreaker: circuit.Config{
+			FailureThreshold: 2,
+			FailureWindow:    60 * time.Second,
+			OpenTimeout:      30 * time.Second,
+			HalfOpenRequests: 1,
+		},
+	}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), cfg)
+
+	// k1 连续 2 个 5xx → k1 熔断
+	pool.ReportError(keys[0], "server_error")
+	pool.ReportError(keys[0], "server_error")
+
+	// Acquire 必须绕开 k1,给 k2
+	k, err := pool.AcquireFromTier("api", nil, "")
+	if err != nil {
+		t.Fatalf("AcquireFromTier: %v", err)
+	}
+	if k.ID != "k2" {
+		t.Errorf("got %q, want k2 (k1 tripped must not affect healthy k2)", k.ID)
+	}
+
+	// k2 也 2 个 5xx → k2 熔断 → 桶空
+	pool.ReportError(keys[1], "server_error")
+	pool.ReportError(keys[1], "server_error")
+	if _, err := pool.AcquireFromTier("api", nil, ""); err != ErrNoAvailableKey {
+		t.Errorf("got %v, want ErrNoAvailableKey (both keys tripped)", err)
+	}
+}
+
+// P-per-key-circuit: OPEN 超时后转 HALF_OPEN 放行试探请求,成功 → CLOSED
+func TestAcquireFromTier_PerKeyCircuitHalfOpenRecovers(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "k1", ProviderName: "test", Name: "k1", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+	}
+	cfg := Config{
+		CircuitBreaker: circuit.Config{
+			FailureThreshold: 2,
+			FailureWindow:    60 * time.Second,
+			OpenTimeout:      50 * time.Millisecond,
+			HalfOpenRequests: 1,
+		},
+	}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), cfg)
+
+	pool.ReportError(keys[0], "server_error")
+	pool.ReportError(keys[0], "server_error")
+	if _, err := pool.AcquireFromTier("api", nil, ""); err != ErrNoAvailableKey {
+		t.Fatalf("expected tripped, got %v", err)
+	}
+
+	// OPEN 超时前仍不可用
+	if _, err := pool.AcquireFromTier("api", nil, ""); err != ErrNoAvailableKey {
+		t.Fatalf("expected still open, got %v", err)
+	}
+
+	// 超时后 → HALF_OPEN 放行试探请求
+	time.Sleep(80 * time.Millisecond)
+	k, err := pool.AcquireFromTier("api", nil, "")
+	if err != nil {
+		t.Fatalf("AcquireFromTier after timeout: %v (want half-open probe)", err)
+	}
+	if k.ID != "k1" {
+		t.Fatalf("got %q, want k1", k.ID)
+	}
+
+	// 试探成功 → CLOSED,后续正常调度
+	pool.ReportSuccess(keys[0])
+	k, err = pool.AcquireFromTier("api", nil, "")
+	if err != nil {
+		t.Fatalf("AcquireFromTier after success: %v", err)
+	}
+	if k.ID != "k1" {
+		t.Errorf("got %q, want k1", k.ID)
+	}
+}
+
+// P-per-key-circuit: 429(rate_limit)不计入熔断 — 5 次限流不熔断 key
+func TestAcquireFromTier_PerKeyCircuitRateLimitNotCounted(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "k1", ProviderName: "test", Name: "k1", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+	}
+	cfg := Config{
+		CircuitBreaker: circuit.Config{
+			FailureThreshold: 3,
+			FailureWindow:    60 * time.Second,
+			OpenTimeout:      30 * time.Second,
+			HalfOpenRequests: 1,
+		},
+	}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), cfg)
+
+	for i := 0; i < 5; i++ {
+		pool.ReportError(keys[0], "rate_limit")
+	}
+	if _, err := pool.AcquireFromTier("api", nil, ""); err != nil {
+		t.Fatalf("AcquireFromTier after 5 rate_limits: %v (429 must not trip circuit)", err)
 	}
 }

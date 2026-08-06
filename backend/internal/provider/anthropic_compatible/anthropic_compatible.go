@@ -139,9 +139,15 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	if b.cfg.Pool == nil {
 		return nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
 	}
-	key, err := b.cfg.Pool.AcquireForProtocol("anthropic")
-	if err != nil {
-		return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+	// P-key-mismatch: 优先用路由层已 acquire 的 key — 否则双 acquire 可能
+	// 拿到不同 key,429 时冷却标到没发过请求的 key 上(2026-08-06 实测)
+	key := req.Key
+	var err error
+	if key == nil {
+		key, err = b.cfg.Pool.AcquireForProtocol("anthropic")
+		if err != nil {
+			return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+		}
 	}
 
 	body := b.prepareBody(req.Body)
@@ -161,7 +167,6 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		if req.TraceID != "" {
 			httpReq.Header.Set("X-Request-Id", req.TraceID)
 		}
-
 		httpResp, err := b.client.Do(httpReq)
 		if err != nil {
 			errType := provider.ErrorTypeConnection
@@ -229,9 +234,14 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if b.cfg.Pool == nil {
 		return nil, nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
 	}
-	key, err := b.cfg.Pool.AcquireForProtocol("anthropic")
-	if err != nil {
-		return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
+	key := req.Key
+	var err error
+	if key == nil {
+		key, err = b.cfg.Pool.AcquireForProtocol("anthropic")
+		if err != nil {
+			return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+		}
 	}
 
 	// 流式请求:超时拉长到 10 分钟

@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"errors"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -148,11 +148,11 @@ func buildEngine(t *testing.T, p *fakeProvider, aliases map[string]router.AliasC
 	}
 
 	engine := NewEngine(Config{
-		Router:    r,
-		Logger:    zap.NewNop(),
-		Usage:     rec,
-		Metrics:   NoopMetricsRecorder{},
-		Breaker:   NoopCircuitReporter{},
+		Router:  r,
+		Logger:  zap.NewNop(),
+		Usage:   rec,
+		Metrics: NoopMetricsRecorder{},
+
 		AccessLog: accessR,
 	})
 
@@ -612,7 +612,7 @@ func TestProxy_WhitelistSkipsCandidates(t *testing.T) {
 		authn := auth.New(nil)
 		eng := NewEngine(Config{
 			Router: r, Logger: zap.NewNop(),
-			Usage: NoopUsageRecorder{}, Metrics: NoopMetricsRecorder{}, Breaker: NoopCircuitReporter{},
+			Usage: NoopUsageRecorder{}, Metrics: NoopMetricsRecorder{},
 			Authenticator: authn,
 		})
 		gr := gin.New()

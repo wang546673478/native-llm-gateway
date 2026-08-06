@@ -513,3 +513,42 @@ func TestSendStreamRequest_GuardDowngradeThenRetry(t *testing.T) {
 		t.Errorf("quota_exceeded keys = %d, want 0", got)
 	}
 }
+
+// P-key-mismatch: SendRequest 用 req.Key(路由层 acquire 的 key)发请求,
+// 429 上报只冷却这一把 key — 不误标同 provider 的 healthy key
+// (2026-08-06 实测:weige 429 把 key-1 误标 COOLING,双 key 同时冷却全链掉 deepseek)
+func TestSendRequest_UsesRouteKey_429OnlyCooldownsThatKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(429)
+		w.Write([]byte(`{"error":{"message":"rate limit"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t) // 1 把 key(k1),补一把 k2 测「只冷却实际使用的 key」
+	ks := pool.KeyPtrs()
+	ks = append(ks, &keypool.Key{
+		ID: "k2", ProviderName: "test", Name: "k2", Key: "sk-test-2",
+		Status: keypool.KeyStatusActive, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	// 路由层已 acquire ks[1](第 2 把)— 传给 SendRequest
+	_, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[]}`),
+		Key:     ks[1],
+	})
+	if err == nil {
+		t.Fatal("expected 429 error")
+	}
+
+	// 只有 ks[1] 被冷却,ks[0] 保持 ACTIVE(修复前 ks[0] 也会被误标)
+	if ks[1].Status != keypool.KeyStatusCooling {
+		t.Errorf("ks[1] status = %q, want COOLING", ks[1].Status)
+	}
+	if ks[0].Status != keypool.KeyStatusActive {
+		t.Errorf("ks[0] status = %q, want ACTIVE (healthy key must not be cooldowned)", ks[0].Status)
+	}
+}

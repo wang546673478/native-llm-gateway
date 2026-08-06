@@ -13,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
-	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
@@ -36,7 +35,6 @@ type Admin struct {
 	Registry  *provider.Registry
 	Pools     map[string]*keypool.Pool
 	Router    *router.Router
-	Breakers  *circuit.Manager
 	Usage     *usage.Repository
 	Aliases   map[string]router.AliasConfig
 	Keys      []GatewayKeyInfo
@@ -53,7 +51,6 @@ func NewAdmin(
 	reg *provider.Registry,
 	pools map[string]*keypool.Pool,
 	r *router.Router,
-	cb *circuit.Manager,
 	usageRepo *usage.Repository,
 	aliases map[string]router.AliasConfig,
 	keys []GatewayKeyInfo,
@@ -65,7 +62,6 @@ func NewAdmin(
 		Registry:  reg,
 		Pools:     pools,
 		Router:    r,
-		Breakers:  cb,
 		Usage:     usageRepo,
 		Aliases:   aliases,
 		Keys:      keys,
@@ -153,12 +149,13 @@ func (a *Admin) listRegisteredProviders(c *gin.Context) {
 // 归到同一 vendor 条目下,前端按厂商展示。key_pool / circuit_breaker 取该 vendor 第一个注册名的
 // (共享 pool 时状态相同)。
 func (a *Admin) listProviders(c *gin.Context) {
+	// P-per-key-circuit: 熔断器已下沉到 keypool(per-key),不再有 provider 级
+	// circuit_breaker 状态 — 每把 key 的熔断状态在 /api-keys 端点返回
 	type vendorEntry struct {
-		Vendor         string
-		Names          []gin.H
-		Models         []string
-		KeyPool        *keypool.PoolStatus
-		CircuitBreaker circuit.Stats
+		Vendor  string
+		Names   []gin.H
+		Models  []string
+		KeyPool *keypool.PoolStatus
 	}
 	byVendor := make(map[string]*vendorEntry)
 	order := make([]string, 0)
@@ -175,14 +172,6 @@ func (a *Admin) listProviders(c *gin.Context) {
 		if pool, ok := a.Pools[name]; ok && entry.KeyPool == nil {
 			st := pool.Status()
 			entry.KeyPool = &st
-		}
-		if a.Breakers != nil && entry.CircuitBreaker.Name == "" {
-			for _, s := range a.Breakers.AllStats() {
-				if s.Name == name {
-					entry.CircuitBreaker = s
-					break
-				}
-			}
 		}
 	}
 
@@ -215,9 +204,6 @@ func (a *Admin) listProviders(c *gin.Context) {
 		if v.KeyPool != nil {
 			entry["key_pool"] = v.KeyPool
 		}
-		if v.CircuitBreaker.Name != "" {
-			entry["circuit_breaker"] = v.CircuitBreaker
-		}
 		out = append(out, entry)
 	}
 	c.JSON(http.StatusOK, gin.H{"vendors": out, "count": len(out)})
@@ -238,14 +224,6 @@ func (a *Admin) getProvider(c *gin.Context) {
 	}
 	if pool, ok := a.Pools[name]; ok {
 		info["key_pool"] = pool.Status()
-	}
-	if a.Breakers != nil {
-		for _, s := range a.Breakers.AllStats() {
-			if s.Name == name {
-				info["circuit_breaker"] = s
-				break
-			}
-		}
 	}
 	c.JSON(http.StatusOK, info)
 }

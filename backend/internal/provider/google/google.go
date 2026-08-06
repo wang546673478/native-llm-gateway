@@ -57,9 +57,14 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	if b.cfg.Pool == nil {
 		return nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
 	}
-	key, err := b.cfg.Pool.AcquireForProtocol("google")
-	if err != nil {
-		return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+	// P-key-mismatch: 优先用路由层已 acquire 的 key(双 acquire 会标错冷却 key)
+	key := req.Key
+	var err error
+	if key == nil {
+		key, err = b.cfg.Pool.AcquireForProtocol("google")
+		if err != nil {
+			return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+		}
 	}
 
 	// Google 需要把 model 拼到 URL path 里
@@ -121,9 +126,14 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if b.cfg.Pool == nil {
 		return nil, nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
 	}
-	key, err := b.cfg.Pool.AcquireForProtocol("google")
-	if err != nil {
-		return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
+	key := req.Key
+	var err error
+	if key == nil {
+		key, err = b.cfg.Pool.AcquireForProtocol("google")
+		if err != nil {
+			return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+		}
 	}
 
 	streamTimeout := b.cfg.Timeout

@@ -37,7 +37,6 @@ type Server struct {
 	router   *router.Router
 	engine   *proxy.Engine
 	pools    map[string]*keypool.Pool
-	cm       *circuit.Manager
 	auth     *auth.Authenticator
 	usageC   *usage.Collector
 	usageR   *usage.Repository
@@ -58,23 +57,10 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		MaxAttempts:     cfg.Retry.MaxAttempts,
 		CatchAll:        toRouterCatchAll(cfg.Routing.CatchAll, cfg.Routing.Chains),
 	})
-	// P6: Circuit Breaker
-	cm := circuit.NewManager(r)
-	reporter := circuit.NewReporter(cm)
-	// 为每个 enabled Provider 创建 Breaker
-	for name, p := range cfg.Providers {
-		if !p.Enabled {
-			continue
-		}
-		cm.GetOrCreate(name, circuit.Config{
-			FailureThreshold: p.CircuitBreaker.FailureThreshold,
-			FailureWindow:    p.CircuitBreaker.FailureWindow,
-			OpenTimeout:      p.CircuitBreaker.OpenTimeout,
-			HalfOpenRequests: p.CircuitBreaker.HalfOpenRequests,
-			CountableErrors:  p.CircuitBreaker.CountableErrors,
-			ExcludedErrors:   p.CircuitBreaker.ExcludedErrors,
-		})
-	}
+	// P-per-key-circuit: 熔断器已下沉到 keypool(per-key)。
+	// 2026-08-06 之前是 per-provider — 一把 key 5 个 5xx 连坐整 provider 的
+	// healthy key(实测:weige 出问题,key-1 一起被跳过,全链掉 deepseek)。
+	// 现在每把 key 独立熔断,配置从 provider config 传入 pool(buildKeyPools)
 
 	// P7: Authenticator(从 DB 加载;config keys 在启动时被 seed 到 DB)
 	var authn *auth.Authenticator
@@ -143,7 +129,6 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		Logger:        logger,
 		Usage:         usage.NewAdapter(usageC),
 		Metrics:       metrics.NewAdapter(metricsC),
-		Breaker:       reporter,
 		TokenRecorder: newAuthTokenRecorder(authn), // P13: TPM 计数(若 auth 启用)
 		Authenticator: authn,                       // P19: Provider 绑定检查
 		AccessLog:     accessR,                     // P67: 接入日志
@@ -183,7 +168,6 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		router:   r,
 		engine:   eng,
 		pools:    pools,
-		cm:       cm,
 		auth:     authn,
 		usageC:   usageC,
 		usageR:   usageRepo,
@@ -231,6 +215,10 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		if !ok {
 			poolCfg := keypool.Config{
 				CoolingDuration: cfg.KeyPool.CoolingDuration,
+				// P-per-key-circuit: per-key 熔断器配置(取该 vendor 第一个注册名的,
+				// 同一 vendor 共享 pool 时配置一致);0 = 不启用
+				CircuitBreaker: toCircuitConfig(p.CircuitBreaker),
+				CircuitLogger:  logger,
 			}
 			// B-probe-quota: 该 vendor 没有任何注册名有余额查询 balancer
 			// (glm / qwen / gemini)→ probe 模式:配额耗尽不永久标记,每次请求
@@ -245,6 +233,19 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		out[name] = pool
 	}
 	return out
+}
+
+// toCircuitConfig P-per-key-circuit: config 的熔断配置 → circuit.Config。
+// 配置了 failure_threshold > 0 才启用(0 = 不启用,测试/默认场景)
+func toCircuitConfig(c config.CircuitBreakerCfg) circuit.Config {
+	return circuit.Config{
+		FailureThreshold: c.FailureThreshold,
+		FailureWindow:    c.FailureWindow,
+		OpenTimeout:      c.OpenTimeout,
+		HalfOpenRequests: c.HalfOpenRequests,
+		CountableErrors:  c.CountableErrors,
+		ExcludedErrors:   c.ExcludedErrors,
+	}
 }
 
 // vendorHasBalancer 该 vendor 的任意注册名是否注册了余额查询 balancer
@@ -554,7 +555,6 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		provider.Default(),
 		s.pools,
 		s.router,
-		s.cm,
 		s.usageR,
 		toRouterAliases(s.cfg.Routing.Aliases, s.cfg.Routing.Chains),
 		gkInfos,

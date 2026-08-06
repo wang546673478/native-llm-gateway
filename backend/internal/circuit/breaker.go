@@ -12,6 +12,8 @@ package circuit
 import (
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // State 熔断器状态
@@ -43,10 +45,15 @@ type Config struct {
 	ExcludedErrors   []string
 }
 
-// Breaker 单个 Provider 的熔断器
+// Breaker 单个实体的熔断器(P-per-key-circuit:现在是 per-key,不是 per-provider)
 type Breaker struct {
 	name   string
 	config Config
+
+	// P-per-key-circuit: 状态转变日志(CLOSED→OPEN / OPEN→HALF_OPEN / HALF_OPEN→CLOSED)。
+	// 之前熔断器完全无日志,10:22 那次 provider 级熔断只能靠旁证推断。
+	// nil = 不打日志(测试场景)
+	logger *zap.Logger
 
 	mu               sync.Mutex
 	state            State
@@ -54,6 +61,26 @@ type Breaker struct {
 	successCount     int         // HALF_OPEN 期间累计成功数
 	openedAt         time.Time
 	halfOpenInFlight int // HALF_OPEN 期间已发出去的请求数
+}
+
+// SetLogger 注入状态转变日志(nil 关闭)
+func (b *Breaker) SetLogger(l *zap.Logger) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.logger = l
+}
+
+// transitionLog 打状态转变日志(带 name + 关键上下文)
+func (b *Breaker) transitionLog(from, to State, fields ...zap.Field) {
+	if b.logger == nil {
+		return
+	}
+	fields = append([]zap.Field{
+		zap.String("breaker", b.name),
+		zap.String("from", string(from)),
+		zap.String("to", string(to)),
+	}, fields...)
+	b.logger.Info("circuit breaker transition", fields...)
 }
 
 // New 构造 Breaker
@@ -120,6 +147,8 @@ func (b *Breaker) Allow() bool {
 	case StateOpen:
 		if now.Sub(b.openedAt) >= b.config.OpenTimeout {
 			// 超时,转入 HALF_OPEN
+			b.transitionLog(StateOpen, StateHalfOpen,
+				zap.Duration("open_elapsed", now.Sub(b.openedAt)))
 			b.state = StateHalfOpen
 			b.halfOpenInFlight = 0
 			b.successCount = 0
@@ -150,6 +179,7 @@ func (b *Breaker) RecordSuccess() {
 		b.successCount++
 		if b.successCount >= b.config.HalfOpenRequests {
 			// 试探全部成功 → 关闭熔断
+			b.transitionLog(StateHalfOpen, StateClosed)
 			b.state = StateClosed
 			b.failures = nil
 			b.successCount = 0
@@ -196,12 +226,17 @@ func (b *Breaker) RecordFailure(errType string) {
 		b.failures = newFails
 
 		if len(b.failures) >= b.config.FailureThreshold {
+			b.transitionLog(StateClosed, StateOpen,
+				zap.Int("failures_in_window", len(b.failures)),
+				zap.Int("threshold", b.config.FailureThreshold))
 			b.state = StateOpen
 			b.openedAt = now
 		}
 
 	case StateHalfOpen:
 		// 试探期失败 → 重新 OPEN
+		b.transitionLog(StateHalfOpen, StateOpen,
+			zap.Int("half_open_successes", b.successCount))
 		b.state = StateOpen
 		b.openedAt = now
 		b.halfOpenInFlight = 0

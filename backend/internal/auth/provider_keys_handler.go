@@ -100,6 +100,11 @@ type ProviderKeyView struct {
 	QuotaKind string `json:"quota_kind"`
 	// P-provider-vendor: key 可用协议列表(逗号分隔,空 = 全部)
 	Protocols string `json:"protocols"`
+	// P-per-key-circuit: per-key 熔断状态 — circuit_open=true 时该 key 暂时
+	// 不参与调度(5 个 5xx 触发,30s 后半开放行)。只影响这一把 key。
+	// 空 CircuitState = 该 provider 未配置熔断
+	CircuitOpen  bool   `json:"circuit_open"`
+	CircuitState string `json:"circuit_state"`
 }
 
 func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
@@ -133,6 +138,9 @@ func toProviderKeyViewFromPool(k dbpkg.ProviderAPIKey, status string, live *keyp
 			t := live.LastPolledAt
 			v.LastPolledAt = &t
 		}
+		// P-per-key-circuit: 熔断状态快照(Keys() 已刷新)
+		v.CircuitOpen = live.CircuitOpen
+		v.CircuitState = live.CircuitState
 	}
 	return v
 }

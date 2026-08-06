@@ -55,6 +55,10 @@ type Key struct {
 	QuotaKind string
 	// P-provider-vendor: 该 key 可用的协议列表(逗号分隔,空 = 全部);从 DB ProviderAPIKey.Protocols 读入
 	Protocols string
+	// P-per-key-circuit: 熔断快照(API 展示用)。实时状态在 pool 的 per-key breaker 里,
+	// Keys() 返回快照时刷新这两个字段。空 CircuitState = 该 provider 未配置熔断
+	CircuitOpen  bool
+	CircuitState string // CLOSED / OPEN / HALF_OPEN
 }
 
 // IsPolledAndExhausted P-quota-prefer: 已轮询确认余额耗尽的 key —

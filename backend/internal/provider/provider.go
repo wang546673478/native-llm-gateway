@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 )
 
 // Protocol Provider 协议类型
@@ -95,6 +97,14 @@ type Request struct {
 	IsStream     bool
 	GatewayKeyID string
 	TraceID      string
+	// Key P-key-mismatch: 路由层(proxy)已 acquire 的 key。
+	// Provider.SendRequest/SendStreamRequest 必须用它发请求,不能再内部
+	// acquire — 否则双 acquire 可能拿到不同 key,429 时 reportKeyError 用
+	// proxy 的 key 上报,冷却标到没发过请求的 healthy key 上
+	// (2026-08-06 实测:weige 429 把 key-1 误标 COOLING,两把 key 同时
+	// 冷却,全链掉 deepseek)。nil = 让 Provider 自己 acquire(兼容
+	// HealthCheck 等无路由上下文的调用)
+	Key *keypool.Key
 }
 
 // Response Provider 返回的原始响应包装

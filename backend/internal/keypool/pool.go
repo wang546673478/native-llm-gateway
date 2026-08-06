@@ -8,6 +8,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 )
 
 // QuotaRecoveryMode 配额耗尽的恢复策略
@@ -30,6 +34,13 @@ type Config struct {
 	// QuotaRecovery 配额耗尽标记策略;空 = poll(保持现有行为)。
 	// 由 server.buildKeyPools 按「该 vendor 是否有 balancer」设置
 	QuotaRecovery QuotaRecoveryMode
+	// P-per-key-circuit: per-key 熔断器配置(2026-08-06)。
+	// 之前熔断器是 per-provider 的 — 一把 key 5 个 5xx 连坐整 provider,
+	// healthy key 一起被跳过(2026-08-06 实测:weige 出问题,key-1 也被跳过)。
+	// 现在每把 key 独立熔断;FailureThreshold <= 0 = 不启用(测试场景)
+	CircuitBreaker circuit.Config
+	// 熔断状态转变日志(nil = 不打)
+	CircuitLogger *zap.Logger
 }
 
 // Pool 管理一个 Provider 下的所有 Key
@@ -39,6 +50,10 @@ type Pool struct {
 	mu           sync.RWMutex
 	keys         []*Key
 	scheduler    Scheduler
+	// P-per-key-circuit: per-key 熔断器(key.ID → breaker,懒创建)。
+	// 5 个 5xx/timeout/connection 在窗口内只熔断这一把 key,
+	// 同 provider 的 healthy key 照常参与调度(2026-08-06 之前是 provider 级连坐)
+	breakers map[string]*circuit.Breaker
 	// P68: quota restore 回调槽(默认 nil = no-op)。
 	// 注入方是 quotacheck.Manager,Pool 不感知 quotacheck 包,避免 import cycle。
 	// 签名带 fromStatus:让 callback 知道状态变之前的值,用于 emit transition metric。
@@ -62,7 +77,46 @@ func NewPool(providerName string, keys []*Key, scheduler Scheduler, cfg Config) 
 		cfg:          cfg,
 		keys:         keys,
 		scheduler:    scheduler,
+		breakers:     make(map[string]*circuit.Breaker),
 	}
+}
+
+// breakerFor P-per-key-circuit: 取(或懒创建)指定 key 的熔断器。
+// 调用方必须已持 p.mu(写锁)— 懒创建会写 breakers map。
+// 未配置熔断(Config.CircuitBreaker.FailureThreshold <= 0)→ nil
+func (p *Pool) breakerFor(k *Key) *circuit.Breaker {
+	if p.cfg.CircuitBreaker.FailureThreshold <= 0 {
+		return nil
+	}
+	br, ok := p.breakers[k.ID]
+	if !ok {
+		br = circuit.New(k.ProviderName+"/"+k.ID, p.cfg.CircuitBreaker)
+		br.SetLogger(p.cfg.CircuitLogger)
+		p.breakers[k.ID] = br
+	}
+	return br
+}
+
+// filterBreakers P-per-key-circuit: 从 usable 里滤掉熔断中的 key。
+// 每个 key 调一次 Allow() — 同时处理三种状态:
+//   - CLOSED → 放行(无副作用)
+//   - OPEN 未超时 → 跳过;OPEN 超时 → 转 HALF_OPEN 放行首个试探请求
+//   - HALF_OPEN 有试探位 → 放行;已满 → 跳过
+//
+// 熔断只影响这一把 key — 同 provider 其他 key 不受牵连(2026-08-06 之前是
+// provider 级 healthStatus 连坐,现在 healthStatus 已移除)。
+func (p *Pool) filterBreakers(usable []*Key) []*Key {
+	if len(usable) == 0 {
+		return usable
+	}
+	out := usable[:0]
+	for _, k := range usable {
+		br := p.breakerFor(k)
+		if br == nil || br.Allow() {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // BuildPoolFromStrings P30 便捷函数:从明文 key 列表直接构造 Pool
@@ -177,6 +231,12 @@ func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}, prot
 		return nil, ErrNoAvailableKey
 	}
 
+	// P-per-key-circuit: 熔断过滤 — 只跳过熔断中的 key,同 provider 其他 key 不受影响
+	usable = p.filterBreakers(usable)
+	if len(usable) == 0 {
+		return nil, ErrNoAvailableKey
+	}
+
 	// P-quota-balance: token_plan tier 在进入 tier 过滤前按 Remaining 降序稳定排序
 	// 稳定排序保证 Remaining 相等时仍维持 RoundRobin 原始顺序
 	if tier == "token_plan" {
@@ -243,6 +303,11 @@ func (p *Pool) ReportSuccess(k *Key) {
 	k.LastUsedAt = time.Now()
 	k.UpdatedAt = k.LastUsedAt
 
+	// P-per-key-circuit: 成功信号 → 熔断器(HALF_OPEN 试探成功 → CLOSED;CLOSED 清窗口)
+	if br := p.breakerFor(k); br != nil {
+		br.RecordSuccess()
+	}
+
 	// 如果是 LIMITED(配额受限但仍可用),成功不改变状态
 	// 如果之前错误状态是 COOLING 但已恢复,这里就保持 ACTIVE
 }
@@ -280,6 +345,16 @@ func (p *Pool) ReportError(k *Key, errType string) {
 	k.ErrorCount++
 	k.LastErrorAt = now
 	k.UpdatedAt = now
+
+	// P-per-key-circuit: 5xx/timeout/connection → 该 key 熔断计数。
+	// 只熔断这一把 key,不连坐同 provider 其他 key(2026-08-06 之前 provider 级连坐)。
+	// 429(rate_limit)/quota/auth/invalid_request 不计数(与 circuit.shouldCount 一致)
+	switch errType {
+	case "server_error", "timeout", "connection":
+		if br := p.breakerFor(k); br != nil {
+			br.RecordFailure(errType)
+		}
+	}
 
 	var quotaCB func(*Key, KeyStatus)
 	var fromStatus KeyStatus
@@ -421,6 +496,13 @@ func (p *Pool) Keys() []Key {
 	out := make([]Key, len(p.keys))
 	for i, k := range p.keys {
 		out[i] = *k
+		// P-per-key-circuit: 刷新熔断快照(只读已有 breaker,不懒创建 —
+		// RLock 下写 map 是 race;breaker 内部自带锁)
+		if br, ok := p.breakers[k.ID]; ok {
+			st := br.State()
+			out[i].CircuitState = string(st)
+			out[i].CircuitOpen = st != circuit.StateClosed
+		}
 	}
 	return out
 }

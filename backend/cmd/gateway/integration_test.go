@@ -97,7 +97,6 @@ func buildGateway(t *testing.T, upstreamURL string) (*gin.Engine, *fakeUpstream)
 		Logger:  zap.NewNop(),
 		Usage:   proxy.NoopUsageRecorder{},
 		Metrics: proxy.NoopMetricsRecorder{},
-		Breaker: proxy.NoopCircuitReporter{},
 	})
 
 	r2 := gin.New()
@@ -230,7 +229,7 @@ func TestE2E_StreamThroughGateway(t *testing.T) {
 		},
 	})
 	eng := proxy.NewEngine(proxy.Config{Router: r2, Logger: zap.NewNop(),
-		Usage: proxy.NoopUsageRecorder{}, Metrics: proxy.NoopMetricsRecorder{}, Breaker: proxy.NoopCircuitReporter{},
+		Usage: proxy.NoopUsageRecorder{}, Metrics: proxy.NoopMetricsRecorder{},
 	})
 	routerEngine := gin.New()
 	routerEngine.POST("/v1/chat/completions", eng.HandleRequest)

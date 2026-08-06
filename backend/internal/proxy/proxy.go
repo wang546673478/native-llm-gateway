@@ -18,6 +18,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
@@ -34,7 +36,6 @@ type Engine struct {
 	router        *router.Router
 	usage         UsageRecorder
 	metrics       MetricsRecorder
-	breaker       CircuitReporter
 	tokenRecorder TokenUsageRecorder  // P13: TPM 计数回调(可选)
 	authn         *auth.Authenticator // P19: Provider binding 检查
 	accessLog     *accesslog.Recorder // P67: 接入日志 Recorder(可选,启用时为非 nil)
@@ -66,7 +67,6 @@ type Config struct {
 	Logger        *zap.Logger
 	Usage         UsageRecorder
 	Metrics       MetricsRecorder
-	Breaker       CircuitReporter
 	TokenRecorder TokenUsageRecorder  // P13: 可选
 	Authenticator *auth.Authenticator // P19: 可选,绑定 Provider 检查
 	AccessLog     *accesslog.Recorder // P67: 可选,nil 表示未启用
@@ -87,9 +87,6 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.Metrics == nil {
 		cfg.Metrics = NoopMetricsRecorder{}
 	}
-	if cfg.Breaker == nil {
-		cfg.Breaker = NoopCircuitReporter{}
-	}
 	if cfg.MaxRetry <= 0 {
 		cfg.MaxRetry = 3
 	}
@@ -101,7 +98,6 @@ func NewEngine(cfg Config) *Engine {
 		router:        cfg.Router,
 		usage:         cfg.Usage,
 		metrics:       cfg.Metrics,
-		breaker:       cfg.Breaker,
 		tokenRecorder: cfg.TokenRecorder,
 		authn:         cfg.Authenticator,
 		accessLog:     cfg.AccessLog,
@@ -382,6 +378,8 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 
 		// 用候选的 provider + key 调 Provider
 		req.Headers.Set("X-Request-Id", traceID)
+		// P-key-mismatch: 同 tryOneCandidate — 传已 acquire 的 key,避免双 acquire 错配
+		req.Key = result.Key
 		if result.Key != nil {
 			req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
 		}
@@ -492,9 +490,11 @@ func (e *Engine) doRequest(
 	req *provider.Request,
 	result *router.RouteResult,
 ) (*provider.Response, *provider.ProviderError) {
+	// P-per-key-circuit: 熔断器下沉到 keypool — RecordSuccess/RecordFailure
+	// 由 Pool.ReportSuccess / ReportError(server_error|timeout|connection)内部处理,
+	// 只熔断这一把 key,不连坐同 provider 其他 key
 	resp, err := pv.SendRequest(ctx, req)
 	if err == nil {
-		e.breaker.RecordSuccess(result.ProviderName)
 		e.reportKeySuccess(result)
 		return resp, nil
 	}
@@ -502,22 +502,18 @@ func (e *Engine) doRequest(
 	var pe *provider.ProviderError
 	if errors.As(err, &pe) {
 		e.reportKeyError(result, pe)
-		switch pe.ErrorType {
-		case provider.ErrorTypeServerError, provider.ErrorTypeTimeout, provider.ErrorTypeConnection:
-			e.breaker.RecordFailure(result.ProviderName, string(pe.ErrorType))
-		case provider.ErrorTypeRateLimit:
-			// Key Pool 会自动冷却这个 Key,无需 breaker 上报
-		}
 		return nil, pe
 	}
 
-	// 非 ProviderError 的错误(例如网络层未到 Provider)
-	e.breaker.RecordFailure(result.ProviderName, "unknown")
-	return nil, &provider.ProviderError{
+	// 非 ProviderError 的错误(例如网络层未到 Provider)— 也要上报 Pool,
+	// 让 connection 错误进 per-key 熔断计数(之前 "unknown" 不计入熔断)
+	pe = &provider.ProviderError{
 		ProviderName: result.ProviderName,
 		ErrorType:    provider.ErrorTypeConnection,
 		Message:      err.Error(),
 	}
+	e.reportKeyError(result, pe)
+	return nil, pe
 }
 
 // doStream 调一次 Provider.SendStreamRequest
@@ -554,7 +550,7 @@ func (e *Engine) doStream(
 	}
 
 	// 流式响应开始 — 此后不可 failover
-	e.breaker.RecordSuccess(result.ProviderName)
+	// P-per-key-circuit: 熔断上报已并入 Pool.ReportSuccess(per-key)
 	e.reportKeySuccess(result)
 
 	// Task 7 / F4: 全局流上限由 acquireStreamSlot 内部处理 — 在 chunk
@@ -994,6 +990,9 @@ func (e *Engine) tryOneCandidate(
 		entry.FinalModel = result.ModelID
 	}
 	req.Headers.Set("X-Request-Id", req.TraceID)
+	// P-key-mismatch: 把已 acquire 的 key 传给 Provider — 否则 Provider 内部
+	// 再 acquire 一次可能拿到不同 key,429 上报冷却标错 key(2026-08-06 实测)
+	req.Key = result.Key
 	if result.Key != nil {
 		req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
 	}
@@ -1038,7 +1037,36 @@ func (e *Engine) tryOneCandidate(
 		*outProviderName = result.ProviderName
 		*lastErr = perr
 	}
+	// P-failover-log: 失败尝试打日志 — 之前 failover 中间尝试完全无日志
+	// (failover 成功时 access log 只记最终 provider),2026-08-06 那次全链掉
+	// deepseek 只能靠旁证推断根因。现在每轮失败尝试直接可见:
+	// 哪个 provider + key + error_type + status,配合熔断器 transition 日志,
+	// 下波流量来了不用再猜
+	if *lastErr != nil {
+		e.logger.Info("candidate failed, failover",
+			zap.String("provider", result.ProviderName),
+			zap.String("key_id", keyIDOf(result.Key)),
+			zap.String("key_status", keyStatusOf(result.Key)),
+			zap.String("error_type", string((*lastErr).ErrorType)),
+			zap.Int("status", (*lastErr).StatusCode),
+			zap.String("trace_id", req.TraceID))
+	}
 	return false
+}
+
+// keyIDOf / keyStatusOf 兜底取 key 信息(Key 可能为 nil — 无 pool 的测试场景)
+func keyIDOf(k *keypool.Key) string {
+	if k == nil {
+		return ""
+	}
+	return k.ID
+}
+
+func keyStatusOf(k *keypool.Key) string {
+	if k == nil {
+		return ""
+	}
+	return string(k.Status)
 }
 
 // 总是回写到响应 header,方便客户端链路追踪

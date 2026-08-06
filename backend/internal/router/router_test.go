@@ -129,38 +129,6 @@ func TestRouter_ProtocolFilterRejectsMismatch(t *testing.T) {
 	}
 }
 
-func TestRouter_HealthFilterSkipsOpen(t *testing.T) {
-	mgr := newFakeManager(t,
-		&fakeProvider{name: "p1", proto: provider.ProtocolOpenAI, models: []string{"m1"}},
-		&fakeProvider{name: "p2", proto: provider.ProtocolOpenAI, models: []string{"m2"}},
-	)
-	r := NewRouter(zap.NewNop(), mgr, nil, Config{
-		Aliases: map[string]AliasConfig{
-			"x": {
-				Strategy: "priority",
-				Providers: []ProviderRoute{
-					{Name: "p1", Model: "m1", Priority: 1},
-					{Name: "p2", Model: "m2", Priority: 2},
-				},
-			},
-		},
-	})
-	r.SetHealthStatus("p1", true) // 标记 p1 OPEN
-
-	req := &provider.Request{Model: "x", Path: "/v1/chat/completions"}
-	it, err := r.Route(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	res, err := it.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if res.ProviderName != "p2" {
-		t.Errorf("got %s, want p2 (p1 OPEN should be skipped)", res.ProviderName)
-	}
-}
-
 func TestRouter_UnknownAliasReturnsErrNoRoute(t *testing.T) {
 	mgr := newFakeManager(t,
 		&fakeProvider{name: "p1", proto: provider.ProtocolOpenAI, models: []string{"known-model"}},

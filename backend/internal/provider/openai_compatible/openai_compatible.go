@@ -98,12 +98,18 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			Message:      "keypool not configured",
 		}
 	}
-	key, err := b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
-	if err != nil {
-		return nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			ErrorType:    provider.ErrorTypeConnection,
-			Message:      fmt.Sprintf("no available key: %v", err),
+	// P-key-mismatch: 优先用路由层已 acquire 的 key — 否则双 acquire 可能拿到
+	// 不同 key,429 上报冷却标到没发过请求的 healthy key 上(2026-08-06 实测)
+	key := req.Key
+	var err error
+	if key == nil {
+		key, err = b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
+		if err != nil {
+			return nil, &provider.ProviderError{
+				ProviderName: b.cfg.Name,
+				ErrorType:    provider.ErrorTypeConnection,
+				Message:      fmt.Sprintf("no available key: %v", err),
+			}
 		}
 	}
 
@@ -218,12 +224,17 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			Message:      "keypool not configured",
 		}
 	}
-	key, err := b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
-	if err != nil {
-		return nil, nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			ErrorType:    provider.ErrorTypeConnection,
-			Message:      fmt.Sprintf("no available key: %v", err),
+	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
+	key := req.Key
+	var err error
+	if key == nil {
+		key, err = b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
+		if err != nil {
+			return nil, nil, &provider.ProviderError{
+				ProviderName: b.cfg.Name,
+				ErrorType:    provider.ErrorTypeConnection,
+				Message:      fmt.Sprintf("no available key: %v", err),
+			}
 		}
 	}
 

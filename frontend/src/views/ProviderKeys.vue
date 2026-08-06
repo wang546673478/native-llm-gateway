@@ -99,6 +99,9 @@ interface ProviderKeyView {
   quota_kind: 'percent' | 'currency' | ''
   // P-provider-vendor: 该 key 允许的协议面(逗号分隔,空 = 全部)
   protocols: string
+  // P-per-key-circuit: per-key 熔断状态(circuit_open 时该 key 暂时不参与调度)
+  circuit_open: boolean
+  circuit_state: string
 }
 
 const keys = ref<ProviderKeyView[]>([])
@@ -216,6 +219,11 @@ const columns: DataTableColumns<ProviderKeyView> = [
       // P68: 3 个运行时状态 — ACTIVE / COOLING / QUOTA_EXCEEDED
       // P-no-disabled: 没有 DISABLED 终端状态(全部可自动恢复);
       // DISABLED 显示仅保留给手动关闭(enabled=false)的 key
+      // P-per-key-circuit: 熔断状态优先显示(熔断 = 该 key 暂时不参与调度,
+      // 30s 后半开放行自动恢复;只影响这一把 key,不影响同 provider 其他 key)
+      if (row.circuit_open) {
+        return h('span', { style: { color: '#d03050', fontWeight: 500 } }, '⚡ 熔断中')
+      }
       const status = (row.status || (row.enabled ? 'ACTIVE' : 'DISABLED')).toUpperCase()
       const map: Record<string, { color: string; label: string }> = {
         ACTIVE:          { color: '#18a058', label: '● 启用' },

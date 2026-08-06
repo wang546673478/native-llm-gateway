@@ -68,15 +68,14 @@ func WithAllowedModels(models []string) RouteOption {
 
 // Router 持有所有路由决策所需的状态
 type Router struct {
-	mu           sync.RWMutex
-	logger       *zap.Logger
-	manager      *provider.Manager
-	pools        map[string]*keypool.Pool
-	aliases      map[string]AliasConfig
-	catchAll     *AliasConfig // P-catch-all: 未知 model 名兜底(nil = 不兜底)
-	policies     map[string]policy.Policy
-	cfg          Config
-	healthStatus map[string]bool // P6 接 Circuit Breaker
+	mu       sync.RWMutex
+	logger   *zap.Logger
+	manager  *provider.Manager
+	pools    map[string]*keypool.Pool
+	aliases  map[string]AliasConfig
+	catchAll *AliasConfig // P-catch-all: 未知 model 名兜底(nil = 不兜底)
+	policies map[string]policy.Policy
+	cfg      Config
 }
 
 // NewRouter 构造 Router
@@ -88,13 +87,12 @@ func NewRouter(logger *zap.Logger, manager *provider.Manager, pools map[string]*
 		cfg.MaxAttempts = 3
 	}
 	r := &Router{
-		logger:       logger,
-		manager:      manager,
-		pools:        pools,
-		aliases:      cfg.Aliases,
-		catchAll:     cfg.CatchAll,
-		cfg:          cfg,
-		healthStatus: make(map[string]bool),
+		logger:   logger,
+		manager:  manager,
+		pools:    pools,
+		aliases:  cfg.Aliases,
+		catchAll: cfg.CatchAll,
+		cfg:      cfg,
 	}
 	r.policies = map[string]policy.Policy{
 		"priority": policy.NewPriorityPolicy(),
@@ -104,11 +102,6 @@ func NewRouter(logger *zap.Logger, manager *provider.Manager, pools map[string]*
 		"":         policy.NewPriorityPolicy(),
 	}
 	return r
-}
-
-// SetHealthStatus 由 Circuit Breaker 调用
-func (r *Router) SetHealthStatus(providerName string, open bool) {
-	r.healthStatus[providerName] = open
 }
 
 // ErrNoRoute 没有匹配路由
@@ -157,9 +150,8 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		if reqProto != "" && p.Protocol() != reqProto {
 			continue
 		}
-		if r.healthStatus[name] {
-			continue
-		}
+		// P-per-key-circuit: 熔断器已下沉到 keypool(per-key),provider 级
+		// healthStatus 已移除 — 单把 key 5xx 不再连坐整 provider 的 healthy key
 		// P-responses: /responses 透传只走原生支持 Responses API 的 provider
 		// (DeepSeek / MiniMax;Qwen / Gemini 不支持,硬发会 400/404 且
 		// 404 归类 model_not_found 非 retryable,会中断 failover)
@@ -312,9 +304,7 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		if reqProto != "" && pv.Protocol() != reqProto {
 			continue
 		}
-		if r.healthStatus[p.Name] {
-			continue
-		}
+		// P-per-key-circuit: provider 级健康过滤已移除 — 熔断器在 keypool(per-key)
 		out = append(out, p)
 	}
 	return out
@@ -531,10 +521,4 @@ func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
 		r.pools = make(map[string]*keypool.Pool)
 	}
 	r.pools[providerName] = pool
-}
-
-// SetProviderHealth 实现 circuit.ProviderHealth 接口
-// 由 Circuit Breaker 调用,告诉 Router 某个 Provider 是否 OPEN
-func (r *Router) SetProviderHealth(providerName string, open bool) {
-	r.healthStatus[providerName] = open
 }
