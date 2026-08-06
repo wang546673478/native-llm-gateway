@@ -185,6 +185,19 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint, proto string) (*Key, error) {
 // P-provider-vendor: proto 非空时只取 Protocols 为空或包含该协议的 key;空 = 不过滤
 // 该 tier 桶为空时直接返回 ErrNoAvailableKey,让 Router 推进到下一档候选
 func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}, proto string) (*Key, error) {
+	return p.acquireFromTierLocked(tier, allowedIDSet, "", proto)
+}
+
+// AcquireFromTierExcluding 从指定 tier 桶挑 key,排除指定 ID(换 key 重试用)
+// excludeID 为空 = 与 AcquireFromTier 等价
+func (p *Pool) AcquireFromTierExcluding(tier, excludeID string, proto string) (*Key, error) {
+	return p.acquireFromTierLocked(tier, nil, excludeID, proto)
+}
+
+// acquireFromTierLocked AcquireFromTier / AcquireFromTierExcluding 的公共实现。
+// 在 allowedIDSet 过滤后追加 exclude 检查:excludeID 非空时排除 ID 等于它的 key
+// (parseKeyIDUint 转换比较,与 allowedIDSet 过滤一致;excludeID 是 DB 数字 ID 字符串)
+func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}, excludeID string, proto string) (*Key, error) {
 	if tier == "" {
 		tier = "api" // 兜底
 	}
@@ -213,6 +226,10 @@ func (p *Pool) AcquireFromTier(tier string, allowedIDSet map[uint]struct{}, prot
 			if _, ok := allowedIDSet[id]; !ok {
 				continue
 			}
+		}
+		// Task3: 换 key 重试 — 排除刚失败的那把 key(excludeID 非空时)
+		if excludeID != "" && parseKeyIDUint(k.ID) == parseKeyIDUint(excludeID) {
+			continue
 		}
 		usable = append(usable, k)
 	}

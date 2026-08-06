@@ -667,6 +667,40 @@ func TestPool_ReportErrorQuotaPoll_MarksQuotaExceeded(t *testing.T) {
 	}
 }
 
+// Task3: AcquireFromTierExcluding — 换 key 重试时排除刚失败的那把 key
+// (Task 5 换 key 重试的底层原语;排除逻辑不依赖轮询位置)
+func TestPool_AcquireFromTierExcluding(t *testing.T) {
+	now := time.Now()
+	mkKey := func(id, tier string) *Key {
+		return &Key{
+			ID: id, ProviderName: "test", Name: "k" + id, Key: "sk",
+			Status: KeyStatusActive, BillingSource: tier,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	// pool: 2 个 key — "1"(billing_source=token_plan)、"2"(billing_source=token_plan)
+	keys := []*Key{mkKey("1", "token_plan"), mkKey("2", "token_plan")}
+	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+
+	// 排除 "1" → 必须返回 key "2",不能返回 "1"
+	k, err := pool.AcquireFromTierExcluding("token_plan", "1", "")
+	if err != nil {
+		t.Fatalf("AcquireFromTierExcluding: %v", err)
+	}
+	if k.ID != "2" {
+		t.Fatalf("got key %q, want %q (excluded key 1 must not be returned)", k.ID, "2")
+	}
+
+	// 连续第二次调用仍返回 "2"(排除逻辑不依赖轮询位置)
+	k, err = pool.AcquireFromTierExcluding("token_plan", "1", "")
+	if err != nil {
+		t.Fatalf("AcquireFromTierExcluding #2: %v", err)
+	}
+	if k.ID != "2" {
+		t.Fatalf("second call got key %q, want %q (exclusion must not depend on round-robin position)", k.ID, "2")
+	}
+}
+
 // P-quota-prefer: round-robin 不再把请求分给「已轮询且余额耗尽」的 key —
 // healthy key 应始终被选(MiniMax weige 1% 场景,2026-08-06 实测)
 func TestAcquireFromTier_SkipsPolledExhaustedKey(t *testing.T) {
