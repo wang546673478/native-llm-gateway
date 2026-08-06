@@ -88,6 +88,9 @@ type Manager struct {
 	// P-responses: provider name → 是否原生支持 Responses API(/v1/responses)
 	// LoadFromConfig / ReloadPricing 时填充
 	responsesAPI map[string]bool
+	// P-tier-failover: provider name → 配置的 endpoint(baseURL)
+	// LoadFromConfig 时填充,EndpointFor 查用(endpoint 改动需重启,ReloadPricing 不同步)
+	endpoints map[string]string
 }
 
 // NewManager 构造 Manager
@@ -100,6 +103,7 @@ func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 		billingSources: make(map[string]string),
 		defaultModels:  make(map[string]string),
 		responsesAPI:   make(map[string]bool),
+		endpoints:      make(map[string]string),
 	}
 }
 
@@ -149,6 +153,8 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 		m.defaultModels[name] = dm
 		// P-responses: Responses API 能力标记
 		m.responsesAPI[name] = pcfg.ResponsesAPI
+		// P-tier-failover: endpoint 映射(给 quotacheck.CheckQuota 提供 baseURL)
+		m.endpoints[name] = pcfg.Endpoint
 
 		p, err := m.registry.Create(name, factoryCfg)
 		if err != nil {
@@ -310,6 +316,14 @@ func (m *Manager) DefaultModelFor(name string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.defaultModels[name]
+}
+
+// EndpointFor P-tier-failover: 查 provider 的 endpoint(给 quotacheck.CheckQuota
+// 提供 baseURL)。未注册返回空串。
+func (m *Manager) EndpointFor(name string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.endpoints[name]
 }
 
 // Close 关闭所有 Provider
