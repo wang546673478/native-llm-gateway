@@ -12,6 +12,9 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 - 厂商(vendor)一个目录,内含多协议面注册名;同 vendor 共享 key 池
 - `RegisterGlobalWithProtocolVendor(注册名, 工厂, 协议, 厂商)` — vendor 参数决定共享/归一
 - 每个注册名都要 `quotacheck.RegisterBalancer`(token_plan 厂商必须有余额查询)
+- 无官方余额 API 的厂商:查控制台未文档化端点(社区逆向,如 MiMo)→ cookie 鉴权
+  (账号级,1 天过期)→ 放 config `quota_cookie` + 管理 API 热更新,balancer 按
+  `k.BillingSource` 分端点;cookie 过期轮询退化保守(踩坑 #19)
 - 原生支持 Responses API 的厂商标 `responses_api: true` + 配 `ResponsesPath`
 - 请求路径主动查额度走统一入口 quotacheck.CheckQuota(复用 RegisterBalancer 注册表),厂商包不需要写自己的查询调用
 
@@ -33,8 +36,8 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 - [ ] 厂商已确认;官方文档 URL 来自用户(非 URL 已要求重新提供、拉取失败已换);6 类提取项全覆盖:协议面 / 模型能力 / 定价(含单位换算)/ 余额 / 定制特性 / 入口(grep `anthropic|claude`);与现有 config 冲突已标差异
 - [ ] 每个协议面的注册名都有 `RegisterGlobalWithProtocolVendor`,vendor 都是厂商名
 - [ ] `cmd/gateway/main.go` 有该厂商的 blank import(漏了 init() 不跑,不进二进制)
-- [ ] 每个注册名都有 `RegisterBalancer`(有余额查询的厂商)
-- [ ] 同厂商所有 config 块 `billing_source` 一致
+- [ ] 每个注册名都有 `RegisterBalancer`(有余额查询的厂商;无官方 API → 控制台 cookie 端点,见踩坑 #19)
+- [ ] 同厂商所有 config 块 `billing_source` 一致(例外:mimo 双端点有意双值——按量/套餐各一套端点,靠 per-key BillingSource 隔离,balancer 按 key 分端点)
 - [ ] `responses_api` 与官方支持矩阵一致;支持的话 `ResponsesPath` 不拼错 /v1(端点已含 /v1 用 `/responses`)
 - [ ] 新厂商的 `default_model` 或 models[0] 是真实可用的模型 id
 - [ ] `registry_test.go` 断言了双注册(防未来误删)
@@ -52,3 +55,5 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 - 文档调研漏 anthropic 兼容章节 → 厂商只有 openai 面,Claude Code 用户用不了(真实教训:GLM 的 Claude API 兼容页在索引第 117 行,藏在 `/cn/guide/develop/claude/` 下,不 grep `anthropic|claude` 必漏)
 - 用户给的文档不是 URL / URL 拉取失败 → 先要求重新提供,别自己搜替代来源(官方文档是唯一权威)
 - 价格单位没换算 → 文档 0.42 元/M 直接抄进 `cost_per_1k`,价格差 1000 倍(÷1000 才进 config)
+- 同 vendor 多注册名共协议(如 mimo openai×2 + anthropic×2)→ 前端协议下拉去重(踩坑 #19)
+- 429 双义(限流 vs 套餐耗尽)厂商 → body 区分信号先实测,别假设
