@@ -180,3 +180,14 @@ type AccessLog struct {
 
 // TableName
 func (AccessLog) TableName() string { return "access_logs" }
+
+// MimoQuotaCookie P-mimo-quota: MIMO 控制台登录 cookie 持久化(单行表,ID 恒为 1)。
+// 敏感凭据 — 不在 API 返回明文,只在注入/更新时写入。
+type MimoQuotaCookie struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Cookie    string    `gorm:"column:cookie;size:8192" json:"-"`
+	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
+}
+
+// TableName
+func (MimoQuotaCookie) TableName() string { return "mimo_quota_cookie" }

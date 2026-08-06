@@ -81,7 +81,8 @@ func Migrate(db *gorm.DB) error {
 		&UsageRecord{},
 		&RoutingConfig{},
 		&GatewayKey{},
-		&AccessLog{}, // P67: 接入日志
+		&AccessLog{},         // P67: 接入日志
+		&MimoQuotaCookie{},   // P-mimo-quota: MIMO 控制台 cookie(单行)
 	}
 	if err := db.AutoMigrate(tables...); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)

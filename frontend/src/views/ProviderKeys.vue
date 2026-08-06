@@ -136,7 +136,9 @@ const vendorOptions = computed(() =>
 const protocolOptions = computed(() => {
   const v = providers.value.find(p => p.vendor === form.value.vendor)
   if (!v) return []
-  return v.names.map(n => ({ label: n.protocol, value: n.protocol }))
+  // 同一 vendor 可能多注册名共协议(如 mimo 有 openai×2 + anthropic×2 =
+  // 两个端点 × 两个协议面)— 去重,下拉只显示协议种类
+  return [...new Set(v.names.map(n => n.protocol))].map(p => ({ label: p, value: p }))
 })
 // 提交目标 provider_name = vendor 的第一个注册名(协议面任意,pool 共享)
 const targetProviderName = computed(() => {

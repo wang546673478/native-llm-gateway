@@ -334,6 +334,132 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  # --- 小米 MIMO (OpenAI + Anthropic 兼容 × 按量付费/套餐 两套端点) ---
+  # 文档:https://mimo.mi.com/docs/zh-CN/quick-start/summary/welcome
+  # 按量付费:https://api.xiaomimimo.com/v1(key sk-xxx);套餐:https://token-plan-cn.xiaomimimo.com/v1(key tp-xxx)
+  # 两套 key 不通用,加 key 时按 billing 类型区分(sk- 选 api,tp- 选 token_plan)
+  # 鉴权:Authorization: Bearer 或 api-key: header;思考模式:chat 面 thinking.type、
+  # responses 面 reasoning.effort;思考模式不支持 temperature/top_p(强制 1.0/0.95)
+  # 429 = 限流 或 套餐额度耗尽(双义);402 = 按量余额不足
+  # 余额/套餐查询:控制台未文档化端点(cookie 鉴权,约 1 天过期)— balancer 已接入,
+  # cookie 配在下方 quota_cookie(账号级,敏感凭据,只放本地 config.yaml,不放本示例)
+  # 套餐条款(已确认接入):配额仅限编程工具场景,禁止 API 调用后端
+  # 价格(¥/M,÷1000 进 cost_per_1k):pro 命中0.025/未命中3.00/输出6.00;v2.5 0.02/1.00/2.00
+  # v2 系列(mimo-v2-pro/v2-omni/v2-flash)已于 2026-06-30 弃用,勿配置
+  mimo:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://api.xiaomimimo.com/v1"
+    protocol: "openai"
+    timeout: 60s
+    responses_api: true            # 原生支持 /responses(endpoint 已含 /v1)
+    # quota_cookie: 控制台登录 cookie(账号级,约 1 天过期)— 敏感凭据,只放本地
+    #   config.yaml;抓取方法:浏览器登录 https://platform.xiaomimimo.com/console/plan-manage
+    #   → F12 → 复制任意请求的完整 Cookie header 值(含 api-platform_serviceToken=...)
+    #   过期后轮询自动退化(错误码驱动,保守安全),重新抓取填上重启即可
+    # quota_cookie: ""
+    models:
+      - id: "mimo-v2.5-pro"
+        aliases: []
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.006
+        cost_per_1k_cache_read: 0.000025
+      - id: "mimo-v2.5"
+        aliases: ["mimo"]
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.002
+        cost_per_1k_cache_read: 0.00002
+    default_model: "mimo-v2.5"     # 便宜优先,pro 按需显式指定
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # 同一供应商,Anthropic 兼容端点,共享 key 池(Claude Code 走这里)
+  mimo-anthropic:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://api.xiaomimimo.com/anthropic"
+    protocol: "anthropic"
+    timeout: 60s
+    models:
+      - id: "mimo-v2.5-pro"
+        aliases: []
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.006
+        cost_per_1k_cache_read: 0.000025
+      - id: "mimo-v2.5"
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.002
+        cost_per_1k_cache_read: 0.00002
+    default_model: "mimo-v2.5"
+    # force_thinking_disabled: true  # 若 Claude Code compact 后 400(thinking 块未回传)再开,与 DeepSeek 同款
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # Token Plan 套餐端点(优先路由,额度耗尽 429 自动降级到 api 层)
+  mimo-token-plan:
+    enabled: true
+    billing_source: "token_plan"
+    endpoint: "https://token-plan-cn.xiaomimimo.com/v1"
+    protocol: "openai"
+    timeout: 60s
+    responses_api: true
+    models:
+      - id: "mimo-v2.5-pro"
+        aliases: []
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.006
+        cost_per_1k_cache_read: 0.000025
+      - id: "mimo-v2.5"
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.002
+        cost_per_1k_cache_read: 0.00002
+    default_model: "mimo-v2.5"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  mimo-token-plan-anthropic:
+    enabled: true
+    billing_source: "token_plan"
+    endpoint: "https://token-plan-cn.xiaomimimo.com/anthropic"
+    protocol: "anthropic"
+    timeout: 60s
+    models:
+      - id: "mimo-v2.5-pro"
+        aliases: []
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.006
+        cost_per_1k_cache_read: 0.000025
+      - id: "mimo-v2.5"
+        aliases: []
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.002
+        cost_per_1k_cache_read: 0.00002
+    default_model: "mimo-v2.5"
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
   # --- Google Gemini (Google 协议) ---
   # 文档:https://ai.google.dev/gemini-api/docs/models
   # 端点:POST {endpoint}/models/{model}:generateContent
@@ -426,18 +552,31 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-# 路由规则 — 唯一规则:catch_all 自动模式(无路由表,alias/chains 已退役)
+# 路由规则 — 唯一规则:catch_all(无路由表,alias/chains 已退役)
 routing:
+  # 自动模式(catch_all: {} 空规则):所有 enabled provider 自动参与,
   #   - 客户端发任何 model 名(gpt-5 / qwen-plus / 任意探测名)→ 一律走这条链,
   #     客户端模型名只是标签,不参与路由决策(真实名也不直连声明它的 provider)
-  #   - 所有 enabled provider 自动参与,协议面按请求路径过滤
-  #     (/v1/messages → anthropic 面,/v1/chat/completions → openai 面)
+  #   - 协议面按请求路径过滤(/v1/messages → anthropic 面,/v1/chat/completions → openai 面)
   #   - 每个 provider 用它的默认模型承接:显式 default_model 或 models 第一个声明
-  #   - tier 计费自动(token_plan → api → free):minimax token plan 额度耗尽 →
-  #     自动切 api 计费的 provider,无需改配置;没 key 的 provider 自动跳过
-  #   - 链上能用哪些模型由 gateway key 的「允许的模型」白名单细化(逐候选校验)
-  #   - 加新 provider(如 kimi):config 加块 + 页面加 key 即自动进链,不用维护路由表
-  # 也可写显式 providers 列表(自定义参与方/优先级)
+  #   - tier 计费自动(token_plan → api → free):token plan 额度耗尽 → 自动切 api
+  #     计费的 provider,无需改配置;没 key 的 provider 自动跳过
+  #   - 同 tier 桶内候选按 name 确定性排序(自动模式无优先级概念)
+  # 显式模式(providers 列表):自定义参与方与优先级 — priority 数字小者先试;
+  # tier 分桶在排序之后,priority 只影响同 tier 桶内顺序,「token_plan 未耗尽
+  # 不落 api」不变式不受影响。注意:显式列表 = 未列出的 provider 不再参与链!
+  # 新增 provider 必须同步加进列表,否则它不会进链
+  # catch_all:
+  #   providers:
+  #     - name: "minimax"
+  #       model: "MiniMax-M3"
+  #       priority: 1
+  #     - name: "mimo-token-plan-anthropic"
+  #       model: "mimo-v2.5"
+  #       priority: 2
+  #     - name: "deepseek-anthropic"
+  #       model: "deepseek-v4-flash"
+  #       priority: 3
   catch_all: {}
   default_strategy: "priority"
 

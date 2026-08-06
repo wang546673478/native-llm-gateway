@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,8 +14,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
+	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/provider/mimo"
 	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 	"github.com/wang546673478/native-llm-gateway/internal/usage"
@@ -40,6 +43,15 @@ type Admin struct {
 	Keys      []GatewayKeyInfo
 	AccessLog *accesslog.Recorder // P67: 接入日志 Recorder(可能为 no-op)
 	QuotaMgr  *quotacheck.Manager // P68/P-quota-balance: quota 恢复 worker(nil 时前端拿到 default)
+	// P-mimo-quota: MIMO 控制台 cookie 持久化仓库(可能为 nil — 无 DB 时跳过持久化)
+	MimoCookieStore MimoQuotaCookieStore
+}
+
+// MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
+// 接口定义在 handler,由 auth.NewMimoQuotaCookieStore 实现注入。
+type MimoQuotaCookieStore interface {
+	Get(ctx context.Context) (*dbpkg.MimoQuotaCookie, error)
+	Upsert(ctx context.Context, cookie string) error
 }
 
 // NewAdmin 构造 Admin(caller 端负责注入依赖)。
@@ -56,17 +68,19 @@ func NewAdmin(
 	keys []GatewayKeyInfo,
 	accessLogR *accesslog.Recorder,
 	quotaMgr *quotacheck.Manager,
+	mimoCookieStore MimoQuotaCookieStore,
 ) *Admin {
 	return &Admin{
-		Manager:   mgr,
-		Registry:  reg,
-		Pools:     pools,
-		Router:    r,
-		Usage:     usageRepo,
-		Aliases:   aliases,
-		Keys:      keys,
-		AccessLog: accessLogR,
-		QuotaMgr:  quotaMgr,
+		Manager:        mgr,
+		Registry:       reg,
+		Pools:          pools,
+		Router:         r,
+		Usage:          usageRepo,
+		Aliases:        aliases,
+		Keys:           keys,
+		AccessLog:      accessLogR,
+		QuotaMgr:       quotaMgr,
+		MimoCookieStore: mimoCookieStore,
 	}
 }
 
@@ -85,6 +99,10 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/providers", a.listProviders)
 	r.GET("/providers/registered", a.listRegisteredProviders)
 	r.GET("/providers/:name", a.getProvider)
+	// P-mimo-quota: MIMO 控制台 cookie 查询/更新(cookie 约 1 天过期,过期后
+	// 轮询退化保守;POST 一条命令热更新,不用改 config 重启)
+	r.GET("/providers/mimo/quota-cookie", a.getMimoQuotaCookie)
+	r.POST("/providers/mimo/quota-cookie", a.postMimoQuotaCookie)
 	r.GET("/routing", a.listRouting)
 	r.GET("/usage", a.queryUsage)
 	r.GET("/usage/aggregate", a.aggregateUsage)
@@ -226,6 +244,64 @@ func (a *Admin) getProvider(c *gin.Context) {
 		info["key_pool"] = pool.Status()
 	}
 	c.JSON(http.StatusOK, info)
+}
+
+// getMimoQuotaCookie GET /api/v1/providers/mimo/quota-cookie
+// 返回 cookie 配置状态(不回明文,只给掩码)
+func (a *Admin) getMimoQuotaCookie(c *gin.Context) {
+	out := gin.H{"configured": false, "updated_at": nil, "cookie_masked": ""}
+	if a.MimoCookieStore != nil {
+		row, err := a.MimoCookieStore.Get(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query_failed", "detail": err.Error()})
+			return
+		}
+		if row != nil && row.Cookie != "" {
+			out["configured"] = true
+			out["updated_at"] = row.UpdatedAt
+			out["cookie_masked"] = maskMimoCookie(row.Cookie)
+		}
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// postMimoQuotaCookie POST /api/v1/providers/mimo/quota-cookie {"cookie": "..."}
+// 验证 → 持久化(DB)→ 热注入(内存)。验证失败不写入。
+// 抓取方法:浏览器登录 platform.xiaomimimo.com → F12 → 复制任意请求的完整 Cookie。
+func (a *Admin) postMimoQuotaCookie(c *gin.Context) {
+	var body struct {
+		Cookie string `json:"cookie" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Cookie) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "detail": "body must include non-empty 'cookie'"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	// 先验证候选 cookie(打一次 usage 端点;失败 = 过期/无效,不写入)
+	if err := mimo.ValidateQuotaCookie(ctx, strings.TrimSpace(body.Cookie)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  "cookie_invalid",
+			"detail": fmt.Sprintf("cookie rejected by MIMO: %v", err),
+		})
+		return
+	}
+	if a.MimoCookieStore != nil {
+		if err := a.MimoCookieStore.Upsert(c.Request.Context(), body.Cookie); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "persist_failed", "detail": err.Error()})
+			return
+		}
+	}
+	mimo.SetQuotaCookie(body.Cookie)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "mimo quota cookie updated"})
+}
+
+// maskMimoCookie 只留 cookie 前 24 字符,回显时防泄露
+func maskMimoCookie(cookie string) string {
+	if len(cookie) <= 24 {
+		return "***"
+	}
+	return cookie[:24] + "..."
 }
 
 // embedJSONBody 把 body 字节嵌入导出样本:合法 JSON 原样内嵌(嵌套对象,

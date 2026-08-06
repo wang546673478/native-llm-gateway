@@ -125,6 +125,11 @@ type Provider struct {
 	// DeepSeek /anthropic 把 Claude Code 的 thinking:adaptive 当 enabled 处理,严格校验
 	// 历史 thinking 块(compact 会剥离) → 400 "content[].thinking ... must be passed back"
 	ForceThinkingDisabled bool `mapstructure:"force_thinking_disabled"`
+	// QuotaCookie P-mimo-quota: MIMO 控制台登录 cookie(账号级,全量 Cookie header,
+	// 约 1 天过期)。仅 mimo 厂商使用 — 其套餐/余额查询端点(未文档化)用 cookie
+	// 鉴权而非 API key。启动时注入 balancer;空 = balancer 停用(错误码驱动)。
+	// 敏感凭据:只放 gitignored 的本地 config.yaml,不放 config.example.yaml
+	QuotaCookie string `mapstructure:"quota_cookie"`
 }
 
 // ProviderModel Provider 模型声明

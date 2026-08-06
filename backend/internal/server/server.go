@@ -25,6 +25,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/provider/mimo"
 	"github.com/wang546673478/native-llm-gateway/internal/proxy"
 	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
@@ -207,6 +208,20 @@ func injectPools(manager *provider.Manager, pools map[string]*keypool.Pool, logg
 // buildKeyPools 为每个 enabled Provider 构造一个 KeyPool
 // P30:key 从 DB (provider_api_keys 表) 读,不用 config.yaml
 func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[string]*keypool.Pool {
+	// P-mimo-quota: MIMO 控制台 cookie 启动注入(套餐/余额查询端点用 cookie 鉴权,
+	// 非 API key;约 1 天过期,过期后轮询退化保守)。
+	// 优先级:DB 持久化值(API 更新过)> config bootstrap(首次写入 DB)。
+	// 之后日常更新走 POST /api/v1/providers/mimo/quota-cookie,不用改 config 重启。
+	ctx := context.Background()
+	cookieStore := auth.NewMimoQuotaCookieStore(db)
+	if row, err := cookieStore.Get(ctx); err == nil && row != nil && row.Cookie != "" {
+		mimo.SetQuotaCookie(row.Cookie)
+	} else if m := cfg.Providers["mimo"]; m.QuotaCookie != "" {
+		mimo.SetQuotaCookie(m.QuotaCookie)
+		if err := cookieStore.Upsert(ctx, m.QuotaCookie); err != nil {
+			logger.Warn("persist mimo quota cookie bootstrap failed", zap.Error(err))
+		}
+	}
 	out := make(map[string]*keypool.Pool)
 	sched := keypool.NewScheduler(cfg.KeyPool.KeyRotation)
 	store := auth.NewProviderKeyStore(db)
@@ -639,6 +654,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		gkInfos,
 		s.accessR, // P67: 接入日志 Recorder(可能为 no-op)
 		s.quotaM,  // P68 / P-quota-balance: quota 恢复 worker(可能为 nil)
+		auth.NewMimoQuotaCookieStore(s.db), // P-mimo-quota: cookie 持久化(单行)
 	)
 	admin.Register(r.Group("/api/v1"))
 
