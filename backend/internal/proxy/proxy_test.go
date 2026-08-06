@@ -22,6 +22,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
 
@@ -39,6 +40,8 @@ type fakeProvider struct {
 	streamMidErr error
 	// 触发错误的 error(如果设置,SendRequest 返回这个)
 	err error
+	// Task 5: 按 key ID 区分的错误(换 key 重试用) — 命中时优先于 p.err
+	errByKey map[string]error
 	// 记录收到的请求
 	gotBody   []byte
 	gotAuth   string
@@ -60,10 +63,20 @@ func (p *fakeProvider) recordCall(req *provider.Request) {
 	p.callCount++
 }
 
+// errFor 返回本请求应触发的错误:按 key ID 优先,否则全局 err
+func (p *fakeProvider) errFor(req *provider.Request) error {
+	if req.Key != nil && p.errByKey != nil {
+		if err, ok := p.errByKey[req.Key.ID]; ok {
+			return err
+		}
+	}
+	return p.err
+}
+
 func (p *fakeProvider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	p.recordCall(req)
-	if p.err != nil {
-		return nil, p.err
+	if err := p.errFor(req); err != nil {
+		return nil, err
 	}
 	hdrs := http.Header{}
 	for k, vs := range p.respHdrs {
@@ -88,8 +101,8 @@ func (p *fakeProvider) SendRequest(ctx context.Context, req *provider.Request) (
 
 func (p *fakeProvider) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	p.recordCall(req)
-	if p.err != nil {
-		return nil, nil, p.err
+	if err := p.errFor(req); err != nil {
+		return nil, nil, err
 	}
 	ch := make(chan *provider.StreamChunk, len(p.streamChunks)+2)
 	for _, c := range p.streamChunks {
@@ -449,6 +462,256 @@ func TestCopyResponseHeadersStripsHopByHop(t *testing.T) {
 // silence unused if some imports trimmed
 var _ = json.NewEncoder
 var _ = bytes.NewReader
+
+// ============================================================================
+// Task 5: 分层 failover — 错误分类路由(行为矩阵 6 行)
+// ============================================================================
+
+// mkPool 构造一个含若干 key 的 Pool,全部属于指定 tier(BillingSource)。
+// key ID 用纯数字(parseKeyIDUint 能解析,AcquireFromTierExcluding 的排除才生效)
+func mkPool(providerName string, keyIDs []string, tier string) *keypool.Pool {
+	now := time.Now()
+	keys := make([]*keypool.Key, 0, len(keyIDs))
+	for _, id := range keyIDs {
+		keys = append(keys, &keypool.Key{
+			ID: id, ProviderName: providerName, Name: id, Key: "sk-" + id,
+			Status: keypool.KeyStatusActive, BillingSource: tier,
+			CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	return keypool.NewPool(providerName, keys, nil, keypool.Config{})
+}
+
+// buildEngineMulti 构造多 provider / 每 provider 多 key 的 Engine(Task 5 测试用)
+// pools: providerName → Pool;providers 里每个都要有对应的 Manager 配置
+func buildEngineMulti(t *testing.T, providers []*fakeProvider, pools map[string]*keypool.Pool, aliases map[string]router.AliasConfig) (*Engine, *recordingUsage) {
+	t.Helper()
+	gin.SetMode(gin.ReleaseMode)
+
+	reg := provider.NewRegistry()
+	for _, p := range providers {
+		p := p
+		reg.Register(p.Name(), func(cfg provider.ProviderConfig) (provider.Provider, error) { return p, nil })
+	}
+	mgr := provider.NewManager(reg, zap.NewNop())
+	cfg := provider.ManagerConfig{Providers: map[string]provider.ManagerProviderConfig{}}
+	for _, p := range providers {
+		cfg.Providers[p.Name()] = provider.ManagerProviderConfig{
+			Enabled: true, Protocol: p.Protocol(), Models: p.models, APIKeys: []string{"sk-test"},
+		}
+	}
+	if err := mgr.LoadFromConfig(context.Background(), &cfg); err != nil {
+		t.Fatalf("LoadFromConfig: %v", err)
+	}
+	r := router.NewRouter(zap.NewNop(), mgr, pools, router.Config{Aliases: aliases})
+
+	rec := &recordingUsage{}
+	accessR, err := accesslog.NewRecorder(accesslog.RecorderConfig{}, nil, zap.NewNop())
+	if err != nil {
+		t.Fatalf("new accesslog recorder: %v", err)
+	}
+	engine := NewEngine(Config{
+		Router: r, Logger: zap.NewNop(), Usage: rec, Metrics: NoopMetricsRecorder{}, AccessLog: accessR,
+	})
+	return engine, rec
+}
+
+// doProxyRequest 发一个非流式 /v1/chat/completions 请求
+func doProxyRequest(e *Engine, body string) *httptest.ResponseRecorder {
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.POST("/v1/chat/completions", e.HandleRequest)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// t5Alias 返回标准的两候选 alias(minimax token_plan → deepseek api)
+func t5Alias(extra ...router.ProviderRoute) map[string]router.AliasConfig {
+	providers := []router.ProviderRoute{
+		{Name: "mm", Model: "m", Priority: 1},
+		{Name: "ds", Model: "m", Priority: 2},
+	}
+	providers = append(providers, extra...)
+	return map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: providers},
+	}
+}
+
+// errBalancer 一个永远返回错误的 fake Balancer(CheckQuota 查询失败 → 未知)
+type errBalancer struct{}
+
+func (errBalancer) FetchBalance(ctx context.Context, baseURL string, k *keypool.Key) (quotacheck.Balance, error) {
+	return quotacheck.Balance{}, errors.New("balance query failed")
+}
+
+// 1) 网络类层内穷尽 → 失败返回,不降档(不变式)
+//    provider mm(token_plan) 2 把 key 都返回 connection 错误;
+//    provider ds(api) healthy → 最终必须 502/超时,请求不能到 ds
+func TestProxy_NetworkExhaustedInTier_FailsWithoutDowngrade(t *testing.T) {
+	connErr := &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey: map[string]error{"1": connErr, "2": connErr}}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502(token_plan 层网络穷尽不降档); body = %s", w.Code, w.Body.String())
+	}
+	if ds.callCount != 0 {
+		t.Errorf("deepseek called %d times, want 0(层内未确认耗尽,绝不能落 api 层)", ds.callCount)
+	}
+	if mm.callCount != 2 {
+		t.Errorf("minimax called %d times, want 2(两把 key 各试一次:原 key + 换 key 重试)", mm.callCount)
+	}
+}
+
+// 2) 额度类全层穷尽 → 降档 api 层成功
+//    mm(token_plan) 返回 quota_exceeded;ds(api) healthy → 200,provider=ds
+func TestProxy_QuotaExhausted_DowngradesToApi(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		err: &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusPaymentRequired, ErrorType: provider.ErrorTypeQuotaExceeded, Message: "quota exceeded"}}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(额度耗尽应降档到 api); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ds-ok") {
+		t.Errorf("response = %s, want deepseek 的响应(降档后 provider=deepseek)", w.Body.String())
+	}
+	if mm.callCount != 1 || ds.callCount != 1 {
+		t.Errorf("call counts: mm=%d ds=%d, want 1/1", mm.callCount, ds.callCount)
+	}
+}
+
+// 3) 换 key 重试:key-1 connection 失败 → 同 provider key-2 成功(不走 failover)
+//    mm 2 把 key:key-1 connection 错误,key-2 healthy → 200,provider=mm
+func TestProxy_RetryWithSecondKey(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey: map[string]error{"1": &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}},
+		respStatus: 200, respBody: `{"id":"mm-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(换 key 重试成功); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mm-ok") {
+		t.Errorf("response = %s, want minimax 的响应", w.Body.String())
+	}
+	if mm.callCount != 2 {
+		t.Errorf("minimax called %d times, want 2(key-1 失败 + key-2 成功)", mm.callCount)
+	}
+	// 第二次请求必须用的是 key-2(Auth header 应为 Bearer sk-2)
+	if mm.gotAuth != "Bearer sk-2" {
+		t.Errorf("final request auth = %q, want Bearer sk-2(换 key 后必须用新 key 发)", mm.gotAuth)
+	}
+}
+
+// 4) 主动查询失败 → 按未耗尽:继续层内尝试(不降档)
+//    mm(token_plan, 1 把 key connection 失败,CheckQuota 返回 error)
+//    ds(api) healthy → 请求失败返回,不进 ds
+func TestProxy_CheckQuotaError_StaysInTier(t *testing.T) {
+	// 注册一个 balance 查询必失败的 balancer(查询失败 = 未知 → 按未耗尽处理)
+	quotacheck.RegisterBalancer("mm-qerr", errBalancer{})
+
+	mm := &fakeProvider{name: "mm-qerr", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		err: &provider.ProviderError{ProviderName: "mm-qerr", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm-qerr": mkPool("mm-qerr", []string{"1"}, "token_plan"),
+		"ds":      mkPool("ds", []string{"1"}, "api"),
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "mm-qerr", Model: "m", Priority: 1},
+			{Name: "ds", Model: "m", Priority: 2},
+		}},
+	})
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502(额度查询失败=未知,按未耗尽不降档); body = %s", w.Code, w.Body.String())
+	}
+	if ds.callCount != 0 {
+		t.Errorf("deepseek called %d times, want 0(无额度证据,请求不能到 api 层)", ds.callCount)
+	}
+	if mm.callCount != 1 {
+		t.Errorf("minimax called %d times, want 1", mm.callCount)
+	}
+}
+
+// 5) 同层换 provider:mm 全网络失败 → 同层 kimi(token_plan) 成功
+//    两个 token_plan provider + 一个 api provider → 200,provider=kimi
+func TestProxy_SameTierNextProvider(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		err: &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}}
+	kimi := &fakeProvider{name: "kimi", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"kimi-ok"}`}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, kimi, ds}, map[string]*keypool.Pool{
+		"mm":   mkPool("mm", []string{"1"}, "token_plan"),
+		"kimi": mkPool("kimi", []string{"1"}, "token_plan"),
+		"ds":   mkPool("ds", []string{"1"}, "api"),
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "mm", Model: "m", Priority: 1},
+			{Name: "kimi", Model: "m", Priority: 2},
+			{Name: "ds", Model: "m", Priority: 3},
+		}},
+	})
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(同层下个 provider 承接); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "kimi-ok") {
+		t.Errorf("response = %s, want kimi 的响应(同层 token_plan 换 provider)", w.Body.String())
+	}
+	if ds.callCount != 0 {
+		t.Errorf("deepseek called %d times, want 0(同层还有候选,不该降档到 api)", ds.callCount)
+	}
+}
+
+// 6) 不可重试错误直接失败:invalid_request 不重试不降档(现有语义回归)
+//    mm 返 400 invalid_request;ds(api) healthy → 400 透传,请求不能到 ds
+func TestProxy_InvalidRequest_NoRetry(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		err: &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusBadRequest, ErrorType: provider.ErrorTypeInvalidRequest, Message: "bad model"}}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400(invalid_request 透传); body = %s", w.Code, w.Body.String())
+	}
+	if ds.callCount != 0 {
+		t.Errorf("deepseek called %d times, want 0(不可重试错误不 failover)", ds.callCount)
+	}
+	if mm.callCount != 1 {
+		t.Errorf("minimax called %d times, want 1(不重试)", mm.callCount)
+	}
+}
 
 // TestStreamBuffer_NoLeakAcrossChunks 验证 F4 streamCnt 不会因为 per-chunk
 // 调用而泄漏 — 这是旧实现里的一个 critical bug:

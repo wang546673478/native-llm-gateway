@@ -23,6 +23,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
 
@@ -355,77 +356,12 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		}
 	}
 
-	// 5. 依次尝试,failover
-	attempts := 0
-	for {
-		if attempts >= e.maxRetry {
-			break
-		}
-		attempts++
-
-		result, err := iter.Next()
-		if err != nil {
-			e.logger.Info("P54 DEBUG: no more candidates", zap.Error(err))
-			// 没更多候选
-			break
-		}
-		e.logger.Info("P54 DEBUG: trying",
-			zap.String("provider", result.ProviderName),
-			zap.String("key_id", result.Key.ID),
-			zap.String("key_status", string(result.Key.Status)),
-			zap.String("model", result.ModelID),
-			zap.Int("attempt", attempts))
-
-		// 用候选的 provider + key 调 Provider
-		req.Headers.Set("X-Request-Id", traceID)
-		// P-key-mismatch: 同 tryOneCandidate — 传已 acquire 的 key,避免双 acquire 错配
-		req.Key = result.Key
-		if result.Key != nil {
-			req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
-		}
-		// P-catch-all: 按当前候选重写 body 的 model 字段(与 tryOneCandidate 同一逻辑)
-		if newBody, ok2 := rewriteModelField(req.Body, result.ModelID); ok2 {
-			req.Body = newBody
-		}
-
-		// 选 Provider 实例
-		pv, ok := e.router.Manager().Get(result.ProviderName)
-		if !ok {
-			continue
-		}
-
-		start := time.Now()
-		if isStream {
-			ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result, entry)
-			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
-			if ok {
-				e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, entryErrorType(entry), isStream, streamUsage)
-				lastProviderName = result.ProviderName
-				return
-			}
-			lastProviderName = result.ProviderName
-			lastErr = perr
-			if perr != nil && !errorIsRetryable(perr) {
-				break
-			}
-		} else {
-			resp, perr := e.doRequest(ctx, pv, req, result)
-			e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), false, perr)
-			if perr == nil && resp != nil {
-				e.writeNonStreamResponse(c, req, resp, result, time.Since(start), entry)
-				lastProviderName = result.ProviderName
-				return
-			}
-			lastProviderName = result.ProviderName
-			lastErr = perr
-			if perr != nil && !errorIsRetryable(perr) {
-				break
-			}
-		}
-	}
-
-	// 所有尝试都失败
-	e.handleAllFailed(c, req, lastErr, traceID)
+	// 5. 依次尝试,failover — Task 5 分层语义:
+	//    网络类(connection/timeout/server_error)同 provider 换 key 重试 →
+	//    主动查额度 → 层内换候选;额度类(quota_exceeded/rate_limit)记证据 →
+	//    层内换候选,全层证据齐了才降档;同层穷尽且无额度证据 → 失败返回不降档。
+	//    层切换由候选 Tier 变化判定(见 runCandidateLoop)。
+	e.runCandidateLoop(c, ctx, req, iter, nil, &lastProviderName, &lastErr, entry)
 }
 
 // classifyError 把 HTTP status + 上游错误翻译成 error_type 枚举(spec §1.2)
@@ -915,44 +851,111 @@ func statusFromErr(pe *provider.ProviderError) int {
 // (P19:把 provider-binding 检查 pass 的第一个候选"放回"循环)
 // P67: 透传 outProviderName / outLastErr 让外层 handle() 的 defer 拿得到
 // Task 7: 透传 entry 让非流式分支能写 access log 响应 body 文件
+// Task 5: 与 handle() 主循环共用 runCandidateLoop,分层 failover 逻辑只有一份
 func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *provider.Request, iter *router.RouteIterator, first *router.RouteResult, outProviderName *string, outLastErr **provider.ProviderError, entry *accesslog.AccessEntry) {
+	e.runCandidateLoop(c, ctx, req, iter, first, outProviderName, outLastErr, entry)
+}
+
+// candidateOutcome 描述 tryCandidate 之后循环应该做什么
+type candidateOutcome int
+
+const (
+	outcomeOK          candidateOutcome = iota // 请求已成功处理,调用方直接 return
+	outcomeFatal                               // 不可重试错误 — 调用方 handleAllFailed 收尾(透传原错误)
+	outcomeContinue                            // 继续下一候选(可携带额度证据)
+)
+
+// runCandidateLoop 候选循环 — Task 5 分层 failover 的唯一实现。
+// start != nil 时先处理它(探针路径),之后从 iter.Next() 继续。
+// 语义:
+//   - 层切换判定:候选的 Tier 变了 = 上一层候选已穷尽
+//   - 上一层穷尽且无额度证据 → handleAllFailed 失败返回,不降档(不变式)
+//   - 上一层穷尽且有额度证据 → 接受新 tier 候选(降档),证据清零
+//   - 所有失败统一由 handleAllFailed 收尾(含不可重试透传)
+func (e *Engine) runCandidateLoop(
+	c *gin.Context,
+	ctx context.Context,
+	req *provider.Request,
+	iter *router.RouteIterator,
+	start *router.RouteResult,
+	outProviderName *string,
+	outLastErr **provider.ProviderError,
+	entry *accesslog.AccessEntry,
+) {
 	attempts := 0
+	currentTier := ""
+	quotaEvidenceInTier := false // 当前层是否出现过额度类证据(quota_exceeded / rate_limit / 确认耗尽)
 
-	// 先处理 first
-	if e.tryOneCandidate(c, ctx, req, first, outProviderName, outLastErr, entry) {
-		return
-	}
-	if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
-		// P-empty200: 非重试错误也要写响应 — 之前静默 return,客户端收到
-		// 200 + 空 body/空流(Codex 报 "stream closed before response.completed")
-		e.handleAllFailed(c, req, *outLastErr, req.TraceID)
-		return
+	next := func() (*router.RouteResult, error) {
+		if start != nil {
+			s := start
+			start = nil
+			return s, nil
+		}
+		return iter.Next()
 	}
 
-	// 再继续 Next 剩下的
 	for {
-		if attempts >= e.maxRetry-1 {
+		if attempts >= e.maxRetry {
 			break
 		}
 		attempts++
-		result, err := iter.Next()
+
+		result, err := next()
 		if err != nil {
+			e.logger.Info("P54 DEBUG: no more candidates", zap.Error(err))
 			break
 		}
-		if e.tryOneCandidate(c, ctx, req, result, outProviderName, outLastErr, entry) {
-			return
+		e.logger.Info("P54 DEBUG: trying",
+			zap.String("provider", result.ProviderName),
+			zap.String("key_id", keyIDOf(result.Key)),
+			zap.String("key_status", keyStatusOf(result.Key)),
+			zap.String("model", result.ModelID),
+			zap.String("tier", result.Tier),
+			zap.Int("attempt", attempts))
+
+		// 层切换判定:候选 tier 变了 = 上一层穷尽
+		if result.Tier != currentTier {
+			if currentTier != "" && !quotaEvidenceInTier {
+				// 网络类穷尽 → 不变式:失败返回,不降档
+				e.handleAllFailed(c, req, *outLastErr, req.TraceID)
+				return
+			}
+			// 有额度证据(或首个候选)→ 降档/进入新层,证据清零
+			quotaEvidenceInTier = false
+			currentTier = result.Tier
 		}
-		if *outLastErr != nil && !errorIsRetryable(*outLastErr) {
+
+		outcome, quotaEv := e.tryCandidate(c, ctx, req, result, outProviderName, outLastErr, entry)
+		quotaEvidenceInTier = quotaEvidenceInTier || quotaEv
+		switch outcome {
+		case outcomeOK:
+			return
+		case outcomeFatal:
 			e.handleAllFailed(c, req, *outLastErr, req.TraceID)
 			return
+		case outcomeContinue:
+			// 继续下一候选
 		}
 	}
+
+	// 所有尝试都失败(迭代器穷尽 / maxRetry 封顶 / 最后一层无下一层可降)
 	e.handleAllFailed(c, req, *outLastErr, req.TraceID)
 }
 
-// tryOneCandidate 试一次候选。返回 true 表示成功处理(应该 return)
-// lastErr / outProviderName 在错误时被更新(P67:供外层 defer 收尾)
-func (e *Engine) tryOneCandidate(
+// tryCandidate 处理单个候选:白名单校验 → 发请求 → 失败后按错误分类路由。
+// 返回:
+//   - outcome:循环下一步(成功 / 致命 / 继续)
+//   - quotaEv: 本次候选是否产生了「额度耗尽证据」(quota_exceeded / rate_limit,
+//     或主动查询确认 has=false)— 供循环做层切换判定
+//
+// 错误分类语义(Task 5):
+//   - 不可重试(invalid_request / model_not_found / client_disconnected)→ outcomeFatal
+//   - 额度类(quota_exceeded / rate_limit)→ 记证据,层内换候选
+//   - 网络类(connection / timeout / server_error)→ 同 provider 换 key 重试一次 →
+//     主动 CheckQuota:has=true 或查询失败(未知)按未耗尽留在层内;has=false 记证据
+//   - 其他 retryable(auth / model_not_allowed)→ 继续,无证据
+func (e *Engine) tryCandidate(
 	c *gin.Context,
 	ctx context.Context,
 	req *provider.Request,
@@ -960,7 +963,7 @@ func (e *Engine) tryOneCandidate(
 	outProviderName *string,
 	lastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
-) bool {
+) (candidateOutcome, bool) {
 	// P-catch-all: 白名单按候选逐个校验 — 白名单外的候选像没 key 一样跳过,
 	// 继续试链上其他候选。同 tier 内 provider 顺序不定,不能因第一个候选
 	// 不符就整请求 403;链上全部候选都被排除时由 handleAllFailed 收尾返 403
@@ -980,7 +983,7 @@ func (e *Engine) tryOneCandidate(
 					zap.String("model", result.ModelID),
 					zap.Strings("allowed", gk.AllowedModels),
 					zap.String("trace_id", req.TraceID))
-				return false
+				return outcomeContinue, false
 			}
 		}
 	}
@@ -992,10 +995,7 @@ func (e *Engine) tryOneCandidate(
 	req.Headers.Set("X-Request-Id", req.TraceID)
 	// P-key-mismatch: 把已 acquire 的 key 传给 Provider — 否则 Provider 内部
 	// 再 acquire 一次可能拿到不同 key,429 上报冷却标错 key(2026-08-06 实测)
-	req.Key = result.Key
-	if result.Key != nil {
-		req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
-	}
+	e.bindKey(req, result)
 	// P-catch-all: 上游必须收到真实 model 名,不能发客户端原始名。
 	// 长格式 alias / catch_all 的每个候选带各自的目标 model(如 MiniMax-M3 与
 	// deepseek-v4-flash 并存),按当前候选重写 body — 否则 failover 到 DeepSeek
@@ -1004,6 +1004,78 @@ func (e *Engine) tryOneCandidate(
 	if newBody, ok2 := rewriteModelField(req.Body, result.ModelID); ok2 {
 		req.Body = newBody
 	}
+
+	// 首次尝试(用候选自带的 key)
+	if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+		return outcomeOK, false
+	}
+	pe := *lastErr
+	if pe == nil {
+		// 没有错误信息(理论不可达)— 按未知继续,不产生证据
+		return outcomeContinue, false
+	}
+
+	// 不可重试(invalid_request / model_not_found / client_disconnected)→ 直接失败
+	if !errorIsRetryable(pe) {
+		return outcomeFatal, false
+	}
+	// 额度类 → 记证据,层内换候选
+	if isQuotaClass(pe) {
+		return outcomeContinue, true
+	}
+	// 网络类 → 同 provider 换 key 重试一次
+	if isNetworkClass(pe) {
+		if e.swapToOtherKey(req, result) {
+			// 换 key 后重发 — result.Key 已更新为真正发请求的 key,
+			// 429 冷却/熔断上报都会标到这把新 key 上(踩坑 #15)
+			if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+				return outcomeOK, false
+			}
+			pe2 := *lastErr
+			if pe2 == nil {
+				return outcomeContinue, false
+			}
+			if !errorIsRetryable(pe2) {
+				return outcomeFatal, false
+			}
+			if isQuotaClass(pe2) {
+				return outcomeContinue, true
+			}
+			if !isNetworkClass(pe2) {
+				// 换 key 后是其他 retryable(auth 等)→ 无证据继续
+				return outcomeContinue, false
+			}
+			// 仍是网络类 → 落下来走主动查询
+		}
+		// 主动查询额度:has=true 或查询失败(未知)→ 按未耗尽留在层内;
+		// has=false(确认耗尽)→ 额度证据,允许层切换时降档
+		if result.Key == nil {
+			// 没有 key 可查(无 pool 场景)— 按未知处理
+			return outcomeContinue, false
+		}
+		has, qerr := quotacheck.CheckQuota(ctx, result.ProviderName, e.endpointFor(result.ProviderName), result.Key)
+		if qerr != nil || has {
+			return outcomeContinue, false
+		}
+		return outcomeContinue, true
+	}
+	// 其他 retryable(auth / model_not_allowed)→ 继续,无证据
+	return outcomeContinue, false
+}
+
+// attemptOne 用 result.Key 发一次请求(流式/非流式),更新 lastErr / outProviderName,
+// 返回是否成功。失败时打 failover 日志(P-failover-log)。
+// Manager().Get 找不到实例时按 connection 错误处理(RouteIterator.Next 已过滤,
+// 这里兜底热加载竞态)。
+func (e *Engine) attemptOne(
+	c *gin.Context,
+	ctx context.Context,
+	req *provider.Request,
+	result *router.RouteResult,
+	outProviderName *string,
+	lastErr **provider.ProviderError,
+	entry *accesslog.AccessEntry,
+) bool {
 	pv, ok := e.router.Manager().Get(result.ProviderName)
 	if !ok {
 		*outProviderName = result.ProviderName
@@ -1050,6 +1122,66 @@ func (e *Engine) tryOneCandidate(
 			zap.String("error_type", string((*lastErr).ErrorType)),
 			zap.Int("status", (*lastErr).StatusCode),
 			zap.String("trace_id", req.TraceID))
+	}
+	return false
+}
+
+// bindKey 把候选的 key 绑到请求上(P-key-mismatch:传已 acquire 的 key,
+// 避免 Provider 内部再 acquire 一次拿到不同 key,429 上报冷却标错 key)
+func (e *Engine) bindKey(req *provider.Request, result *router.RouteResult) {
+	req.Key = result.Key
+	if result.Key != nil {
+		req.Headers.Set("Authorization", "Bearer "+result.Key.Key)
+	}
+}
+
+// swapToOtherKey 网络类错误的换 key 重试:同 provider 同 tier 排除刚失败的 key
+// 再 acquire 一把,成功时更新 result.Key / req.Key / Authorization 并返回 true
+// (result.Key 同步更新 — reportKeyError / recordUsage 都引用它,必须指向真正
+// 发请求的 key,429 冷却才标得准)。拿不到其他 key → false。
+func (e *Engine) swapToOtherKey(req *provider.Request, result *router.RouteResult) bool {
+	if result.Key == nil {
+		return false
+	}
+	pool := e.router.Pool(result.ProviderName)
+	if pool == nil {
+		return false
+	}
+	k, err := pool.AcquireFromTierExcluding(result.Tier, result.Key.ID, string(result.Protocol))
+	if err != nil || k == nil {
+		return false
+	}
+	result.Key = k
+	e.bindKey(req, result)
+	return true
+}
+
+// endpointFor 取 provider 的 baseURL(Manager.EndpointFor;未加载/无 manager 时返回 "")
+func (e *Engine) endpointFor(providerName string) string {
+	if e.router != nil {
+		if mgr := e.router.Manager(); mgr != nil {
+			return mgr.EndpointFor(providerName)
+		}
+	}
+	return ""
+}
+
+// isNetworkClass 网络类错误:connection / timeout / server_error —
+// 同 provider 换 key 重试,不触发降档
+func isNetworkClass(pe *provider.ProviderError) bool {
+	switch pe.ErrorType {
+	case provider.ErrorTypeConnection, provider.ErrorTypeTimeout, provider.ErrorTypeServerError:
+		return true
+	}
+	return false
+}
+
+// isQuotaClass 额度类错误:quota_exceeded / rate_limit —
+// 记额度证据,层内换候选,全层证据齐了才降档
+func isQuotaClass(pe *provider.ProviderError) bool {
+	switch pe.ErrorType {
+	case provider.ErrorTypeQuotaExceeded, provider.ErrorTypeRateLimit:
+		return true
 	}
 	return false
 }
