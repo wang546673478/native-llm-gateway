@@ -484,7 +484,8 @@ func mkPool(providerName string, keyIDs []string, tier string) *keypool.Pool {
 
 // buildEngineMulti 构造多 provider / 每 provider 多 key 的 Engine(Task 5 测试用)
 // pools: providerName → Pool;providers 里每个都要有对应的 Manager 配置
-func buildEngineMulti(t *testing.T, providers []*fakeProvider, pools map[string]*keypool.Pool, aliases map[string]router.AliasConfig) (*Engine, *recordingUsage) {
+// opts: 可选的 Config 覆盖(如注入 Authenticator 走白名单路径)
+func buildEngineMulti(t *testing.T, providers []*fakeProvider, pools map[string]*keypool.Pool, aliases map[string]router.AliasConfig, opts ...func(*Config)) (*Engine, *recordingUsage) {
 	t.Helper()
 	gin.SetMode(gin.ReleaseMode)
 
@@ -510,10 +511,13 @@ func buildEngineMulti(t *testing.T, providers []*fakeProvider, pools map[string]
 	if err != nil {
 		t.Fatalf("new accesslog recorder: %v", err)
 	}
-	engine := NewEngine(Config{
+	engineCfg := Config{
 		Router: r, Logger: zap.NewNop(), Usage: rec, Metrics: NoopMetricsRecorder{}, AccessLog: accessR,
-	})
-	return engine, rec
+	}
+	for _, o := range opts {
+		o(&engineCfg)
+	}
+	return NewEngine(engineCfg), rec
 }
 
 // doProxyRequest 发一个非流式 /v1/chat/completions 请求
@@ -545,6 +549,13 @@ type errBalancer struct{}
 
 func (errBalancer) FetchBalance(ctx context.Context, baseURL string, k *keypool.Key) (quotacheck.Balance, error) {
 	return quotacheck.Balance{}, errors.New("balance query failed")
+}
+
+// exhaustedBalancer 一个确认「余额耗尽」的 fake Balancer(CheckQuota → has=false)
+type exhaustedBalancer struct{}
+
+func (exhaustedBalancer) FetchBalance(ctx context.Context, baseURL string, k *keypool.Key) (quotacheck.Balance, error) {
+	return quotacheck.Balance{HasQuota: false}, nil
 }
 
 // 1) 网络类层内穷尽 → 失败返回,不降档(不变式)
@@ -710,6 +721,154 @@ func TestProxy_InvalidRequest_NoRetry(t *testing.T) {
 	}
 	if mm.callCount != 1 {
 		t.Errorf("minimax called %d times, want 1(不重试)", mm.callCount)
+	}
+}
+
+// 7) 审阅修复 FIX 4:主动查询确认耗尽(has=false)→ 额度证据 → 降档 api 成功
+//    mm(token_plan) 网络类失败 + balancer 返回 HasQuota=false;ds(api) healthy → 200
+func TestProxy_CheckQuotaConfirmedExhausted_DowngradesToApi(t *testing.T) {
+	quotacheck.RegisterBalancer("mm-exhausted", exhaustedBalancer{})
+
+	mm := &fakeProvider{name: "mm-exhausted", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		err: &provider.ProviderError{ProviderName: "mm-exhausted", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm-exhausted": mkPool("mm-exhausted", []string{"1"}, "token_plan"),
+		"ds":           mkPool("ds", []string{"1"}, "api"),
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "mm-exhausted", Model: "m", Priority: 1},
+			{Name: "ds", Model: "m", Priority: 2},
+		}},
+	})
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(主动查询确认耗尽 → 允许降档); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ds-ok") {
+		t.Errorf("response = %s, want deepseek 的响应", w.Body.String())
+	}
+	if mm.callCount != 1 || ds.callCount != 1 {
+		t.Errorf("call counts: mm=%d ds=%d, want 1/1", mm.callCount, ds.callCount)
+	}
+}
+
+// 8) 审阅修复 FIX 1:auth(403)错误也走换 key 重试(决策表 row 3)
+//    mm 2 把 key:key-1 auth 403,key-2 healthy → 200 经 key-2,不走 failover
+func TestProxy_AuthError_SwapsKey(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey: map[string]error{"1": &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusForbidden, ErrorType: provider.ErrorTypeAuth, Message: "invalid api key"}},
+		respStatus: 200, respBody: `{"id":"mm-ok"}`}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(auth 换 key 重试成功); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mm-ok") {
+		t.Errorf("response = %s, want minimax 的响应(auth 是 key 问题,换 key 即解决,不 failover)", w.Body.String())
+	}
+	if mm.callCount != 2 {
+		t.Errorf("minimax called %d times, want 2(key-1 auth 失败 + key-2 成功)", mm.callCount)
+	}
+	if mm.gotAuth != "Bearer sk-2" {
+		t.Errorf("final request auth = %q, want Bearer sk-2", mm.gotAuth)
+	}
+	if ds.callCount != 0 {
+		t.Errorf("deepseek called %d times, want 0(auth 换 key 解决,不该降档)", ds.callCount)
+	}
+}
+
+// 9) 审阅修复 FIX 2:maxRetry 封顶不截断层内降档(每层安全阀)
+//    3 个 token_plan provider 全 quota_exceeded + api healthy,maxRetry=3 → 200 降档
+func TestProxy_MaxRetryDoesNotBlockQuotaDowngrade(t *testing.T) {
+	mkQuotaProvider := func(name string) *fakeProvider {
+		return &fakeProvider{name: name, proto: provider.ProtocolOpenAI, models: []string{"m"},
+			err: &provider.ProviderError{ProviderName: name, StatusCode: http.StatusPaymentRequired, ErrorType: provider.ErrorTypeQuotaExceeded, Message: "quota exceeded"}}
+	}
+	q1 := mkQuotaProvider("q1")
+	q2 := mkQuotaProvider("q2")
+	q3 := mkQuotaProvider("q3")
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{q1, q2, q3, ds}, map[string]*keypool.Pool{
+		"q1": mkPool("q1", []string{"1"}, "token_plan"),
+		"q2": mkPool("q2", []string{"1"}, "token_plan"),
+		"q3": mkPool("q3", []string{"1"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "q1", Model: "m", Priority: 1},
+			{Name: "q2", Model: "m", Priority: 2},
+			{Name: "q3", Model: "m", Priority: 3},
+			{Name: "ds", Model: "m", Priority: 4},
+		}},
+	})
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(3 层候选全额度耗尽,降档 api 成功); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ds-ok") {
+		t.Errorf("response = %s, want deepseek 的响应(maxRetry 封顶不能截断有证据的降档)", w.Body.String())
+	}
+	for _, q := range []*fakeProvider{q1, q2, q3} {
+		if q.callCount != 1 {
+			t.Errorf("provider %s called %d times, want 1", q.name, q.callCount)
+		}
+	}
+	if ds.callCount != 1 {
+		t.Errorf("deepseek called %d times, want 1", ds.callCount)
+	}
+}
+
+// 10) 审阅修复 FIX 3:白名单 skip 不阻断层推进(旧语义回归)
+//     token_plan 候选被白名单跳过、api 候选在白名单内 → 200(不能 403 整层判死)
+func TestProxy_WhitelistSkip_AdvancesTier(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"model-tp"},
+		respStatus: 200, respBody: `{"id":"mm-ok"}`}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"model-api"},
+		respStatus: 200, respBody: `{"id":"ds-ok"}`}
+	gk := &auth.GatewayKey{ID: "k1", Name: "test-key", AllowedModels: []string{"model-api"}}
+	authn := auth.New(nil)
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "mm", Model: "model-tp", Priority: 1},
+			{Name: "ds", Model: "model-api", Priority: 2},
+		}},
+	}, func(cfg *Config) { cfg.Authenticator = authn })
+
+	gr := gin.New()
+	gr.Use(func(c *gin.Context) {
+		c.Set("gateway_key", gk)
+		c.Set("gateway_key_id", gk.ID)
+	})
+	gr.POST("/v1/chat/completions", e.HandleRequest)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	gr.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(token_plan 纯 skip 层应自由推进到 api); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ds-ok") {
+		t.Errorf("response = %s, want deepseek 的响应(白名单 skip 不算层失败,不阻断降档路径)", w.Body.String())
+	}
+	if mm.callCount != 0 {
+		t.Errorf("minimax called %d times, want 0(白名单外候选不应发请求)", mm.callCount)
 	}
 }
 

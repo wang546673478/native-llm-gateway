@@ -869,8 +869,12 @@ const (
 // start != nil 时先处理它(探针路径),之后从 iter.Next() 继续。
 // 语义:
 //   - 层切换判定:候选的 Tier 变了 = 上一层候选已穷尽
-//   - 上一层穷尽且无额度证据 → handleAllFailed 失败返回,不降档(不变式)
-//   - 上一层穷尽且有额度证据 → 接受新 tier 候选(降档),证据清零
+//   - 层边界仅在「该层有实际失败且无额度证据」时 handleAllFailed 失败返回
+//     (不变式:不降档);纯 skip 层(白名单排除,无实际失败)自由推进
+//   - 有额度证据 → 接受新 tier 候选(降档),证据清零
+//   - maxRetry 是「每层安全阀」:某层实际尝试数到上限后跳过该层剩余候选,
+//     直取下一层候选做层切换判定(有证据照样降档,不被封顶截断);
+//     新层被接受 → 重置尝试预算
 //   - 所有失败统一由 handleAllFailed 收尾(含不可重试透传)
 func (e *Engine) runCandidateLoop(
 	c *gin.Context,
@@ -882,9 +886,10 @@ func (e *Engine) runCandidateLoop(
 	outLastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
 ) {
-	attempts := 0
+	attempts := 0         // 当前层「实际尝试」次数(白名单 skip 不计入预算)
 	currentTier := ""
-	quotaEvidenceInTier := false // 当前层是否出现过额度类证据(quota_exceeded / rate_limit / 确认耗尽)
+	quotaEvidenceInTier := false // 当前层是否出现过额度证据(仅 token_plan 层可产生,决策 9)
+	tierSawFailure := false      // 当前层是否有过实际失败(白名单 skip 不算,决策:纯 skip 层自由推进)
 
 	next := func() (*router.RouteResult, error) {
 		if start != nil {
@@ -895,39 +900,77 @@ func (e *Engine) runCandidateLoop(
 		return iter.Next()
 	}
 
-	for {
-		if attempts >= e.maxRetry {
-			break
+	// acceptTier 层切换判定:上一层「有实际失败且无额度证据」→ 不降档,失败返回。
+	// 返回 false = 已 handleAllFailed,调用方直接 return。
+	acceptTier := func(newTier string) bool {
+		if currentTier != "" && tierSawFailure && !quotaEvidenceInTier {
+			e.handleAllFailed(c, req, *outLastErr, req.TraceID)
+			return false
 		}
-		attempts++
+		quotaEvidenceInTier = false
+		tierSawFailure = false
+		currentTier = newTier
+		return true
+	}
 
-		result, err := next()
-		if err != nil {
-			e.logger.Info("P54 DEBUG: no more candidates", zap.Error(err))
-			break
+	// peekNextTier FIX 2:maxRetry 封顶后跳过本层剩余候选(每层安全阀),
+	// 直取下一层第一个候选做层切换判定 — 本层候选数 ≥ maxRetry 时,
+	// 封顶不能截断「有额度证据」的降档。
+	peekNextTier := func() (*router.RouteResult, error) {
+		for {
+			r, err := next()
+			if err != nil {
+				return nil, err
+			}
+			if r.Tier != currentTier {
+				return r, nil
+			}
 		}
+	}
+
+	for {
+		var result *router.RouteResult
+		var err error
+
+		if attempts >= e.maxRetry {
+			// 本层尝试预算耗尽:跳过剩余同层候选,取下一层候选做层切换判定
+			peek, perr := peekNextTier()
+			if perr != nil {
+				e.logger.Info("P54 DEBUG: no more candidates", zap.Error(perr))
+				break
+			}
+			if !acceptTier(peek.Tier) {
+				return
+			}
+			attempts = 0 // 新层重置尝试预算(封顶退化为每层安全阀)
+			result = peek
+		} else {
+			result, err = next()
+			if err != nil {
+				e.logger.Info("P54 DEBUG: no more candidates", zap.Error(err))
+				break
+			}
+			if result.Tier != currentTier {
+				if !acceptTier(result.Tier) {
+					return
+				}
+			}
+		}
+
 		e.logger.Info("P54 DEBUG: trying",
 			zap.String("provider", result.ProviderName),
 			zap.String("key_id", keyIDOf(result.Key)),
 			zap.String("key_status", keyStatusOf(result.Key)),
 			zap.String("model", result.ModelID),
 			zap.String("tier", result.Tier),
-			zap.Int("attempt", attempts))
+			zap.Int("attempt", attempts+1))
 
-		// 层切换判定:候选 tier 变了 = 上一层穷尽
-		if result.Tier != currentTier {
-			if currentTier != "" && !quotaEvidenceInTier {
-				// 网络类穷尽 → 不变式:失败返回,不降档
-				e.handleAllFailed(c, req, *outLastErr, req.TraceID)
-				return
-			}
-			// 有额度证据(或首个候选)→ 降档/进入新层,证据清零
-			quotaEvidenceInTier = false
-			currentTier = result.Tier
-		}
-
-		outcome, quotaEv := e.tryCandidate(c, ctx, req, result, outProviderName, outLastErr, entry)
+		outcome, quotaEv, attempted := e.tryCandidate(c, ctx, req, result, outProviderName, outLastErr, entry)
 		quotaEvidenceInTier = quotaEvidenceInTier || quotaEv
+		tierSawFailure = tierSawFailure || attempted
+		if attempted {
+			attempts++
+		}
 		switch outcome {
 		case outcomeOK:
 			return
@@ -939,22 +982,28 @@ func (e *Engine) runCandidateLoop(
 		}
 	}
 
-	// 所有尝试都失败(迭代器穷尽 / maxRetry 封顶 / 最后一层无下一层可降)
+	// 所有尝试都失败(迭代器穷尽 / 最后一层无下一层可降)
 	e.handleAllFailed(c, req, *outLastErr, req.TraceID)
 }
 
 // tryCandidate 处理单个候选:白名单校验 → 发请求 → 失败后按错误分类路由。
 // 返回:
 //   - outcome:循环下一步(成功 / 致命 / 继续)
-//   - quotaEv: 本次候选是否产生了「额度耗尽证据」(quota_exceeded / rate_limit,
-//     或主动查询确认 has=false)— 供循环做层切换判定
+//   - quotaEv: 本次候选是否产生了「额度耗尽证据」(quota_exceeded / rate_limit /
+//     主动查询确认 has=false)— 仅 token_plan 层可产生(决策 9),供层切换判定
+//   - attempted: 是否真的向 provider 发过请求(白名单 skip = false —
+//     不计入 maxRetry 预算、不构成 tierSawFailure,与迭代器 no-key 跳过一致)
 //
-// 错误分类语义(Task 5):
+// 错误分类语义(Task 5 + 审阅修复):
 //   - 不可重试(invalid_request / model_not_found / client_disconnected)→ outcomeFatal
-//   - 额度类(quota_exceeded / rate_limit)→ 记证据,层内换候选
 //   - 网络类(connection / timeout / server_error)→ 同 provider 换 key 重试一次 →
-//     主动 CheckQuota:has=true 或查询失败(未知)按未耗尽留在层内;has=false 记证据
-//   - 其他 retryable(auth / model_not_allowed)→ 继续,无证据
+//     token_plan 层主动 CheckQuota(has=true 或查询失败按未耗尽留在层内;has=false 记证据);
+//     api/free 层无套餐额度概念,不查询、不设证据(决策 9)
+//   - auth(决策表 row 3)→ 同 provider 换 key 重试一次(排除 ModelNotAllowed —
+//     白名单是 model 级,换 key 无用);换不到 key / 仍失败 → 无证据继续,不查额度,
+//     全层穷尽时按「无证据」失败返回(所有 key 都坏,去 api 层一样坏,不降档)
+//   - 额度类(quota_exceeded / rate_limit)→ token_plan 层记证据;api/free 层无证据
+//   - 其他 retryable(model_not_allowed 等)→ 继续,无证据
 func (e *Engine) tryCandidate(
 	c *gin.Context,
 	ctx context.Context,
@@ -963,7 +1012,7 @@ func (e *Engine) tryCandidate(
 	outProviderName *string,
 	lastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
-) (candidateOutcome, bool) {
+) (candidateOutcome, bool, bool) {
 	// P-catch-all: 白名单按候选逐个校验 — 白名单外的候选像没 key 一样跳过,
 	// 继续试链上其他候选。同 tier 内 provider 顺序不定,不能因第一个候选
 	// 不符就整请求 403;链上全部候选都被排除时由 handleAllFailed 收尾返 403
@@ -983,7 +1032,7 @@ func (e *Engine) tryCandidate(
 					zap.String("model", result.ModelID),
 					zap.Strings("allowed", gk.AllowedModels),
 					zap.String("trace_id", req.TraceID))
-				return outcomeContinue, false
+				return outcomeContinue, false, false // 未实际尝试:不算失败、不计预算
 			}
 		}
 	}
@@ -1007,60 +1056,75 @@ func (e *Engine) tryCandidate(
 
 	// 首次尝试(用候选自带的 key)
 	if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
-		return outcomeOK, false
+		return outcomeOK, false, true
 	}
 	pe := *lastErr
 	if pe == nil {
 		// 没有错误信息(理论不可达)— 按未知继续,不产生证据
-		return outcomeContinue, false
+		return outcomeContinue, false, true
 	}
 
 	// 不可重试(invalid_request / model_not_found / client_disconnected)→ 直接失败
 	if !errorIsRetryable(pe) {
-		return outcomeFatal, false
+		return outcomeFatal, false, true
 	}
-	// 额度类 → 记证据,层内换候选
-	if isQuotaClass(pe) {
-		return outcomeContinue, true
-	}
-	// 网络类 → 同 provider 换 key 重试一次
-	if isNetworkClass(pe) {
+
+	// 需要换 key 重试的类:网络类 + auth(决策表 row 3;ModelNotAllowed 除外 —
+	// 白名单是 model 级,换 key 无用)
+	if isNetworkClass(pe) || pe.ErrorType == provider.ErrorTypeAuth {
 		if e.swapToOtherKey(req, result) {
 			// 换 key 后重发 — result.Key 已更新为真正发请求的 key,
 			// 429 冷却/熔断上报都会标到这把新 key 上(踩坑 #15)
 			if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
-				return outcomeOK, false
+				return outcomeOK, false, true
 			}
 			pe2 := *lastErr
 			if pe2 == nil {
-				return outcomeContinue, false
+				return outcomeContinue, false, true
 			}
 			if !errorIsRetryable(pe2) {
-				return outcomeFatal, false
+				return outcomeFatal, false, true
 			}
-			if isQuotaClass(pe2) {
-				return outcomeContinue, true
+			// auth 源:换 key 穷尽 → 无证据继续、不查额度(决策表 row 3)
+			if pe.ErrorType == provider.ErrorTypeAuth {
+				return outcomeContinue, false, true
 			}
+			// 网络源:换 key 后是其他 retryable → 无证据继续
 			if !isNetworkClass(pe2) {
-				// 换 key 后是其他 retryable(auth 等)→ 无证据继续
-				return outcomeContinue, false
+				return outcomeContinue, false, true
 			}
 			// 仍是网络类 → 落下来走主动查询
+		} else if pe.ErrorType == provider.ErrorTypeAuth {
+			// auth 换不到其他 key(单 key provider / 全不可用)→ 无证据继续
+			return outcomeContinue, false, true
 		}
-		// 主动查询额度:has=true 或查询失败(未知)→ 按未耗尽留在层内;
-		// has=false(确认耗尽)→ 额度证据,允许层切换时降档
+		// 网络类换不到 key / 换 key 仍网络失败 → 主动查询(仅 token_plan 层,决策 9:
+		// api 层无套餐额度概念,不查询不设证据;未知一律按未耗尽留在层内)
+		if result.Tier != "token_plan" {
+			return outcomeContinue, false, true
+		}
 		if result.Key == nil {
 			// 没有 key 可查(无 pool 场景)— 按未知处理
-			return outcomeContinue, false
+			return outcomeContinue, false, true
 		}
 		has, qerr := quotacheck.CheckQuota(ctx, result.ProviderName, e.endpointFor(result.ProviderName), result.Key)
 		if qerr != nil || has {
-			return outcomeContinue, false
+			return outcomeContinue, false, true
 		}
-		return outcomeContinue, true
+		// 确认耗尽 → 额度证据,允许层切换时降档
+		return outcomeContinue, true, true
 	}
-	// 其他 retryable(auth / model_not_allowed)→ 继续,无证据
-	return outcomeContinue, false
+
+	// 额度类 → 仅 token_plan 层记证据(决策 9:api 层无套餐额度概念,
+	// api/free 层的 429/quota 是单 key 限流,不构成层切换证据)
+	if isQuotaClass(pe) {
+		if result.Tier == "token_plan" {
+			return outcomeContinue, true, true
+		}
+		return outcomeContinue, false, true
+	}
+	// 其他 retryable(model_not_allowed 等)→ 继续,无证据
+	return outcomeContinue, false, true
 }
 
 // attemptOne 用 result.Key 发一次请求(流式/非流式),更新 lastErr / outProviderName,
