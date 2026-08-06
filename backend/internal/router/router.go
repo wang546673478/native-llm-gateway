@@ -33,12 +33,15 @@ type Config struct {
 }
 
 // RouteResult 路由结果:把一个请求锁定到具体的 Provider + Model + Key
+// P64: Tier 标注该结果来自哪个 billing_source 桶(token_plan / api / free),
+// 层切换判定层(Task 5)据此做计费面切换
 type RouteResult struct {
 	ProviderName string
 	ModelID      string
 	Key          *keypool.Key
 	Endpoint     string
 	Protocol     provider.Protocol
+	Tier         string
 }
 
 // RouteOption P34: 给 Route() 传可选参数(ProviderKeyIDs 限定)
@@ -384,6 +387,7 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 				ModelID:      c.Model,
 				Key:          k,
 				Protocol:     pv.Protocol(),
+				Tier:         c.Tier,
 			}, nil
 		}
 
@@ -392,6 +396,7 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 			ProviderName: c.Name,
 			ModelID:      c.Model,
 			Protocol:     pv.Protocol(),
+			Tier:         c.Tier,
 		}, nil
 	}
 	return nil, ErrNoRoute

@@ -685,6 +685,58 @@ func TestRouteIterator_NextExhaustsTierBeforeRolling(t *testing.T) {
 	}
 }
 
+// TestRouteIterator_TierTagged Task 4: RouteResult 带 Tier 字段
+// 两个 provider:minimax(token_plan key)、deepseek(api key),同协议面,
+// buildKeyCandidates 拉平后顺序 [minimax/token_plan, deepseek/api] —
+// Next() 依次返回带正确 Tier 的候选(层切换判定层 Task 5 的输入基础)
+func TestRouteIterator_TierTagged(t *testing.T) {
+	now := time.Now()
+	mkPool := func(bs string) *keypool.Pool {
+		return keypool.NewPool("p", []*keypool.Key{{
+			ID: "1", ProviderName: "p", Name: "k1", Key: "sk",
+			Status: keypool.KeyStatusActive, BillingSource: bs,
+			CreatedAt: now, UpdatedAt: now,
+		}}, nil, keypool.Config{})
+	}
+
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "minimax", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+		&fakeProvider{name: "deepseek", proto: provider.ProtocolAnthropic, models: []string{"deepseek-v4-flash"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, map[string]*keypool.Pool{
+		"minimax":  mkPool("token_plan"),
+		"deepseek": mkPool("api"),
+	}, Config{Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"}})
+
+	it, err := r.Route(context.Background(),
+		&provider.Request{Model: "claude-opus-5", Path: "/v1/messages"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	first, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next 1st: %v", err)
+	}
+	if first.ProviderName != "minimax" {
+		t.Errorf("1st ProviderName = %s, want minimax(token_plan 桶优先)", first.ProviderName)
+	}
+	if first.Tier != "token_plan" {
+		t.Errorf("1st Tier = %q, want token_plan", first.Tier)
+	}
+
+	second, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next 2nd: %v", err)
+	}
+	if second.ProviderName != "deepseek" {
+		t.Errorf("2nd ProviderName = %s, want deepseek", second.ProviderName)
+	}
+	if second.Tier != "api" {
+		t.Errorf("2nd Tier = %q, want api", second.Tier)
+	}
+}
+
 // TestRouter_CatchAllAuto_ResponsesFilter P-responses:
 // /responses 透传只走原生支持 Responses API 的 provider(manager 标记),
 // 不支持的 provider(qwen)不参与 — 避免 404 model_not_found 中断 failover
