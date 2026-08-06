@@ -1,5 +1,7 @@
 # Native LLM Gateway — config 示例
 # 完整规格见 Native LLM Gateway — 完整实现规格书 v2.md 第 4.1 节
+# 现状(2026-08):kimi 已移除(需要时按 docs/provider厂商定制包指南.md 加回);
+# 路由 = catch_all 自动模式(alias/chains 已退役);provider key 全部由 DB 管理
 
 server:
   host: "0.0.0.0"
@@ -61,9 +63,12 @@ providers:
   # 分别映射到 v4-flash 的非 thinking / thinking 模式
   deepseek:
     enabled: true
+    billing_source: "api"
     endpoint: "https://api.deepseek.com"
     protocol: "openai"
     timeout: 60s
+    # 原生支持 OpenAI Responses API(Codex 透传)
+    responses_api: true
     models:
       # v4-flash:¥1/M 输入、¥0.02/M cache 命中、¥2/M 输出
       - id: "deepseek-v4-flash"
@@ -101,6 +106,7 @@ providers:
     # (Claude Code 剥离 thinking 块 → 400 "content[].thinking ... must be passed back"),
     # 强制 thinking=disabled 绕开 — flash 本来就是非 thinking 模型,无能力损失
     force_thinking_disabled: true
+    billing_source: "api"
     endpoint: "https://api.deepseek.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
@@ -126,48 +132,30 @@ providers:
       excluded_errors: ["429"]
 
   # --- 智谱 GLM (OpenAI 兼容) ---
-  # 文档:https://docs.bigmodel.cn/cn/guide/start/introduction
+  # 文档:https://docs.bigmodel.cn
+  # 价格(2026-08):glm-5.2 输入 ¥8/M、输出 ¥28/M、缓存命中 ¥2/M(每百万 token)
+  # 上下文:1M tokens,最大输出 128K tokens
+  # 注意:GLM Coding Plan 套餐需专属 Coding 端点,本块为标准 API 计费
   glm:
     enabled: true
-    billing_source: "api"        # 大多数 GLM 模型是付费 API,glm-4.7-flash 等免费层请在 Provider Keys 页面单独标注
+    billing_source: "api"
     endpoint: "https://open.bigmodel.cn/api/paas/v4"
     protocol: "openai"
     timeout: 60s
+    # 官方无 /responses API,Codex 请求不会路由到本厂商
+    responses_api: false
     models:
-      # 旗舰/商用(付费)
-      - id: "glm-5.2"             # 2026-06 开源,1M 上下文,Coding 旗舰
+      # glm-5.2:旗舰,1M 上下文/128K 输出;支持思考模式(thinking + reasoning_effort,
+      # 默认 max),响应带 reasoning_content;上下文缓存自动生效
+      # 价格按 ¥/1k:输入 0.008、输出 0.028、缓存命中 0.002
+      - id: "glm-5.2"
         aliases: []
-        cost_per_1k_input: 0.005
-        cost_per_1k_output: 0.015
-      - id: "glm-4.7"             # 2025-12 开源,200K 上下文
-        aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.001
-      - id: "glm-4.6"             # 上一代旗舰,200K 上下文
-        aliases: []
-        cost_per_1k_input: 0.0006
-        cost_per_1k_output: 0.0006
-      - id: "glm-4.6v"            # 多模态
-        aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.001
-      - id: "glm-4.5"             # Anthropic 协议最先支持的商用模型
-        aliases: []
-        cost_per_1k_input: 0.0006
-        cost_per_1k_output: 0.0006
-      # 永久免费(参考 BigModel 官方标注)
-      - id: "glm-4.7-flash"       # 替代 glm-4.5-flash(2026-01-30 下线)
-        aliases: ["glm-flash"]
-        cost_per_1k_input: 0.0
-        cost_per_1k_output: 0.0
-      - id: "glm-4.6v-flash"      # 视觉推理
-        aliases: []
-        cost_per_1k_input: 0.0
-        cost_per_1k_output: 0.0
-      - id: "glm-4-flash-250414"  # 128K 上下文,16K 输出
-        aliases: []
-        cost_per_1k_input: 0.0
-        cost_per_1k_output: 0.0
+        cost_per_1k_input: 0.008
+        cost_per_1k_output: 0.028
+        cost_per_1k_cache_read: 0.002
+        cost_per_1k_cache_creation: 0.0
+      # 其余在售文本模型(glm-5.1 / glm-5 / glm-5-turbo / glm-4.7 / glm-4.6 / glm-4.5)
+      # 按官方价格页 https://bigmodel.cn/pricing 补价格后加入列表
     keys: []  # P30: 用 DB(provider_api_keys)管,这里留空
     circuit_breaker:
       failure_threshold: 5
@@ -178,36 +166,23 @@ providers:
       excluded_errors: ["429"]
 
   # --- 智谱 GLM (Anthropic 兼容,给 Claude Code / Anthropic SDK 用户) ---
-  # 文档:https://docs.bigmodel.cn/cn/guide/start/introduction
+  # 文档:https://docs.bigmodel.cn/cn/guide/develop/claude/introduction
   # 端点:POST https://open.bigmodel.cn/api/anthropic/v1/messages
   # 鉴权:x-api-key: {ZHIPU_API_KEY} / anthropic-version: 2023-06-01
+  # 与 glm 共用同一组 Provider Key(同一 vendor,key 池共享)
   glm-anthropic:
     enabled: true
     billing_source: "api"
     endpoint: "https://open.bigmodel.cn/api/anthropic"
     protocol: "anthropic"
-    timeout: 90s
+    timeout: 60s
     models:
-      - id: "glm-5.2"             # Coding 旗舰
+      - id: "glm-5.2"
         aliases: []
-        cost_per_1k_input: 0.005
-        cost_per_1k_output: 0.015
-      - id: "glm-4.7"             # Claude Code 默认推荐
-        aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.001
-      - id: "glm-4.7-flash"       # 免费
-        aliases: []
-        cost_per_1k_input: 0.0
-        cost_per_1k_output: 0.0
-      - id: "glm-4.6"
-        aliases: []
-        cost_per_1k_input: 0.0006
-        cost_per_1k_output: 0.0006
-      - id: "glm-4.5"             # Anthropic 协议最先支持
-        aliases: []
-        cost_per_1k_input: 0.0006
-        cost_per_1k_output: 0.0006
+        cost_per_1k_input: 0.008
+        cost_per_1k_output: 0.028
+        cost_per_1k_cache_read: 0.002
+        cost_per_1k_cache_creation: 0.0
     keys: []  # 与 glm 共享同一组 Provider Key
     circuit_breaker:
       failure_threshold: 5
@@ -222,6 +197,7 @@ providers:
   # 端点:https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
   qwen:
     enabled: true
+    billing_source: "api"
     endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     protocol: "openai"
     timeout: 60s
@@ -262,79 +238,6 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-  # --- Kimi (Moonshot,OpenAI 兼容) ---
-  # 文档:https://platform.kimi.com/docs/overview (国内;国际 platform.kimi.ai,key 不通用)
-  # 端点:https://api.moonshot.cn/v1/chat/completions
-  kimi:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://api.moonshot.cn"
-    protocol: "openai"
-    timeout: 120s
-    models:
-      - id: "kimi-k3"               # 2026-07-16 上线,1M 上下文,旗舰
-        aliases: []
-        cost_per_1k_input: 0.012
-        cost_per_1k_output: 0.012
-      - id: "kimi-k2.7-code"        # 2026-06-12 开源,256K 上下文,编程专项
-        aliases: []
-        cost_per_1k_input: 0.0035
-        cost_per_1k_output: 0.0035
-      - id: "kimi-k2.7-code-highspeed"  # 同模型,2× 价格,5-6× 速度
-        aliases: []
-        cost_per_1k_input: 0.007
-        cost_per_1k_output: 0.007
-      - id: "kimi-k2.6"             # 2026-04 发布,256K 上下文,通用
-        aliases: []
-        cost_per_1k_input: 0.0035
-        cost_per_1k_output: 0.0035
-      - id: "kimi-for-coding"       # Kimi Code Plan 专用模型 ID
-        aliases: []
-        cost_per_1k_input: 0.0
-        cost_per_1k_output: 0.0
-    keys: []  # P30: 用 DB(provider_api_keys)管,这里留空
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # --- Kimi (Moonshot,Anthropic 兼容,给 Claude Code / Anthropic SDK 用户) ---
-  # 端点:POST https://api.moonshot.cn/anthropic/v1/messages
-  # 鉴权:x-api-key: {MOONSHOT_API_KEY} / anthropic-version: 2023-06-01
-  # Claude Code 接入:ANTHROPIC_BASE_URL=https://api.moonshot.cn/anthropic
-  #                  ANTHROPIC_AUTH_TOKEN={YOUR_API_KEY}
-  #                  ANTHROPIC_MODEL=kimi-k2.5
-  kimi-anthropic:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://api.moonshot.cn/anthropic"
-    protocol: "anthropic"
-    timeout: 90s
-    models:
-      - id: "kimi-k3"               # 旗舰,1M 上下文
-        aliases: []
-        cost_per_1k_input: 0.012
-        cost_per_1k_output: 0.012
-      - id: "kimi-k2.7-code"
-        aliases: []
-        cost_per_1k_input: 0.0035
-        cost_per_1k_output: 0.0035
-      - id: "kimi-k2.6"
-        aliases: []
-        cost_per_1k_input: 0.0035
-        cost_per_1k_output: 0.0035
-    keys: []  # 与 kimi 共享同一组 Provider Key
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
   # --- MiniMax (稀宇科技,Anthropic 兼容) ---
   # 文档:https://platform.minimaxi.com/docs/api-reference/api-overview
   # Anthropic 兼容端点(推荐):POST https://api.minimaxi.com/anthropic/v1/messages
@@ -343,6 +246,7 @@ providers:
   # M3 专属参数:thinking / reasoning_split / service_tier 通过 extra_body 传
   minimax:
     enabled: true
+    billing_source: "token_plan"   # 包月套餐,优先路由,quota 用完自动降级到 api 层
     endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
@@ -406,6 +310,30 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  minimax-openai:                   # 同一供应商,不同协议端点,共享 key
+    enabled: true
+    billing_source: "token_plan"
+    endpoint: "https://api.minimaxi.com/v1"
+    protocol: "openai"
+    timeout: 90s
+    responses_api: true
+    models:
+      - id: "MiniMax-M3"            # 与 minimax(anthropic)共享模型列表
+        aliases: []
+        cost_per_1k_input: 0.0021
+        cost_per_1k_output: 0.0084
+        cost_per_1k_cache_read: 0.00042
+        long_context_input_threshold: 512000
+        long_context_multiplier: 2
+    keys: []  # 与 minimax 共享同一组 Provider Key
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
   # --- Google Gemini (Google 协议) ---
   # 文档:https://ai.google.dev/gemini-api/docs/models
   # 端点:POST {endpoint}/models/{model}:generateContent
@@ -415,6 +343,7 @@ providers:
   # 注意:gemini-2.0-flash / gemini-1.5-pro 已 shut down / deprecated
   gemini:
     enabled: true
+    billing_source: "api"
     endpoint: "https://generativelanguage.googleapis.com/v1beta"
     protocol: "google"
     timeout: 60s
@@ -497,75 +426,19 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-# 路由规则(P4 阶段真正生效)
+# 路由规则 — 唯一规则:catch_all 自动模式(无路由表,alias/chains 已退役)
 routing:
-  # P39: 共享 provider chain — 定义一次,多个 alias 用 chain_ref 复用
-  # 加新 fallback 时只改这里,引用它的 alias 自动生效
-  chains:
-    claude:
-      - name: "minimax"
-        model: "MiniMax-M3"
-        priority: 1
-      - name: "deepseek-anthropic"   # P50: 用 Anthropic 协议的 deepseek,匹配 Claude Code 的 /v1/messages
-        model: "deepseek-v4-flash"
-        priority: 2
-      - name: "glm"
-        model: "glm-4-flash"
-        priority: 3
-  aliases:
-    coding-model:
-      strategy: "priority"
-      providers:
-        - name: "deepseek"
-          model: "deepseek-v4-flash"
-          priority: 1
-        - name: "qwen"
-          model: "qwen-coder-plus"
-          priority: 2
-        - name: "kimi"
-          model: "kimi-k2-0905-preview"
-          priority: 3
-        - name: "glm"
-          model: "glm-4-flash"
-          priority: 4
-    pro-model:
-      strategy: "priority"
-      providers:
-        - name: "deepseek"
-          model: "deepseek-v4-pro"
-          priority: 1
-        - name: "minimax"
-          model: "claude-sonnet-4-5"
-          priority: 2
-        - name: "qwen"
-          model: "qwen-max"
-          priority: 3
-    chat-model:
-      strategy: "weight"
-      providers:
-        - name: "deepseek"
-          model: "deepseek-v4-flash"
-          weight: 40
-        - name: "qwen"
-          model: "qwen-plus"
-          weight: 30
-        - name: "glm"
-          model: "glm-4-flash"
-          weight: 20
-        - name: "gemini"
-          model: "gemini-2.0-flash"
-          weight: 10
-    # P38 + P39: Claude Code 模型 — Anthropic SDK 默认会发这些 model id
-    # chain_ref 引用上面的 chains.claude,实现 minimax→deepseek→glm 自动 failover
-    claude-sonnet-4-5:
-      strategy: "priority"
-      chain_ref: "claude"
-    claude-sonnet-5:
-      strategy: "priority"
-      chain_ref: "claude"
-    claude-opus-4-8:
-      strategy: "priority"
-      chain_ref: "claude"
+  #   - 客户端发任何 model 名(gpt-5 / qwen-plus / 任意探测名)→ 一律走这条链,
+  #     客户端模型名只是标签,不参与路由决策(真实名也不直连声明它的 provider)
+  #   - 所有 enabled provider 自动参与,协议面按请求路径过滤
+  #     (/v1/messages → anthropic 面,/v1/chat/completions → openai 面)
+  #   - 每个 provider 用它的默认模型承接:显式 default_model 或 models 第一个声明
+  #   - tier 计费自动(token_plan → api → free):minimax token plan 额度耗尽 →
+  #     自动切 api 计费的 provider,无需改配置;没 key 的 provider 自动跳过
+  #   - 链上能用哪些模型由 gateway key 的「允许的模型」白名单细化(逐候选校验)
+  #   - 加新 provider(如 kimi):config 加块 + 页面加 key 即自动进链,不用维护路由表
+  # 也可写显式 providers 列表(自定义参与方/优先级)
+  catch_all: {}
   default_strategy: "priority"
 
 # Key Pool 配置(P3 阶段真正生效)
@@ -579,9 +452,8 @@ keypool:
   quota_probe_initial_delay: 5m
   quota_probe_max_backoff: 30m
   quota_probe_jitter_pct: 20
-  quota_poll_interval: 5m
+  quota_poll_interval: 60s
   quota_poll_jitter_pct: 10
-  quota_warn_threshold_pct: 10
   quota_http_timeout: 10s
   quota_user_agent: "native-llm-gateway/quota-restore-1.0"
 

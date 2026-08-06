@@ -340,15 +340,25 @@ llm-gateway/
 ## 4.1 config.yaml 完整规格
 
 ```yaml
-# config.yaml — Gateway 完整配置
+# config.yaml — Gateway 完整配置(2026-08 现状)
+# 权威完整示例:config.example.yaml(本示例为结构 + 代表字段,模型列表从简)
+# 注意:Provider API key 全部由 DB(provider_api_keys 表)管理,config 不存 key
 
 server:
   host: "0.0.0.0"
   port: 8080
   read_timeout: 30s
-  write_timeout: 120s       # 流式响应需要较长写超时
+  write_timeout: 300s      # 流式响应按 chunk 续期,实际语义 =「上游静默多久算断流」
   idle_timeout: 120s
   shutdown_timeout: 30s
+  # 接入日志(UI:Access Logs 页)
+  access_log:
+    enabled: true
+    body_dir: /tmp/gateway-data/access-body
+    buffer_size: 10000
+    batch_size: 100
+    flush_interval: 1s
+    retention: 720h        # 30 天(训练数据积累)
 
 database:
   driver: "sqlite"          # sqlite | postgres
@@ -358,51 +368,47 @@ database:
   conn_max_lifetime: 300s
 
 redis:
-  enabled: false
+  enabled: false            # 单实例不需要
   addr: "localhost:6379"
   password: ""
   db: 0
   pool_size: 10
 
-# 客户端认证（Gateway 自身的认证）
+# 客户端认证(Gateway 自身的认证)
 auth:
   enabled: true
   keys:
-    - name: "claude-code-dev"
-      key: "gw-key-xxxx"
+    - name: "dev-key"
+      key: "gw-key-dev-please-change-me"
       allowed_models: ["*"]
       rate_limit:
         rpm: 100
         tpm: 500000
-    - name: "cline-prod"
-      key: "gw-key-yyyy"
-      allowed_models: ["coding-model", "chat-model"]
-      rate_limit:
-        rpm: 60
-        tpm: 300000
 
-# Provider 配置
+# Provider 配置 — 8 个块,按厂商分:deepseek / deepseek-anthropic / qwen /
+# minimax / minimax-openai / gemini / glm / glm-anthropic(共 5 个厂商)
 providers:
   deepseek:
     enabled: true
+    billing_source: "api"              # token_plan / api / free — 决定 tier 层级
     endpoint: "https://api.deepseek.com"
     protocol: "openai"                 # openai | anthropic | google
     timeout: 60s
+    responses_api: true                # 原生支持 OpenAI Responses API(Codex 透传)
     models:
-      - id: "deepseek-chat"
+      - id: "deepseek-v4-flash"        # ¥1/M 输入、¥0.02/M cache 命中、¥2/M 输出
         aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.0014
-        cost_per_1k_output: 0.0028
-      - id: "deepseek-coder"
-        aliases: ["coding-model"]
-        cost_per_1k_input: 0.0014
-        cost_per_1k_output: 0.0028
-    keys:
-      - name: "deepseek-key-1"
-        key: "sk-xxx1"
-      - name: "deepseek-key-2"
-        key: "sk-xxx2"
-    circuit_breaker:
+        cost_per_1k_input: 0.001
+        cost_per_1k_output: 0.002
+        cost_per_1k_cache_read: 0.00002
+        cost_per_1k_cache_creation: 0.0
+      - id: "deepseek-v4-pro"          # ¥3/M 输入、¥0.025/M cache 命中、¥6/M 输出,支持 thinking
+        aliases: ["pro-model"]
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.006
+        cost_per_1k_cache_read: 0.000025
+        cost_per_1k_cache_creation: 0.0
+    circuit_breaker:                   # 0 = 不启用(per-key 熔断)
       failure_threshold: 5
       failure_window: 60s
       open_timeout: 30s
@@ -410,120 +416,110 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-  minimax:
+  deepseek-anthropic:                  # 同 vendor 共享 key 池(API key 相同两端点通用)
     enabled: true
-    endpoint: "https://api.minimaxi.com/anthropic"
+    billing_source: "api"
+    force_thinking_disabled: true      # 上游 thinking 校验拒绝 compact 历史 → 强制关闭
+    endpoint: "https://api.deepseek.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
-    models:
-      - id: "MiniMax-Text-01"
-        aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-    keys:
-      - name: "minimax-key-1"
-        key: "sk-mm-xxx1"
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-
-  glm:
-    enabled: true
-    endpoint: "https://open.bigmodel.cn/api/paas/v4"
-    protocol: "openai"
-    timeout: 60s
-    models:
-      - id: "glm-4-plus"
-        aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.005
-        cost_per_1k_output: 0.01
-    keys:
-      - name: "glm-key-1"
-        key: "xxx"
+    models:                            # 与 deepseek 相同模型,价格一致
 
   qwen:
     enabled: true
+    billing_source: "api"
     endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     protocol: "openai"
     timeout: 60s
     models:
-      - id: "qwen-coder-plus"
-        aliases: ["coding-model"]
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-    keys:
-      - name: "qwen-key-1"
-        key: "sk-xxx"
+      - id: "qwen-plus"                # 商用主力
+        aliases: []
+        cost_per_1k_input: 0.0058
+        cost_per_1k_output: 0.0144
+      # qwen-turbo / qwen-max / qwen-coder-plus / qwen-long / qwen-vl-max / qwen3-235b-a22b 见 example
 
-  kimi:
+  minimax:
     enabled: true
-    endpoint: "https://api.moonshot.cn/v1"
-    protocol: "openai"
-    timeout: 60s
+    billing_source: "token_plan"       # 包月套餐,优先路由,额度耗尽自动降级到 api 层
+    endpoint: "https://api.minimaxi.com/anthropic"
+    protocol: "anthropic"
+    timeout: 90s
     models:
-      - id: "moonshot-v1-128k"
-        aliases: ["coding-model", "long-context"]
-        cost_per_1k_input: 0.012
-        cost_per_1k_output: 0.012
-    keys:
-      - name: "kimi-key-1"
-        key: "sk-xxx"
+      - id: "MiniMax-M3"               # 1M tokens,旗舰,仅自动缓存
+        aliases: ["MiniMax"]
+        cost_per_1k_input: 0.0021      # 永久五折后价(官方标准价 ¥4.2/M 输入)
+        cost_per_1k_output: 0.0084
+        cost_per_1k_cache_read: 0.00042
+        # 官方悬崖:输入含缓存 > 512k → 输入/输出/缓存全项 ×2
+        long_context_input_threshold: 512000
+        long_context_multiplier: 2
+      # MiniMax-M2.7/M2.5/M2.1/M2 及 -highspeed 变体(204,800 上下文,主动缓存)见 example
+
+  minimax-openai:                      # 同一供应商,不同协议端点,共享 key
+    enabled: true
+    billing_source: "token_plan"
+    endpoint: "https://api.minimaxi.com/v1"
+    protocol: "openai"
+    timeout: 90s
+    responses_api: true
+    models:                            # 与 minimax 相同的模型列表
 
   gemini:
-    enabled: false
+    enabled: true
+    billing_source: "api"
     endpoint: "https://generativelanguage.googleapis.com/v1beta"
     protocol: "google"
     timeout: 60s
     models:
-      - id: "gemini-2.0-flash"
-        aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.0001
-        cost_per_1k_output: 0.0004
-    keys:
-      - name: "gemini-key-1"
-        key: "xxx"
+      - id: "gemini-2.5-flash"         # gemini-2.0-flash / 1.5-pro 已 shutdown
+        aliases: ["gemini-flash"]
+        cost_per_1k_input: 0.00054
+        cost_per_1k_output: 0.00216
+      # 2.5-flash-lite / 2.5-pro / 3.5-flash / 3.1-flash-lite 见 example
 
-# 路由规则
+  glm:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    protocol: "openai"
+    timeout: 60s
+    responses_api: false               # 官方无 /responses API
+    models:
+      - id: "glm-5.2"                  # 旗舰,1M 上下文/128K 输出,¥8/M 输入、¥28/M 输出、¥2/M 缓存
+        aliases: []
+        cost_per_1k_input: 0.008
+        cost_per_1k_output: 0.028
+        cost_per_1k_cache_read: 0.002
+        cost_per_1k_cache_creation: 0.0
+      # 其余在售文本模型(glm-5.1 / glm-5 / glm-5-turbo / glm-4.7 / glm-4.6 / glm-4.5)按官方价格页补
+
+  glm-anthropic:                       # 与 glm 共用同一组 Provider Key
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://open.bigmodel.cn/api/anthropic"
+    protocol: "anthropic"
+    timeout: 60s
+    models:                            # 与 glm 相同的模型列表
+
+# 路由规则 — 唯一规则:catch_all 自动模式(无路由表)
 routing:
-  aliases:
-    coding-model:
-      strategy: "priority"
-      providers:
-        - name: "minimax"
-          model: "MiniMax-Text-01"
-          priority: 1
-        - name: "deepseek"
-          model: "deepseek-coder"
-          priority: 2
-        - name: "glm"
-          model: "glm-4-plus"
-          priority: 3
-    chat-model:
-      strategy: "weight"
-      providers:
-        - name: "deepseek"
-          model: "deepseek-chat"
-          weight: 70
-        - name: "glm"
-          model: "glm-4-plus"
-          weight: 30
-    long-context:
-      strategy: "priority"
-      providers:
-        - name: "kimi"
-          model: "moonshot-v1-128k"
-          priority: 1
-
+  catch_all: {}                        # 空规则 = 所有 enabled provider 自动参与
   default_strategy: "priority"
 
 # Key Pool 配置
 keypool:
   cooling_duration: 60s
-  max_cooling_count: 5
   health_check_interval: 30s
-  key_rotation: "round_robin"        # round_robin | least_used | random
+  key_rotation: "round_robin"          # round_robin | least_used | random
+  # quota restore / poll(flat key,不要嵌 quota: 子块)
+  quota_enabled: true
+  quota_probe_initial_delay: 5m        # 首次探测延迟(给上游恢复时间)
+  quota_probe_max_backoff: 30m
+  quota_probe_jitter_pct: 20
+  quota_poll_interval: 60s             # 主动 poll 周期(有余额接口的厂商)
+  quota_poll_jitter_pct: 10
+  quota_http_timeout: 10s
+  quota_user_agent: "native-llm-gateway/quota-restore-1.0"
 
 # 超时与重试
 timeouts:
@@ -531,30 +527,30 @@ timeouts:
   server_write: 120s
   server_idle: 120s
   provider_default: 60s
-  request_total: 300s                # 全局请求最大时间（含 failover）
+  request_total: 300s                  # 全局请求最大时间(含 failover)
 
 retry:
   enabled: true
-  max_attempts: 3                    # 最大 failover 次数
-  no_failover_on:                    # 以下错误不触发 failover
-    - "invalid_request"              # 400
-    - "auth"                         # 401/403
-  failover_on:                       # 以下错误触发 failover
-    - "rate_limit"                   # 429
-    - "server_error"                 # 5xx
+  max_attempts: 3                      # 最大 failover 次数
+  no_failover_on:                      # 以下错误不触发 failover
+    - "invalid_request"                # 400
+    - "auth"                           # 401/403
+  failover_on:                         # 以下错误触发 failover
+    - "rate_limit"                     # 429
+    - "server_error"                   # 5xx
     - "timeout"
     - "connection"
 
-# 日志
+# 日志(gateway-reload.sh 用 >> 追加到 logs/gateway.log,按天轮转,7 天清理)
 logging:
-  level: "info"                      # debug | info | warn | error
-  format: "json"                     # json | console
-  output: "stdout"                   # stdout | file
+  level: "info"                        # debug | info | warn | error
+  format: "console"                    # json | console
+  output: "stdout"
   file_path: "logs/gateway.log"
 
 # 指标
 metrics:
-  enabled: true
+  enabled: false
   path: "/metrics"
   port: 9090
 
@@ -760,8 +756,11 @@ func (r *Registry) ListRegistered() []string
 
 ## 5.4 Key Pool
 
+> 现状(2026-08):无终端禁用状态(DISABLED 已移除);同 vendor 的多个注册名共享
+> 同一 Pool;每把 key 挂独立熔断器;状态可快照/恢复(优雅关停写 key-state.json)。
+
 ```go
-// backend/internal/keypool/key.go
+// backend/internal/keypool/key.go + pool.go
 
 package keypool
 
@@ -770,61 +769,75 @@ import "time"
 type KeyStatus string
 
 const (
-    KeyStatusActive   KeyStatus = "ACTIVE"
-    KeyStatusCooling  KeyStatus = "COOLING"
-    KeyStatusLimited  KeyStatus = "LIMITED"
-    KeyStatusDisabled KeyStatus = "DISABLED"
+    KeyStatusActive       KeyStatus = "ACTIVE"
+    KeyStatusCooling      KeyStatus = "COOLING"
+    KeyStatusLimited      KeyStatus = "LIMITED"        // 预留
+    KeyStatusQuotaExceeded KeyStatus = "QUOTA_EXCEEDED" // 额度耗尽,poll/probe 恢复
+    // 无 DISABLED —— 所有失败映射到可恢复状态
 )
 
 type Key struct {
-    ID            string
-    ProviderName  string
-    Name          string
-    Key           string       // 加密存储，运行时解密
-    Status        KeyStatus
-    CoolingUntil  time.Time
-    CoolingCount  int
-    TotalRequests int64
-    TotalTokens   int64
-    ErrorCount    int
-    LastUsedAt    time.Time
-    LastErrorAt   time.Time
-    CreatedAt     time.Time
-    UpdatedAt     time.Time
+    ID                string
+    ProviderName      string   // 厂商名(vendor)
+    Name              string
+    Key               string   // 明文(DB key_hash 列存原值);快照不落盘
+    Status            KeyStatus
+    CoolingUntil      time.Time
+    QuotaExceededSince time.Time
+    Remaining         float64  // 最近 poll 的余额
+    LastPolledAt      time.Time
+    QuotaKind         string   // percent | currency(前端渲染)
+    QuotaZeroStreak   int      // 连续 2 轮 poll 读到 0 才确认 QE
+    CoolingCount      int      // 冷却次数不设上限(冷却自限)
+    TotalRequests     int64
+    TotalTokens       int64
+    ErrorCount        int
+    CircuitOpen       bool     // per-key 熔断快照字段(供 UI)
+    CircuitState      string
+    LastUsedAt        time.Time
+    LastErrorAt       time.Time
+    CreatedAt         time.Time
+    UpdatedAt         time.Time
 }
 
-// Pool 管理一个 Provider 下的所有 Key
+// Pool 管理一个厂商(vendor)下的所有 Key;同 vendor 多注册名共享同一 Pool
 type Pool struct {
     ProviderName string
     keys         []*Key
     scheduler    Scheduler
+    breakers     map[string]*circuit.Breaker  // per-key 熔断(懒创建)
 }
 
-func NewPool(providerName string, keys []*Key, strategy string) *Pool
-
-// Acquire 获取一个可用的 Key
-//   1. Scheduler 选择一个 Key
-//   2. 如果 Key 是 COOLING 且 cooling_until < now，恢复为 ACTIVE
-//   3. 如果所有 Key 都不可用，返回 ErrNoAvailableKey
+// Acquire 获取一个可用的 Key(先 filterBreakers 过滤熔断中的 key,再按 tier 桶排序)
 func (p *Pool) Acquire() (*Key, error)
 
-func (p *Pool) ReportSuccess(key *Key)
+func (p *Pool) ReportSuccess(key *Key)   // 熔断器 RecordSuccess + 恢复余额快照
 
 // ReportRateLimit 报告 429
-//   1. 设置 status = COOLING
-//   2. 设置 cooling_until = now + cooling_duration（或 Retry-After）
-//   3. cooling_count++
-//   4. 如果 cooling_count > max_cooling_count，设置 DISABLED
+//   1. status = COOLING, cooling_until = now + cooling_duration(或 Retry-After)
+//   2. cooling_count++(不设上限,无 DISABLED)
+//   注:必须传「实际发过请求」的 key —— 路由层 acquire 的 key 通过 req.Key 透传,
+//   否则双 acquire 会把 429 冷却标到没发过请求的 healthy key 上(踩坑 #15)
 func (p *Pool) ReportRateLimit(key *Key, retryAfter time.Duration)
 
-func (p *Pool) ReportError(key *Key, err *ProviderError)
+// ReportError 非 429 错误:
+//   - auth → COOLING 5 分钟(换 key 后自动恢复,无终端禁用)
+//   - invalid_request → 只计数
+//   - quota_exceeded → QUOTA_EXCEEDED(poll 模式)或只计数(probe 模式,无 balancer 厂商)
+//   - server_error/timeout/connection → 该 key 熔断计数(per-key,不连坐)
+func (p *Pool) ReportError(key *Key, errType string)
+
+// Snapshot / ApplySnapshot 优雅关停持久化(DB 目录 key-state.json):
+//   只恢复未过期 COOLING 与 QUOTA_EXCEEDED;balance 快照总是恢复(LastPolledAt 非零)
+func (p *Pool) Snapshot() KeyState
+func (p *Pool) ApplySnapshot(s KeyState)
 
 type PoolStatus struct {
     ProviderName string
     TotalKeys    int
     ActiveKeys   int
     CoolingKeys  int
-    DisabledKeys int
+    QuotaExceededKeys int
 }
 
 func (p *Pool) Status() PoolStatus
@@ -836,6 +849,7 @@ type Scheduler interface {
 
 type RoundRobinScheduler struct{ current int }
 type LeastUsedScheduler struct{}
+```
 type RandomScheduler struct{}
 ```
 
@@ -1196,60 +1210,54 @@ Response 200:
   ]
 }
 
+GET    /api/v1/providers/registered      # Registry 注册名列表(轻量)
 GET    /api/v1/providers/:name           # 单个详情
-POST   /api/v1/providers                 # 创建（热加载）
-PUT    /api/v1/providers/:name           # 更新（热加载）
-DELETE /api/v1/providers/:name           # 删除（热加载）
-POST   /api/v1/providers/:name/health    # 手动健康检查
+# 注:管理 API 为只读(provider 由 config 管理,改配置需重载);写操作只有 key CRUD
 ```
 
-## 6.3 管理 API — Keys
+## 6.3 管理 API — Provider Keys(厂商 key 池)
 
 ```
-GET  /api/v1/providers/:provider/keys
+GET  /api/v1/providers/:name/api-keys
 Response 200:
 {
   "keys": [
     {
-      "id": "key-001",
+      "id": 1,
+      "provider_name": "deepseek",
       "name": "deepseek-key-1",
-      "status": "ACTIVE",
-      "total_requests": 500,
-      "total_tokens": 234567,
-      "cooling_count": 2,
-      "error_count": 0,
-      "last_used_at": "2025-01-01T00:00:00Z",
-      "last_error_at": null
+      "billing_source": "api",
+      "protocols": "openai,anthropic",
+      "enabled": true,
+      "status": "ACTIVE",           # 运行时状态:ACTIVE / COOLING / QUOTA_EXCEEDED
+      "remaining": 95.5,            # 最近 poll 的余额(百分比或金额)
+      "quota_kind": "currency",     # percent | currency(前端按类型渲染)
+      "circuit_open": false,        # per-key 熔断状态
+      "circuit_state": "CLOSED"
     }
   ]
 }
 
-POST   /api/v1/providers/:provider/keys           # 添加
-PUT    /api/v1/providers/:provider/keys/:id        # 更新
-DELETE /api/v1/providers/:provider/keys/:id        # 删除
-PUT    /api/v1/providers/:provider/keys/:id/status # 更新状态
+POST   /api/v1/providers/:name/api-keys                    # 添加(key 明文只返回一次)
+DELETE /api/v1/providers/:name/api-keys/:id                # 删除
+POST   /api/v1/providers/:name/api-keys/:id/mark-quota-exceeded  # 手动标记额度耗尽
 ```
+
+Gateway Key(客户端认证)在 `/api/v1/keys`:GET / POST / PUT /:name / DELETE /:name(白名单在 allowed_models 配置)。
 
 ## 6.4 管理 API — Routing
 
 ```
-GET  /api/v1/routing/aliases
+GET  /api/v1/routing
 Response 200:
 {
-  "aliases": {
-    "coding-model": {
-      "strategy": "priority",
-      "providers": [
-        {"name": "minimax", "model": "MiniMax-Text-01", "priority": 1},
-        {"name": "deepseek", "model": "deepseek-coder", "priority": 2}
-      ]
-    }
-  }
+  "catch_all": {          # 空对象 = 自动模式(所有 enabled provider 参与)
+    "providers": []
+  },
+  "default_strategy": "priority"
 }
 
-PUT    /api/v1/routing/aliases/:alias   # 更新
-POST   /api/v1/routing/aliases          # 创建
-DELETE /api/v1/routing/aliases/:alias   # 删除
+# 无写端点 — 路由规则由 config.yaml routing.catch_all 管理,改配置需重载
 ```
 
 ## 6.5 管理 API — Usage
@@ -1324,54 +1332,63 @@ PUT  /api/v1/config/reload              # 热重载配置
 GET  /metrics                           # Prometheus 指标
 ```
 
-## 6.8 API 端点速查表
+## 6.8 API 端点速查表(2026-08 现状)
 
 ```
 === 代理端点（客户端调用） ===
 
 POST /v1/chat/completions              OpenAI 协议
 POST /v1/messages                       Anthropic 协议
+POST /responses 或 /v1/responses         OpenAI Responses API(Codex,仅 responses_api 厂商)
 POST /v1beta/models/{model}:*           Google 协议
+GET  /healthz                           存活探针(gateway-reload.sh 用)
 
 === 管理 API ===
 
-GET    /api/v1/providers
-GET    /api/v1/providers/:name
-POST   /api/v1/providers
-PUT    /api/v1/providers/:name
-DELETE /api/v1/providers/:name
-POST   /api/v1/providers/:name/health
+GET    /api/v1/providers                按厂商聚合(共享 pool、key 状态)
+GET    /api/v1/providers/registered     Registry 注册名列表
+GET    /api/v1/providers/:name          单个详情
 
-GET    /api/v1/providers/:provider/keys
-POST   /api/v1/providers/:provider/keys
-PUT    /api/v1/providers/:provider/keys/:id
-DELETE /api/v1/providers/:provider/keys/:id
-PUT    /api/v1/providers/:provider/keys/:id/status
+GET    /api/v1/providers/:name/api-keys         厂商 key 池列表
+POST   /api/v1/providers/:name/api-keys         添加
+DELETE /api/v1/providers/:name/api-keys/:id     删除
+POST   /api/v1/providers/:name/api-keys/:id/mark-quota-exceeded  手动标 QE
 
-GET    /api/v1/routing/aliases
-PUT    /api/v1/routing/aliases/:alias
-POST   /api/v1/routing/aliases
-DELETE /api/v1/routing/aliases/:alias
+GET    /api/v1/keys                     Gateway Key 列表
+POST   /api/v1/keys                     创建(明文只返回一次)
+PUT    /api/v1/keys/:name               更新(白名单/限流)
+DELETE /api/v1/keys/:name               删除
 
-GET    /api/v1/usage
-GET    /api/v1/usage/aggregate
+GET    /api/v1/routing                  catch_all 状态(自动模式 / 显式列表)
 
-GET    /api/v1/dashboard/overview
+GET    /api/v1/usage                    用量查询
+GET    /api/v1/usage/aggregate          用量聚合
+GET    /api/v1/usage/by_model/:model_id/providers  上游用量对比
 
-GET    /api/v1/health
-PUT    /api/v1/config/reload
-GET    /metrics
+GET    /api/v1/access-logs              接入日志列表
+GET    /api/v1/access-logs/stats        聚合统计
+GET    /api/v1/access-logs/:id/detail   详情(req/resp body 人类可读)
+GET    /api/v1/access-logs/export       JSONL 训练数据导出
+
+GET    /api/v1/dashboard                24h 总览(QuotaKnownSum 按厂商聚合)
+GET    /api/v1/config/quota             配额探测配置(端点/间隔/轮询 vs 探测)
+
+GET    /metrics                         指标(metrics.enabled 时)
 ```
 
 ---
 
 # 第七部分：数据库模型
 
-## 7.1 Migration 001 — Providers
+## 7.1 Migration 001 — Providers（现状:无独立 migration,GORM AutoMigrate 建表）
+
+> 现状(2026-08):表结构以 `backend/internal/database/models.go` 为准,启动时 GORM
+> AutoMigrate 自动建表/加列(无 SQL migration 文件)。实际表:
+> `providers` / `provider_models` / `model_aliases`(alias 退役,表保留)/
+> `provider_api_keys` / `usage_records` / `routing_configs`(退役保留)/
+> `gateway_keys` / `access_logs`。下列为真实列。
 
 ```sql
--- migrations/001_init_providers.up.sql
-
 CREATE TABLE IF NOT EXISTS providers (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,
@@ -1379,21 +1396,24 @@ CREATE TABLE IF NOT EXISTS providers (
     endpoint        TEXT NOT NULL,
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     timeout_seconds INTEGER NOT NULL DEFAULT 60,
+    billing_source  TEXT NOT NULL DEFAULT 'api',   -- P47: token_plan / api / free
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS provider_models (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider_name       TEXT NOT NULL REFERENCES providers(name),
-    model_id            TEXT NOT NULL,
-    cost_per_1k_input   REAL NOT NULL DEFAULT 0,
-    cost_per_1k_output  REAL NOT NULL DEFAULT 0,
-    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_name           TEXT NOT NULL REFERENCES providers(name),
+    model_id                TEXT NOT NULL,
+    cost_per_1k_input       REAL NOT NULL DEFAULT 0,
+    cost_per_1k_output      REAL NOT NULL DEFAULT 0,
+    cost_per_1k_cache_read  REAL NOT NULL DEFAULT 0,      -- P40: 缓存价
+    cost_per_1k_cache_creation REAL NOT NULL DEFAULT 0,   -- P40: 主动缓存写价
+    created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(provider_name, model_id)
 );
 
-CREATE TABLE IF NOT EXISTS model_aliases (
+CREATE TABLE IF NOT EXISTS model_aliases (   -- alias 已退役,表保留(历史数据兼容)
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     alias           TEXT NOT NULL,
     provider_name   TEXT NOT NULL REFERENCES providers(name),
@@ -1405,35 +1425,45 @@ CREATE TABLE IF NOT EXISTS model_aliases (
 );
 ```
 
-## 7.2 Migration 002 — Keys
+## 7.2 Migration 002 — Provider API Keys + Gateway Keys
 
 ```sql
--- migrations/002_init_keys.up.sql
-
-CREATE TABLE IF NOT EXISTS api_keys (
+-- 厂商 key 池(替代 config 内嵌 keys):明文存 key_hash(P30 暂不上加密)
+CREATE TABLE IF NOT EXISTS provider_api_keys (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider_name   TEXT NOT NULL REFERENCES providers(name),
+    provider_name   TEXT NOT NULL,        -- 厂商名(vendor),同厂商协议面共享池
     name            TEXT NOT NULL,
-    key_encrypted   TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'ACTIVE',
-    cooling_until   DATETIME,
-    cooling_count   INTEGER NOT NULL DEFAULT 0,
-    total_requests  INTEGER NOT NULL DEFAULT 0,
-    total_tokens    INTEGER NOT NULL DEFAULT 0,
-    error_count     INTEGER NOT NULL DEFAULT 0,
-    last_used_at    DATETIME,
-    last_error_at   DATETIME,
+    key_hash        TEXT NOT NULL,        -- 明文(提取测试时注意权限)
+    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    billing_source  TEXT NOT NULL DEFAULT 'api',   -- P48: 单 key 计费来源
+    protocols       TEXT NOT NULL DEFAULT '',       -- "openai,anthropic";空 = 全部
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(provider_name, name)
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 客户端认证 key(白名单 / 绑定 / 限流在此)
+CREATE TABLE IF NOT EXISTS gateway_keys (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL UNIQUE,
+    key_hash         TEXT NOT NULL UNIQUE,
+    providers        TEXT NOT NULL DEFAULT '[]',   -- 绑定注册名,空 = 不限
+    provider_key_ids TEXT NOT NULL DEFAULT '[]',   -- 绑定 provider key ID,空 = 不限
+    allowed_models   TEXT NOT NULL DEFAULT '["*"]', -- 白名单(参与候选选择)
+    default_model    TEXT NOT NULL DEFAULT '',      -- fallback 模型(需过白名单)
+    rpm              INTEGER NOT NULL DEFAULT 100,
+    tpm              INTEGER NOT NULL DEFAULT 500000,
+    enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 运行时 key 状态不落 DB:内存 keypool(COOLING/QUOTA_EXCEEDED/余额/熔断),
+-- 优雅关停时快照到 DB 同目录 key-state.json 恢复
 ```
 
 ## 7.3 Migration 003 — Usage
 
 ```sql
--- migrations/003_init_usage.up.sql
-
 CREATE TABLE IF NOT EXISTS usage_records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     trace_id        TEXT NOT NULL,
@@ -1441,6 +1471,7 @@ CREATE TABLE IF NOT EXISTS usage_records (
     provider_name   TEXT NOT NULL,
     model_id        TEXT NOT NULL,
     protocol        TEXT NOT NULL,
+    billing_source  TEXT NOT NULL DEFAULT 'api',   -- 请求时刻冗余,历史不受 config 影响
     input_tokens    INTEGER NOT NULL DEFAULT 0,
     output_tokens   INTEGER NOT NULL DEFAULT 0,
     total_tokens    INTEGER NOT NULL DEFAULT 0,
@@ -1458,11 +1489,11 @@ CREATE INDEX idx_usage_model ON usage_records(model_id);
 CREATE INDEX idx_usage_trace ON usage_records(trace_id);
 ```
 
-## 7.4 Migration 004 — Routing
+## 7.4 Migration 004 — Routing（已退役）
 
 ```sql
--- migrations/004_init_routing.up.sql
-
+-- routing_configs 表保留但不再使用 — 路由规则 = config.yaml 的 routing.catch_all,
+-- 无 DB 路由表。alias 机制已退役。
 CREATE TABLE IF NOT EXISTS routing_configs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     alias           TEXT NOT NULL UNIQUE,
@@ -1473,22 +1504,38 @@ CREATE TABLE IF NOT EXISTS routing_configs (
 );
 ```
 
-## 7.5 Migration 005 — Auth
+## 7.5 Migration 005 — Access Logs
 
 ```sql
--- migrations/005_init_auth.up.sql
-
-CREATE TABLE IF NOT EXISTS gateway_keys (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL UNIQUE,
-    key_hash        TEXT NOT NULL UNIQUE,
-    allowed_models  TEXT NOT NULL DEFAULT '["*"]',
-    rpm             INTEGER NOT NULL DEFAULT 100,
-    tpm             INTEGER NOT NULL DEFAULT 500000,
-    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+-- 接入日志:DB 只存 metadata,req/resp body 落地文件(body_dir,16MB 上限,
+-- 超限截断加 .truncated.json 后缀);retention 30 天清理
+CREATE TABLE IF NOT EXISTS access_logs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id         TEXT NOT NULL,
+    created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    gateway_key_id   TEXT,
+    gateway_key_name TEXT,
+    method           TEXT,
+    path             TEXT,
+    client_ip        TEXT,
+    user_agent       TEXT,
+    requested_model  TEXT,          -- 客户端请求模型名
+    final_model      TEXT,          -- 实际使用模型(上游返回)
+    provider_name    TEXT,
+    protocol         TEXT,
+    is_stream        BOOLEAN NOT NULL DEFAULT FALSE,
+    status_code      INTEGER,
+    error_type       TEXT,
+    latency_ms       INTEGER,
+    req_body_path    TEXT,
+    req_body_size    INTEGER,
+    resp_body_path   TEXT,
+    resp_body_size   INTEGER
 );
+
+CREATE INDEX idx_access_logs_created_at ON access_logs(created_at);
+CREATE INDEX idx_access_logs_status ON access_logs(status_code);
+CREATE INDEX idx_access_logs_error ON access_logs(error_type);
 ```
 
 ---
@@ -1566,20 +1613,26 @@ CREATE TABLE IF NOT EXISTS gateway_keys (
   DeepSeek:
     - 基本完全兼容 OpenAI 格式
     - 支持 stream_options.include_usage
+    - 原生支持 Responses API(/v1/responses,deepseek-v4-flash,2026-07-31 起)
+    - Thinking 模式:extra_body={"thinking":{"type":"enabled"}}(v4-pro),响应带 reasoning_content
+    - Prefix caching:默认开启,响应 prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    - 旧名 deepseek-chat / deepseek-reasoner 2026-07-24 弃用
 
   GLM (智谱):
-    - 基本兼容 OpenAI 格式
-    - 某些模型不支持 function_call
-    - 错误格式与 OpenAI 一致
+    - 基本兼容 OpenAI 格式(glm-5.2 起:function calling / 上下文缓存 / 结构化输出 / 思考模式)
+    - 思考模式:thinking + reasoning_effort,响应带 reasoning_content
+    - 官方无 /responses API(Codex 请求不会路由到它)
 
   Qwen (通义千问):
     - 通过 DashScope 的 OpenAI 兼容模式接入
     - 支持 stream_options.include_usage
     - 部分参数支持范围与 OpenAI 不同
 
-  Kimi (Moonshot):
-    - 基本兼容 OpenAI 格式
-    - 支持 128K 上下文
+  MiniMax (OpenAI 面):
+    - 共享 minimax(anthropic)的 key 池与模型列表
+    - M3 专属参数在 extra_body:thinking(adaptive/disabled)、reasoning_split、
+      service_tier(standard/priority,1.5x 价格)
+    - 原生支持 Responses API;输入含缓存 > 512k 时全项 ×2(官方悬崖)
 
 以上差异由各 Provider 在 SendRequest 中自行处理，Gateway 核心不感知。
 */
@@ -1820,7 +1873,7 @@ Anthropic 请求格式:
   anthropic-version: 2023-06-01
 
   {
-    "model": "MiniMax-Text-01",
+    "model": "MiniMax-M3",
     "max_tokens": 1024,
     "system": "You are helpful",
     "messages": [
@@ -2560,6 +2613,13 @@ docker-down:
 ---
 
 # 第十六部分：前端 Dashboard 详细设计
+
+> ⚠️ 本部分为早期线框图,与实际页面已有差异(2026-08 现状):
+> - 页面:`/overview` `/providers` `/provider-keys` `/keys` `/routing` `/usage` `/access-logs`
+> - Provider Keys 页面展示运行时 key 状态:ACTIVE / COOLING / **QUOTA_EXCEEDED** + 余额
+>   (percent/currency)+ **per-key 熔断状态**;**无 DISABLED 状态**
+> - Routing 页为 **catch_all 自动模式状态**(alias 路由表已退役)
+> - 线框图里的模型名/价格为旧数据,以 config.example.yaml 为准
 
 ## 16.1 Overview 页面
 
