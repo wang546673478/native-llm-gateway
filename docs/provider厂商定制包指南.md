@@ -25,12 +25,42 @@ backend/internal/provider/deepseek/
 
 ### Step 0:调研官方文档(先做,防返工)
 
-拉文档站 `/llms.txt` 全量索引,逐项确认四件事:
+**官方文档是唯一权威来源** — 用户只提供官方文档 URL,不依赖搜索镜像/二手信息。
 
-1. **模型 ID 与能力**:模型页(思考模式 / 工具调用 / 上下文长度)
-2. **Anthropic/Claude 兼容面**:很多厂商有 anthropic 端点但藏在「Claude API 兼容」章节 —— **必须 `grep -i "anthropic\|claude"` 索引**,别只按关键词页碰运气(真实教训:GLM 的 Claude API 兼容页在索引第 117 行,漏查导致第一版只有 openai 面)
-3. **Responses API**:支持 → `responses_api: true` + `ResponsesPath`;不支持 → false(Codex 请求不会路由到它)
-4. **余额查询接口**:有 → 写 balancer;没有 → 不写(qwen/gemini/glm 同款,api 计费)
+**0.1 确认厂商**:请求未点明厂商时(如「加一个新厂商」)先问清是哪家;已点明(如「加 kimi」)跳过。
+
+**0.2 要官方文档 URL**:
+- 用户给的必须是 URL;不是 URL(如「去搜 XX 官网」)→ 要求重新提供
+- URL 拉取失败(404 / 非官方域名)→ 请用户换一个
+
+**0.3 遍历官方文档站**(只在用户给的站内):
+- 入口:优先拉 `/llms.txt` 全量索引(抓不到就抓首页)
+- WebSearch 限定站内定位章节
+- **必须 `grep -i "anthropic\|claude"` 索引** —— anthropic 兼容面常藏在「Claude API 兼容」章节(真实教训:GLM 的 Claude API 兼容页在索引第 117 行,漏查导致第一版只有 openai 面)
+
+**0.4 提取 6 类信息**(对话内速查表,每项标消费方):
+
+| # | 提取项 | 消费方 |
+|---|--------|--------|
+| ① 协议面 | openai/anthropic base URL、Responses 支持与路径(端点是否已含 `/v1`)、鉴权方式 | ChatPath/ResponsesPath、config 块、`responses_api` |
+| ② 模型与能力 | 真实模型 ID、上下文窗口(512k 悬崖)、思考模式(默认开/关、effort、thinking 参数名)、工具调用(带 tools 的回传要求)、流式格式、JSON output 触发条件 | config `models[].id`、`default_model`、包代码 |
+| ③ 定价 | input/output 单价(**单位换算**:元/M → ÷1000 得 `cost_per_1k`)、缓存 read/creation 有无与数值、缓存计费语义(`prompt_tokens` 含不含 cached)、峰谷价 | `cost_per_1k_input/output/cache_read/cache_creation` |
+| ④ 余额 | 官方余额 API 端点与响应字段;没有 → 替代方案(如未文档化 token_plan);额度错误藏 200 body? | `balancer.go`、`RegisterBalancer` |
+| ⑤ 定制特性 | 响应包裹格式(base_resp)、reasoning 字段名与回传规则、缓存机制差异、厂商专属参数(service_tier 等)、429 语义(套餐耗尽 vs 真限流) | 包 header 注释 |
+| ⑥ 入口 | `/llms.txt` 索引、模型表/定价表/协议章节各自 URL | 遍历路线 |
+
+**0.5 差异标注**:官方文档与现有 config/文档冲突(如 MiniMax 旧域名)时,标出差异再动,不静默覆盖。
+
+**完成度标准**(全部满足 = 调研完,进入 Step 1):
+
+| 项 | 标准 |
+|---|---|
+| 协议 | 每个面 base URL + 路径确认,能写出 ChatPath/ResponsesPath |
+| 模型 | ≥1 个真实可用模型 ID(填 `default_model`) |
+| 价格 | input/output 单价确认;文档没给 → 显式标「无定价 → cost 缺省 0」,不是跳过 |
+| 特性 | 能写出完整 header 注释清单 |
+| 余额 | 有官方 API / 无(用替代)/ 文档未提及 —— 三选一显式结论 |
+| 未知项 | 标「文档未提及」≠「没有」,写代码时按最保守处理 |
 
 ### Step 1:写 openai 面(`xxx.go`)
 
