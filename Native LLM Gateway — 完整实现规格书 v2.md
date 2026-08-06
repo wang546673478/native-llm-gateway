@@ -14,12 +14,16 @@
 | 路由 | alias 表 + 短/长格式 + fallback model | **无路由表**:`routing.catch_all: {}` 自动模式,所有 provider 自动参与,按 tier(token_plan → api → free)计费;alias 表与 fallback model 已退役(能力保留) |
 | 路由决策 | 按 model 名路由到声明它的 provider | **模型名只是标签**:配了 catch_all 后一律走链,真实名也不直连声明者 |
 | 白名单 | 入口校验 | **逐候选校验 + 参与选择**:白名单外的候选跳过;provider 声明过白名单模型就用白名单模型 |
-| Provider 结构 | 按协议拆目录(`deepseek_anthropic/` 等)+ glm/kimi | **按厂商一个目录,内含多协议面**:`deepseek/`(openai+anthropic)、`minimax/`(anthropic+openai);glm/kimi 已删;同厂商协议面共享 key 池,vendor 级一份 key |
+| Provider 结构 | 按协议拆目录(`deepseek_anthropic/` 等)+ glm/kimi | **按厂商一个目录,内含多协议面**:`deepseek/`(openai+anthropic)、`minimax/`(anthropic+openai)、`glm/`(openai+anthropic,2026-08 加回,官方 monitor 余额端点);kimi 已删;同厂商协议面共享 key 池,vendor 级一份 key |
 | Provider 能力 | 无 | config `responses_api: true` 标记原生支持 OpenAI Responses API 的厂商(deepseek/minimax),`/responses` 纯透传(Codex) |
-| 错误处理 | 400 invalid_request 禁用 key | **不禁用**(只计数);仅 auth 禁用。跨厂商续接剥离推理块 + 强制 `effort=none`(DeepSeek 校验) |
+| 错误处理 | 400 invalid_request 禁用 key | **无终端禁用状态**(P-no-disabled):auth → 该 key COOLING 5 分钟自动重试;400 invalid_request 只计数;429+2056「Token Plan 用量上限」分类为 quota_exceeded。跨厂商续接剥离推理块 + 强制 `effort=none`(DeepSeek 校验) |
+| 熔断器 | §5.6 provider 级(Manager/Reporter) | **per-key 级**(2026-08-06):熔断器挂在 keypool,5xx/timeout/connection 只熔断出问题的 key,不连坐同 provider 其他 key;429/quota/auth/invalid_request 不计入;转移全程日志 |
+| 配额机制 | 无轮询概念 | 按厂商两档恢复:poll(有余额接口:deepseek/minimax/glm)→ 标 QUOTA_EXCEEDED,quotacheck 轮询,余额恢复自动回链,连续 2 轮读到 0 才确认;probe(无接口:qwen/gemini)→ 不永久标记,每次请求重新探测 |
+| Key 路由 | 路由层与 Provider 层各自取 key | **req.Key 透传**:路由层已 acquire 的 key 传给 Provider 层复用,禁止二次 acquire(双 acquire 曾把 429 冷却标到没发过请求的 healthy key 上,见踩坑 #15) |
 | 计费 | 无 tier 概念 | `billing_source: token_plan/api/free` 分层,quota 耗尽自动降级/恢复 |
-| 管理 API | 规格书 §9 | 增加 `/access-logs/export`(JSONL 训练数据导出)、`/config/quota`;provider 按厂商聚合 |
-| 接入日志 | — | 30 天保留、body 上限 16MB、区分「客户端请求模型/实际使用模型」、详情人类可读 |
+| 管理 API | 规格书 §9 | 增加 `/access-logs/export`(JSONL 训练数据导出)、`/config/quota`、`/usage/by_model/:model_id/providers`;provider 按厂商聚合;熔断状态不再按 provider 输出 |
+| 接入日志 | — | 30 天保留、body 上限 16MB、区分「客户端请求模型/实际使用模型」、详情人类可读;详情页 usage 行只对非流式请求显示(流式看用量页) |
+| 持久化 | 无 | 日志追加模式 `logs/gateway.log`,按天轮转 7 天清理;优雅关停写 `key-state.json` 快照(QUOTA_EXCEEDED/COOLING/余额),重启恢复,不等重新 poll |
 
 > 新增/更新厂商的实操指南见 `docs/provider厂商定制包指南.md`;历史踩坑见 `docs/踩坑与排错.md`。
 
@@ -1540,7 +1544,9 @@ CREATE TABLE IF NOT EXISTS gateway_keys (
 └──────────────┴────────────────┴────────────────┴─────────────────┘
 ```
 
-## 8.2 OpenAI 兼容 Provider（DeepSeek / GLM / Qwen / Kimi）
+## 8.2 OpenAI 兼容 Provider（DeepSeek / GLM / Qwen / MiniMax）
+
+> 现状(2026-08):Kimi 已删除。同一基座被多厂商复用:deepseek(openai 面)、glm(openai 面)、qwen、minimax(openai 面)。DeepSeek/GLM/MiniMax 的 anthropic 面继承 anthropic_compatible.Base,见 §8.3。
 
 ```go
 // backend/internal/provider/openai_compatible/openai_compatible.go
@@ -1550,7 +1556,7 @@ CREATE TABLE IF NOT EXISTS gateway_keys (
   - DeepSeek:  endpoint = https://api.deepseek.com
   - GLM:       endpoint = https://open.bigmodel.cn/api/paas/v4
   - Qwen:      endpoint = https://dashscope.aliyuncs.com/compatible-mode/v1
-  - Kimi:      endpoint = https://api.moonshot.cn/v1
+  - MiniMax:   endpoint = https://api.minimax.chat/v1
 
 协议: OpenAI Chat Completions API
 认证: Authorization: Bearer {api_key}
@@ -1780,7 +1786,7 @@ func (p *OpenAICompatible) Close() error {
 }
 ```
 
-## 8.3 Anthropic 兼容 Provider（MiniMax）
+## 8.3 Anthropic 兼容 Provider（MiniMax / DeepSeek / GLM）
 
 ```go
 // backend/internal/provider/minimax/minimax.go

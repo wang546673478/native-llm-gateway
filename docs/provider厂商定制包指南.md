@@ -130,7 +130,9 @@ func init() {
 
 Balancer 接口:`FetchBalance(ctx, baseURL, key) (*Balance, error)`,返回 `{Raw float64, HasQuota bool, Kind "percent"|"currency"}`。
 - **token_plan 厂商必须有**(percent 或金额),否则额度耗尽永不标记、永不降级
-- 实测过 MiniMax 的 `token_plan/remains` 是**未文档化端点**,不稳定要降级到错误码驱动(HTTP 200 + base_resp 1008/2056 → 见踩坑 #1)
+- 有官方余额端点的厂商一律写(deepseek / minimax / glm 都有;qwen / gemini 没有,不写 → 走 probe 模式:额度耗尽只计数不标记,每次请求重新探测,充值即恢复)
+- 实测过 MiniMax 的 `token_plan/remains` 是**未文档化端点**(quota host 与 chat host 不同,`www.minimaxi.com`),且早期猜的字段名都不对;稳定兜底仍是错误码驱动(HTTP 200 + base_resp 1008/2056 → 见踩坑 #1)——balancer 拿不到数就靠错误码降级,两条路都写着
+- glm 用官方 monitor 余额端点(滚动窗口重置后自动恢复)
 
 ### Step 5:config.yaml 加块
 
@@ -165,7 +167,8 @@ kimi:
 | 坑 | 要点 |
 |---|---|
 | 上游错误藏在 HTTP 200 body | 用 `ParseMiniMaxBaseResp` 同款机制解析,别只认状态码 |
-| 400 invalid_request 不禁用 key | `ReportError` 只对 auth 禁用(已修,别改回去) |
+| 错误分类别禁用 key | **无终端禁用状态**:auth → COOLING 5 分钟自动重试;400 invalid_request 只计数;5xx/timeout/connection → per-key 熔断(只熔断该 key)。别把「禁用」逻辑加回去 |
+| 429 冷却标错 key | `req.Key` 已由路由层 acquire,Provider 层必须复用它发请求,不能内部二次 acquire(双 acquire 会把 429 冷却标到没发过请求的 healthy key 上) |
 | Responses API 支持矩阵 | 支持的厂商标 `responses_api: true` + `ResponsesPath`;`/responses` 请求链上只走支持的 |
 | 跨厂商推理块 | 客户端回带上家 reasoning → 网关自动剥离 + effort=none,厂商包无需处理 |
 | 注册名都要注册 balancer | 漏一个 → 该协议面额度永不标记 |

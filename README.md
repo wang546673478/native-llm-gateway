@@ -62,20 +62,22 @@ wire_api = "responses"
 
 ## 内置 Provider(2026-08 现状)
 
-| 厂商 | 注册名(协议面) | billing | Responses API |
-|---|---|---|---|
-| `deepseek` | `deepseek`(openai)+ `deepseek-anthropic`(anthropic) | api | ✅(`responses_api: true`) |
-| `minimax` | `minimax`(anthropic)+ `minimax-openai`(openai) | **token_plan** | ✅(`responses_api: true`) |
-| `qwen` | `qwen`(openai) | api | ❌ |
-| `gemini` | `gemini`(google) | api | ❌ |
+| 厂商 | 注册名(协议面) | billing | 余额恢复 | Responses API |
+|---|---|---|---|---|
+| `deepseek` | `deepseek`(openai)+ `deepseek-anthropic`(anthropic) | api | poll(官方余额接口) | ✅(`responses_api: true`) |
+| `minimax` | `minimax`(anthropic)+ `minimax-openai`(openai) | **token_plan** | poll(`token_plan/remains`) | ✅(`responses_api: true`) |
+| `glm` | `glm`(openai)+ `glm-anthropic`(anthropic) | api | poll(官方 monitor 端点) | ❌ |
+| `qwen` | `qwen`(openai) | api | probe(无接口,每次请求重探) | ❌ |
+| `gemini` | `gemini`(google) | api | probe(无接口,每次请求重探) | ❌ |
 
-> 同一厂商的多个注册名(协议面)共享同一 key 池;key 厂商级一份,协议由 key 的 Protocols 标记过滤。glm/kimi 已删除(需要时按 `docs/provider厂商定制包指南.md` 加回)。
+> 同一厂商的多个注册名(协议面)共享同一 key 池;key 厂商级一份,协议由 key 的 Protocols 标记过滤。kimi 已删除(需要时按 `docs/provider厂商定制包指南.md` 加回)。
+> 余额恢复:poll = 额度耗尽标 QUOTA_EXCEEDED,quotacheck 轮询余额,恢复自动回链;probe = 不永久标记,每次请求重新探测,充值即恢复。
 
 ## 管理 API(`/api/v1`)
 
 | URL | 说明 |
 |---|---|
-| `GET /providers` | 按厂商聚合的 Provider 列表(共享 pool、熔断器状态) |
+| `GET /providers` | 按厂商聚合的 Provider 列表(共享 pool、每把 key 的熔断/额度状态) |
 | `GET /providers/registered` | Registry 注册名列表(轻量,过滤下拉用) |
 | `GET /routing` | catch_all 状态(自动模式 / 显式列表) |
 | `GET /keys` | Gateway Key 管理(CRUD;白名单在此配置) |
@@ -83,7 +85,8 @@ wire_api = "responses"
 | `GET /access-logs` / `/:id/detail` / `/stats` | 接入日志(详情人类可读) |
 | `GET /access-logs/export` | **JSONL 训练数据导出**(30 天保留,body 上限 16MB) |
 | `GET /dashboard` | 总览(QuotaKnownSum 按厂商聚合) |
-| `GET /usage*` | 用量统计 |
+| `GET /usage*` | 用量统计(含 `/usage/by_model/:model_id/providers` 上游用量对比) |
+| `GET /config/quota` | 配额探测配置(端点/间隔/轮询 vs 探测模式) |
 
 ## 快速开始(本地)
 
@@ -112,23 +115,26 @@ backend/internal/
 ├── provider/                 # Provider 接口 + 厂商包
 │   ├── deepseek/             # deepseek + deepseek-anthropic(双协议面,共享 pool)
 │   ├── minimax/              # minimax + minimax-openai + token plan balancer
+│   ├── glm/                  # glm + glm-anthropic(官方 monitor 余额端点)
 │   ├── qwen/ gemini/
 │   ├── openai_compatible/    # OpenAI 兼容共享实现(上游路径/错误分类/SSE)
 │   ├── anthropic_compatible/ # Anthropic 兼容共享实现
 │   └── registry.go manager.go
 ├── router/                   # catch_all 自动模式 + 白名单选择 + tier 拉平
 ├── proxy/                    # 代理引擎(failover / 白名单逐候选 / Responses 剥离)
-├── keypool/                  # 厂商级 key 池(tier 桶 + 额度状态机)
+├── keypool/                  # 厂商级 key 池(tier 桶 + 额度状态机 + per-key 熔断)
+├── circuit/                  # per-key 熔断器(5xx/timeout/connection 只熔断该 key)
 ├── quotacheck/               # 余额轮询(标记 QUOTA_EXCEEDED / 恢复)
 ├── accesslog/                # 接入日志(body 文件 + 30 天保留 + 导出)
 ├── api/http/                 # 管理 API
-└── server/                   # 服务编排
+└── server/                   # 服务编排(优雅关停写 key 状态快照)
 ```
+运行产物:`logs/gateway.log`(追加模式,按天轮转,7 天自动清理);DB 目录下 `key-state.json`(优雅关停时的 key 状态快照,重启恢复 QUOTA_EXCEEDED/COOLING/余额)。
 
 ## 已知边界
 
-- 同 tier 内多个 provider 时顺序随机(现在只有 minimax 是 token plan,无影响)
-- 上游 400(invalid_request)不禁用 key(只计数);auth 错误才禁用
-- 配额耗尽标记按厂商分两档:有余额查询接口的(deepseek/minimax/glm)→ 标 QUOTA_EXCEEDED,quotacheck 轮询恢复(glm 用官方 monitor 端点,滚动窗口重置后自动恢复);无余额接口的(qwen/gemini)→ 不永久标记,每次请求重新探测,恢复后自动可用
+- 同 tier 内多个 provider 时顺序随机(api 层有 deepseek/glm/qwen/gemini,多厂商时顺序随机)
+- **无终端禁用状态**:上游 auth 错误 → 该 key COOLING 5 分钟自动重试;400 invalid_request 只计数;5xx/timeout/connection → per-key 熔断器(只熔断这一把 key,不连坐同 provider 其他 key)
+- 配额耗尽标记按厂商分两档:poll(有余额接口:deepseek/minimax/glm)→ 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;probe(无接口:qwen/gemini)→ 不永久标记,每次请求重新探测,恢复后自动可用
 - 跨厂商切换时客户端回带的推理块会被网关剥离 + 强制 `effort=none`(DeepSeek 校验)
-- provider 的 endpoint/protocol/models 改动需重载(用 `./gateway-reload.sh` 无感重载,自动编译+优雅排空);routing/价格/key 热重载
+- provider 的 endpoint/protocol/models 改动需重载(用 `./gateway-reload.sh` 无感重载,自动编译+优雅排空);routing/价格/key 热重载。重载后 key 状态从 `key-state.json` 快照恢复(QUOTA_EXCEEDED/COOLING 不丢),无需重新 poll 确认

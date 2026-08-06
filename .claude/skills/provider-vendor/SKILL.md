@@ -44,7 +44,8 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 ## 常见坑(详情 docs/踩坑与排错.md)
 
 - 上游错误可能藏在 HTTP 200 的 body(base_resp 模式)——只认状态码会漏
-- 400 invalid_request **不禁用 key**(auth 才禁用)— 别把逻辑改回去
+- **无终端禁用状态**:auth → COOLING 5 分钟自动重试;400 invalid_request 只计数;5xx/timeout/connection → per-key 熔断。别把「禁用」逻辑加回去
+- 发请求必须复用 `req.Key`(路由层已 acquire),**不能内部二次 acquire** —— 双 acquire 会把 429 冷却标到没发过请求的 healthy key 上(踩坑 #15)
 - 跨厂商推理块由网关统一剥离,厂商包无需处理
 - 白名单选择语义:厂商声明过白名单模型就用白名单模型——新厂商的模型没进白名单,链上不会用它
 - 注册了但 `/providers` 不出现 → 忘了 main.go 的 blank import(Go 只编译被 import 的包)
