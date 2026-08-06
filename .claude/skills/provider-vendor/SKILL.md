@@ -16,8 +16,7 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 
 ## 执行顺序
 
-0. **调研官方文档**(先做,防返工):拉文档站 `/llms.txt` 全量索引,逐项确认四件事 —
-   ① 模型 ID 与能力(思考模式 / 工具调用)② **Anthropic/Claude 兼容面**(有没有 anthropic 端点——很多厂商有但藏在「Claude API 兼容」章节,必须 grep `anthropic|claude`,别只按关键词碰运气)③ Responses API 支持 ④ 余额查询接口
+0. **调研官方文档**(先做,防返工):官方文档是唯一权威,**用户提供 URL** — ① 确认厂商(请求未点明时先问)② 要官方文档 URL(非 URL → 重新提供;拉取失败 → 换)③ 站内遍历(`/llms.txt` 入口 + grep `anthropic|claude`)④ 提取 6 类(协议面 / 模型能力 / 定价含单位换算 / 余额 / 定制特性 / 入口)⑤ 与现有 config 冲突 → 标差异再动
 1. **读模板**:`backend/internal/provider/deepseek/` 全套(deepseek.go / anthropic.go / balancer.go / registry_test.go)作为模板复制
 2. **写 openai 面**(继承 `openai_compatible.Base`):协议校验、endpoint 校验、ChatPath/ResponsesPath、StreamUsage: true
 3. **写 anthropic 面**(可选,继承 `anthropic_compatible.Base`)
@@ -30,7 +29,7 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 
 ## 检查点(提交前逐项过)
 
-- [ ] 调研过官方文档四件事:模型 ID / anthropic 兼容面 / responses / 余额(grep `anthropic|claude`,不只看关键词页)
+- [ ] 厂商已确认;官方文档 URL 来自用户(非 URL 已要求重新提供、拉取失败已换);6 类提取项全覆盖:协议面 / 模型能力 / 定价(含单位换算)/ 余额 / 定制特性 / 入口(grep `anthropic|claude`);与现有 config 冲突已标差异
 - [ ] 每个协议面的注册名都有 `RegisterGlobalWithProtocolVendor`,vendor 都是厂商名
 - [ ] `cmd/gateway/main.go` 有该厂商的 blank import(漏了 init() 不跑,不进二进制)
 - [ ] 每个注册名都有 `RegisterBalancer`(有余额查询的厂商)
@@ -50,3 +49,5 @@ description: 新增或更新一个 Provider 厂商定制包(如加回 kimi)。�
 - 白名单选择语义:厂商声明过白名单模型就用白名单模型——新厂商的模型没进白名单,链上不会用它
 - 注册了但 `/providers` 不出现 → 忘了 main.go 的 blank import(Go 只编译被 import 的包)
 - 文档调研漏 anthropic 兼容章节 → 厂商只有 openai 面,Claude Code 用户用不了(真实教训:GLM 的 Claude API 兼容页在索引第 117 行,藏在 `/cn/guide/develop/claude/` 下,不 grep `anthropic|claude` 必漏)
+- 用户给的文档不是 URL / URL 拉取失败 → 先要求重新提供,别自己搜替代来源(官方文档是唯一权威)
+- 价格单位没换算 → 文档 0.42 元/M 直接抄进 `cost_per_1k`,价格差 1000 倍(÷1000 才进 config)
