@@ -80,6 +80,22 @@ func LookupBalancer(providerName string) Balancer {
 	return balancerRegistry[providerName]
 }
 
+// CheckQuota 请求路径主动查额度 — 网络类错误后由 proxy 触发,区分
+// 「网络故障但额度充足(→ 留在层内重试)」vs「额度耗尽(→ 可降档)」。
+// 未注册 balancer 的 provider → 返回 (true, nil):额度未知按未耗尽,
+// 与「拿不到耗尽证据就不降档」的不变式一致。
+func CheckQuota(ctx context.Context, providerName, baseURL string, k *keypool.Key) (bool, error) {
+	bal := LookupBalancer(providerName)
+	if bal == nil {
+		return true, nil
+	}
+	balResult, err := bal.FetchBalance(ctx, baseURL, k)
+	if err != nil {
+		return false, err
+	}
+	return balResult.HasQuota, nil
+}
+
 // hasQuotaKeyword 检查 status code + body 是否含 quota_exceeded 信号
 // 用于把 HTTP 响应归类到 Result
 // 关键字列表与 provider.ClassifyErrorWithBody 保持一致
