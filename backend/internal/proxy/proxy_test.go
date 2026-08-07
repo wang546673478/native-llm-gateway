@@ -1317,3 +1317,56 @@ func TestProxy_CatchAll_ModelNotFoundFailsOver(t *testing.T) {
 		t.Errorf("lenient got body model = %s, want rewritten MiniMax-M3", lenient.gotBody)
 	}
 }
+
+// TestProxy_RateLimit_SwapsKeyInProvider P-ratelimit-not-quota:
+// 429 纯限流(rate_limit,无额度 body)→ 同 provider 换 key 重试,不推进候选
+// (2026-08-07 实测:minimax key-8 限流被当额度类,跳过 key-7 直接走 mimo —
+// 用户质疑「额度没用完怎么用 mimo」,修正为与网络类同构:换 key 重试)
+func TestProxy_RateLimit_SwapsKeyInProvider(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey: map[string]error{"1": &provider.ProviderError{
+			ProviderName: "mm", StatusCode: http.StatusTooManyRequests,
+			ErrorType: provider.ErrorTypeRateLimit, Message: "rate limited"}},
+		respStatus: http.StatusOK, respBody: `{"id":"mm-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(换 key 重试成功); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mm-ok") {
+		t.Errorf("response = %s, want mm 的响应", w.Body.String())
+	}
+	if mm.callCount != 2 {
+		t.Errorf("callCount = %d, want 2 (key-1 限流 → key-2 重试,不跳 provider)", mm.callCount)
+	}
+}
+
+// TestProxy_RateLimit_NoDowngradeEvidence P-ratelimit-not-quota:
+// 429 纯限流不产生额度证据 — token_plan 层全 key 限流(换 key 穷尽)→
+// 层内无证据 → 不降档 api(请求失败返回),api provider 不应被调用
+func TestProxy_RateLimit_NoDowngradeEvidence(t *testing.T) {
+	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		err: &provider.ProviderError{
+			ProviderName: "mm", StatusCode: http.StatusTooManyRequests,
+			ErrorType: provider.ErrorTypeRateLimit, Message: "rate limited"}}
+	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		respStatus: http.StatusOK, respBody: `{"id":"ds-ok"}`}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm, ds}, map[string]*keypool.Pool{
+		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
+		"ds": mkPool("ds", []string{"1"}, "api"),
+	}, t5Alias())
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusServiceUnavailable && w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 5xx(限流不是额度证据,不降档); body = %s", w.Code, w.Body.String())
+	}
+	if ds.callCount != 0 {
+		t.Errorf("ds called %d times, want 0 (限流不降档,api 层不应被用)", ds.callCount)
+	}
+	if mm.callCount != 2 {
+		t.Errorf("mm callCount = %d, want 2 (两把 key 各试一次)", mm.callCount)
+	}
+}

@@ -1084,9 +1084,11 @@ func (e *Engine) tryCandidate(
 		return outcomeFatal, false, true
 	}
 
-	// 需要换 key 重试的类:网络类 + auth(决策表 row 3;ModelNotAllowed 除外 —
-	// 白名单是 model 级,换 key 无用)
-	if isNetworkClass(pe) || pe.ErrorType == provider.ErrorTypeAuth {
+	// 需要换 key 重试的类:网络类 + auth + 限流(决策表 row 3;ModelNotAllowed 除外 —
+	// 白名单是 model 级,换 key 无用)。rate_limit(纯限流 429)与网络类同构:
+	// key 级瞬态,同 provider 换 key 重试(2026-08-07:minimax key-8 限流
+	// 应试 key-7,而不是跳 mimo)
+	if isNetworkClass(pe) || pe.ErrorType == provider.ErrorTypeAuth || pe.ErrorType == provider.ErrorTypeRateLimit {
 		if e.swapToOtherKey(c, req, result) {
 			// 换 key 后重发 — result.Key 已更新为真正发请求的 key,
 			// 429 冷却/熔断上报都会标到这把新 key 上(踩坑 #15)
@@ -1277,11 +1279,16 @@ func isNetworkClass(pe *provider.ProviderError) bool {
 	return false
 }
 
-// isQuotaClass 额度类错误:quota_exceeded / rate_limit —
-// 记额度证据,层内换候选,全层证据齐了才降档
+// isQuotaClass 额度类错误:quota_exceeded(429+额度 body / 402 等)—
+// 记额度证据,层内换候选,全层证据齐了才降档。
+// rate_limit(纯限流 429,无额度 body)不在其中 — 分类器已区分
+// (provider.go: 429+quota 关键词 → quota_exceeded,否则 → rate_limit);
+// 限流是瞬态,应同 provider 换 key 重试,不产生额度证据
+// (2026-08-07 实测:minimax key-8 纯限流 429 被当额度类 → 跳过 key-7
+// 直接走 mimo — 用户质疑「额度没用完怎么用 mimo」,修正)
 func isQuotaClass(pe *provider.ProviderError) bool {
 	switch pe.ErrorType {
-	case provider.ErrorTypeQuotaExceeded, provider.ErrorTypeRateLimit:
+	case provider.ErrorTypeQuotaExceeded:
 		return true
 	}
 	return false
