@@ -115,14 +115,9 @@ curl -X POST http://localhost:8080/api/v1/keys \
 ### 快速部署(推荐:gateway + PostgreSQL)
 
 ```bash
-# 1. 准备 config(真实凭据不进镜像,只读挂载)
-cp config.example.yaml config.yaml
-#   改这几处:
-#   - database.driver: "postgres"
-#   - database.dsn: "postgres://gateway:你的密码@postgres:5432/gateway"
-#   - server.static_dir: "/app/web/dist"      # 容器内固定
-#   - server.access_log.body_dir: "/app/data/access-body"
-#   - logging.file_path: "/app/data/logs/gateway.log"
+# 1. 准备 config — 用 docker 专用模板(容器路径已配好),只改密码
+cp config.docker.example.yaml config.yaml
+#   改 database.dsn 里的 CHANGE_ME 为你的密码(与 compose 的 POSTGRES_PASSWORD 一致)
 
 # 2. 改 docker-compose.yml 里 postgres 的 POSTGRES_PASSWORD(与 dsn 一致)
 
