@@ -1,5 +1,6 @@
 # Local config (may contain real API keys)
 config.yaml
+config.yaml.bak-*
 
 # Build artifacts
 backend/bin/
@@ -13,6 +14,7 @@ frontend/tsconfig.tsbuildinfo
 data/
 *.db
 *.db-journal
+key-state.json
 
 # IDE
 .idea/
