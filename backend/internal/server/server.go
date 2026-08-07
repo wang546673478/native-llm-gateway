@@ -520,9 +520,16 @@ func (s *Server) shutdown() error {
 	return s.http.Shutdown(ctx)
 }
 
-// keyStateSnapshotPath 快照文件路径 — 与 DB 同目录(/tmp/gateway-data/)。
-// reload(SIGTERM)保留;机器重启 /tmp 清空一起丢(可接受,poll 重新学习)
+// keyStateSnapshotPath 快照文件路径。
+// SQLite:与 DB 同目录(/tmp/gateway-data/,reload 保留;机器重启 /tmp 清空
+// 一起丢,可接受,poll 重新学习)。
+// PG:dsn 是 URL,filepath.Dir 会拆出 "postgres:/..." 怪路径(目录不存在,
+// 快照静默写失败 → 重启丢 QE/COOLING 状态)→ 统一落 cwd(进程启动目录,
+// systemd 下为仓库根,持久)。
 func keyStateSnapshotPath(dsn string) string {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		return filepath.Join(".", "key-state.json")
+	}
 	return filepath.Join(filepath.Dir(dsn), "key-state.json")
 }
 

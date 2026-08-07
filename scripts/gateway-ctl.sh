@@ -1,58 +1,33 @@
 #!/bin/bash
-# Gateway 进程管理 helper(被 Makefile 调用)
+# Gateway 进程管理 helper(被 Makefile 调用)— systemd 托管版
 # 用法:gateway-ctl.sh {find-pid|stop|status} [config-file]
+#
+# 2026-08-07 起 gateway 由 systemd(llm-gateway.service)托管:
+#   - stop/status 委托 systemctl,不再直接 kill(裸 kill 会被 Restart=always 拉起)
+#   - stop 需要 sudo(系统服务);find-pid 返回 MainPID 供外部脚本用
 set -e
 
-PORT="${PORT:-8080}"
-LOG="${LOG:-/tmp/gateway.log}"
-PIDFILE="${PIDFILE:-/tmp/gateway.pid}"
+SERVICE="llm-gateway"
 
-# 找 gateway 进程 PID(优先 PID 文件,其次端口)
 find_pid() {
-  if [ -f "$PIDFILE" ]; then
-    local pid
-    pid=$(cat "$PIDFILE")
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      echo "$pid"
-      return
-    fi
-  fi
-  # fallback: 从端口找
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -ti tcp:"$PORT" 2>/dev/null | head -1
-  else
-    ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oP 'pid=\K[0-9]+' | head -1
-  fi
+  systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true
 }
 
 stop_gateway() {
-  local pid
-  pid=$(find_pid)
-  if [ -z "$pid" ]; then
-    echo "✗ 没有找到 Gateway 进程"
-    rm -f "$PIDFILE"
+  if ! systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    echo "✗ 没有找到运行中的 Gateway"
     return 0
   fi
-  echo "停止 Gateway (PID $pid)..."
-  kill -TERM "$pid" 2>/dev/null || true
-  for i in 1 2 3 4 5; do
-    sleep 1
-    if ! kill -0 "$pid" 2>/dev/null; then
-      echo "✓ 已停止"
-      rm -f "$PIDFILE"
-      return 0
-    fi
-  done
-  echo "✗ 进程未响应 TERM,强制 KILL"
-  kill -KILL "$pid" 2>/dev/null || true
-  rm -f "$PIDFILE"
+  echo "停止 Gateway(systemd)..."
+  sudo systemctl stop "$SERVICE"
+  echo "✓ 已停止"
 }
 
 status_gateway() {
   local pid
   pid=$(find_pid)
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    echo "✓ Gateway 运行中 (PID $pid)"
+  if [ -n "$pid" ] && [ "$pid" != "0" ] && systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    echo "✓ Gateway 运行中 (PID $pid, systemd)"
     ps -o pid,etime,rss,cmd -p "$pid" 2>/dev/null | tail -1
   else
     echo "✗ Gateway 未运行"

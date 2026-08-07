@@ -163,9 +163,12 @@ cp config.docker.example.yaml config.yaml
 
 # 2. 改 docker-compose.yml 里 postgres 的 POSTGRES_PASSWORD(与 dsn 一致)
 
-# 3. (可选)有 SQLite 历史数据时先迁移:
+# 3. (可选)有 SQLite 历史数据时先迁移(迁移后自动一致性校验,exit 0 + VERIFY OK 才算过):
 cd backend && go run ./scripts/sqlite2pg -src /tmp/gateway-data/gateway.db \
   -dst "postgres://gateway:你的密码@localhost:5432/gateway"
+#   校验维度:逐表列集合 → COUNT → 逐行逐字段对比(时间 2µs 容差)→ setval 抽查;
+#   敏感字段(key_hash/cookie)差异只打码输出。事后复核用 -verify-only(只读不写)。
+#   也可构建成独立二进制常驻:go build -o ~/llm-gateway-data/tools/sqlite2pg ./scripts/sqlite2pg
 
 # 4. 启动
 docker compose up -d
@@ -190,6 +193,7 @@ docker run -d --name llm-gateway \
 - **config.yaml 更新**:改配置后 `docker compose up -d` 重建生效(healthcheck 通过才算就绪)
 - **镜像更新**:`docker compose pull && docker compose up -d`(或 watchtower 自动拉取)
 - **SQLite vs PostgreSQL**:access logs 每请求一条 + 8 索引,SQLite 单写者在请求量大时写锁排队(页面卡顿);PostgreSQL 并发写,`database.driver` 一键切换,代码层无差异(CI 每次提交跑 PG 集成测试)
+- **本机主力已切 PG(2026-08-07)**:systemd 托管(`llm-gateway.service`,Restart=always)+ 每日 3:07 pg_dump 备份(保留 SQLite 归档 7 天后清理);`key-state.json` 在 PG 模式下落进程 cwd(仓库根)。运维:`sudo systemctl {restart|status} llm-gateway`、`./gateway-reload.sh`(编译 + systemctl restart)
 
 ## 目录结构(核心)
 

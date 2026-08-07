@@ -189,3 +189,20 @@ func TestVendorHasBalancer(t *testing.T) {
 		t.Error("qwen: want has-balancer=false (no balance API)")
 	}
 }
+
+func TestKeyStateSnapshotPath(t *testing.T) {
+	// SQLite:与 DB 同目录
+	if got := keyStateSnapshotPath("/tmp/gateway-data/gateway.db"); got != "/tmp/gateway-data/key-state.json" {
+		t.Fatalf("sqlite dsn: got %q", got)
+	}
+	// PG:URL dsn 落 cwd(修复 2026-08-07 — filepath.Dir 会把 URL 拆出
+	// "postgres:/..." 怪路径,快照静默写失败)
+	for _, dsn := range []string{
+		"postgres://gateway:pw@127.0.0.1:5432/gateway",
+		"postgresql://gateway:pw@127.0.0.1:5432/gateway",
+	} {
+		if got := keyStateSnapshotPath(dsn); got != "key-state.json" {
+			t.Fatalf("pg dsn %q: got %q, want key-state.json", dsn, got)
+		}
+	}
+}
