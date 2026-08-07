@@ -95,3 +95,5 @@ jobs:
             wuhuhhhh/native-llm-gateway:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+# retrigger: Docker Hub secrets 就绪后重新触发完整流水线
