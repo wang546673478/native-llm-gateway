@@ -108,6 +108,52 @@ curl -X POST http://localhost:8080/api/v1/keys \
 # 注意:创建响应里包含明文 key,只展示一次
 ```
 
+## Docker 部署
+
+镜像 `wuhuhhhh/native-llm-gateway`(Docker Hub)。**每次 push main 后 GitHub Actions 自动构建推送**(`latest` + commit sha 双 tag,可回滚),本地无需 Docker 即可获得新镜像,部署方 `docker pull` 更新。
+
+### 快速部署(推荐:gateway + PostgreSQL)
+
+```bash
+# 1. 准备 config(真实凭据不进镜像,只读挂载)
+cp config.example.yaml config.yaml
+#   改这几处:
+#   - database.driver: "postgres"
+#   - database.dsn: "postgres://gateway:你的密码@postgres:5432/gateway"
+#   - server.static_dir: "/app/web/dist"      # 容器内固定
+#   - server.access_log.body_dir: "/app/data/access-body"
+#   - logging.file_path: "/app/data/logs/gateway.log"
+
+# 2. 改 docker-compose.yml 里 postgres 的 POSTGRES_PASSWORD(与 dsn 一致)
+
+# 3. (可选)有 SQLite 历史数据时先迁移:
+cd backend && go run ./scripts/sqlite2pg -src /tmp/gateway-data/gateway.db \
+  -dst "postgres://gateway:你的密码@localhost:5432/gateway"
+
+# 4. 启动
+docker compose up -d
+# 前端 + API 都在 http://<host>:8080
+```
+
+### 最小部署(单容器 + SQLite,无 PG)
+
+```bash
+docker run -d --name llm-gateway \
+  -p 8080:8080 \
+  -v $PWD/config.yaml:/app/config.yaml:ro \
+  -v $PWD/gateway-data:/app/data \
+  wuhuhhhh/native-llm-gateway:latest
+# config.yaml 保持 database.driver: "sqlite",dsn 指向 /app/data/gateway.db
+```
+
+### 说明
+
+- **前端托管**:镜像内单进程(gateway)直接托管构建产物 + SPA fallback,无 nginx
+- **数据卷** `/app/data`:DB(dsn 指向这里时)、`key-state.json`(自动跟随 dsn 目录)、access body
+- **config.yaml 更新**:改配置后 `docker compose up -d` 重建生效(healthcheck 通过才算就绪)
+- **镜像更新**:`docker compose pull && docker compose up -d`(或 watchtower 自动拉取)
+- **SQLite vs PostgreSQL**:access logs 每请求一条 + 8 索引,SQLite 单写者在请求量大时写锁排队(页面卡顿);PostgreSQL 并发写,`database.driver` 一键切换,代码层无差异(CI 每次提交跑 PG 集成测试)
+
 ## 目录结构(核心)
 
 ```

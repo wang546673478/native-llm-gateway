@@ -1,0 +1,54 @@
+# Native LLM Gateway — Docker 部署编排
+#
+# 两个服务:gateway(单镜像,托管前端 + API)+ postgres(正式数据库)
+# 部署:docker compose up -d
+#
+# 首次部署前准备:
+#   1. 复制 config.example.yaml 为 config.yaml,按需修改:
+#      - database.driver: "postgres",dsn: "postgres://gateway:CHANGE_ME@postgres:5432/gateway"
+#      - server.static_dir: "/app/web/dist"(容器内固定)
+#      - server.access_log.body_dir: "/app/data/access-body"
+#      - logging.file_path: "/app/data/logs/gateway.log"(或留空走 stdout)
+#   2. 修改下方 POSTGRES_PASSWORD(与 config.yaml dsn 一致)
+#   3. 有历史数据(sqlite)时先跑迁移脚本:go run ./backend/scripts/sqlite2pg ...
+#      (详见 README「从 SQLite 迁移到 PostgreSQL」)
+#   ⚠️ config.yaml 含真实凭据 — 别提交进 git(.gitignore 已排除)
+
+services:
+  gateway:
+    image: wuhuhhhh/native-llm-gateway:latest
+    container_name: llm-gateway
+    ports:
+      - "8080:8080"
+    volumes:
+      # 只读挂载真实配置(密钥不进镜像);改配置后 docker compose up -d 重建生效
+      - ./config.yaml:/app/config.yaml:ro
+      # 数据卷:gateway.db / key-state.json / access body / 日志
+      - ./gateway-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: llm-gateway-postgres
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: CHANGE_ME
+      POSTGRES_DB: gateway
+    volumes:
+      # PG 数据持久化
+      - ./pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped

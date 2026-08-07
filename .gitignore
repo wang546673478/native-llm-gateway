@@ -19,3 +19,4 @@ data/
 .vscode/
 *.swp
 logs/
+backend/sqlite2pg

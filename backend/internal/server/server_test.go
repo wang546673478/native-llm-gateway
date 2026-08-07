@@ -3,8 +3,13 @@ package server
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -104,6 +109,70 @@ func TestReloadProviderPool_FullRebuildVendorGrouped(t *testing.T) {
 	}
 	if got := s.pools["deepseek"].Size(); got != 1 {
 		t.Errorf("rebuilt pool Size = %d, want 1", got)
+	}
+}
+
+// TestWebStatic — P-web-static 方案 B:Go 进程托管前端静态文件。
+// 覆盖:文件命中 / SPA fallback / 未配置时让位 / 非 GET 不接管 / 路径穿越拒绝
+func TestWebStatic(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>app</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("console.log(1)"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// newWebStaticServer 构造 static_dir 指向临时目录的 Server
+	newWebStaticServer := func(staticDir string) *Server {
+		return &Server{cfg: &config.Config{Server: config.ServerConfig{StaticDir: staticDir}}}
+	}
+
+	do := func(s *Server, method, p string) (bool, int, string) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, p, nil)
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+		ok := s.webStatic(c)
+		return ok, w.Code, w.Body.String()
+	}
+
+	// 未配置 static_dir → 让位(false),调用方维持 404 JSON
+	if ok, _, _ := do(newWebStaticServer(""), http.MethodGet, "/"); ok {
+		t.Fatal("static_dir 未配置时 webStatic 必须让位(false)")
+	}
+
+	cases := []struct {
+		name     string
+		method   string
+		path     string
+		wantOK   bool
+		wantCode int
+		wantBody string
+	}{
+		{"index", http.MethodGet, "/", true, http.StatusOK, "<html>app</html>"},
+		{"asset hit", http.MethodGet, "/assets/app.js", true, http.StatusOK, "console.log(1)"},
+		{"spa fallback", http.MethodGet, "/some/vue/route", true, http.StatusOK, "<html>app</html>"},
+		{"head", http.MethodHead, "/", true, http.StatusOK, ""},
+		{"post let pass", http.MethodPost, "/", false, 0, ""},
+		{"traversal rejected", http.MethodGet, "/../etc/passwd", true, http.StatusNotFound, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, code, body := do(newWebStaticServer(dir), tc.method, tc.path)
+			if ok != tc.wantOK {
+				t.Fatalf("handled = %v, want %v", ok, tc.wantOK)
+			}
+			if tc.wantOK && code != tc.wantCode {
+				t.Errorf("status = %d, want %d", code, tc.wantCode)
+			}
+			if tc.wantOK && body != tc.wantBody {
+				t.Errorf("body = %q, want %q", body, tc.wantBody)
+			}
+		})
 	}
 }
 

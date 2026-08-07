@@ -35,6 +35,10 @@ type ServerConfig struct {
 	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
 	IdleTimeout     time.Duration `mapstructure:"idle_timeout"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	// StaticDir 前端构建产物目录(方案 B:Go 进程直接托管静态文件,无 nginx)。
+	// 为空 = 不启用(保持纯 API 网关行为);相对路径按进程 cwd 解析。
+	// 未命中文件时 SPA fallback 到 index.html(vue-router history 模式)。
+	StaticDir string `mapstructure:"static_dir"`
 	// AccessLog 接入日志模块配置(§3.4 spec)
 	AccessLog AccessLogConfig `mapstructure:"access_log"`
 }

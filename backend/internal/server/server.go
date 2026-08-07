@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -748,10 +750,50 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 			s.engine.HandleRequest(c)
 			return
 		}
+		// P-web-static(方案 B):Go 进程直接托管前端构建产物,不依赖 nginx。
+		// 已注册路由(/api、/v1、/healthz、/readyz、/admin、/metrics)天然不经过这里
+		if s.webStatic(c) {
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
 			"type": "not_found", "message": "no route for " + c.Request.URL.Path,
 		}})
 	})
+}
+
+// webStatic 托管前端构建产物(P-web-static 方案 B:Go 进程直接托管,无 nginx)。
+//
+// 挂在 NoRoute 兜底:只处理「gin 未注册的未知路径」。语义:
+//   - static_dir 未配置 → 返回 false,调用方维持原 404 JSON 行为
+//   - 只接管 GET/HEAD(其他方法返回 false,交给 404 JSON — 避免把 API 错误吞成页面)
+//   - URL 含 ".." → 404(路径穿越防护;Clean 后其实已安全,双保险)
+//   - 文件命中 → 返回文件(gin 自动识别 content-type)
+//   - 未命中 → 返回 index.html(vue-router history 模式 SPA fallback)
+func (s *Server) webStatic(c *gin.Context) bool {
+	dir := s.cfg.Server.StaticDir
+	if dir == "" {
+		return false
+	}
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+		return false
+	}
+	if strings.Contains(c.Request.URL.Path, "..") {
+		c.AbortWithStatus(http.StatusNotFound) // AbortWithStatus 立即写 header(c.Status 是惰性的,无 body 时不会 flush)
+		return true
+	}
+	// 归一化:以 / 开头 + Clean,保证 Join 结果仍在 staticDir 内
+	p := path.Clean("/" + c.Request.URL.Path)
+	fp := filepath.Join(dir, p)
+	if rel, err := filepath.Rel(dir, fp); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		c.AbortWithStatus(http.StatusNotFound)
+		return true
+	}
+	if st, err := os.Stat(fp); err == nil && !st.IsDir() {
+		c.File(fp)
+		return true
+	}
+	c.File(filepath.Join(dir, "index.html"))
+	return true
 }
 
 var _ = database.Provider{} // keep database import alive

@@ -1,0 +1,96 @@
+# Native LLM Gateway — 每次 push main 自动构建 + 推送 Docker Hub 镜像
+#
+# 流程:test(后端单元测试 + PG 集成测试 + 前端构建)→ build-push(镜像 → Docker Hub)
+# 凭据:仓库 Secrets 的 DOCKER_HUB_USERNAME / DOCKER_HUB_TOKEN
+#   (hub.docker.com → Account Settings → Security → New Access Token,权限 Read/Write)
+#
+# 镜像 tag:latest(滚动)+ <commit sha>(可回滚到任意历史版本)
+name: build-and-push
+
+on:
+  push:
+    branches: [main]
+    # 只跑实际影响产物/镜像的变更;纯文档提交不浪费构建
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "config.example.yaml"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - ".github/workflows/docker.yml"
+
+jobs:
+  test:
+    name: Test (Go + PG + frontend)
+    runs-on: ubuntu-latest
+    services:
+      # PG 集成测试的目标库 — 验证 postgres driver 分支、AutoMigrate、
+      # pragma 跳过逻辑、CAST(id AS TEXT) 子查询、upsert、批量插入
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway
+          POSTGRES_DB: gateway
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: backend/go.sum
+
+      - name: Build backend
+        working-directory: backend
+        run: go build ./...
+
+      # 带 PG_TEST_DSN 跑全量测试:单元测试照常执行,PG 集成测试真正执行
+      - name: Go tests (unit + PG integration)
+        working-directory: backend
+        env:
+          PG_TEST_DSN: postgres://gateway:gateway@localhost:5432/gateway
+        run: go test ./...
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend build (vue-tsc + vite)
+        working-directory: frontend
+        run: npm ci && npm run build
+
+  build-push:
+    name: Build & push Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            wuhuhhhh/native-llm-gateway:latest
+            wuhuhhhh/native-llm-gateway:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
