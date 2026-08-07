@@ -155,9 +155,11 @@ services:
 ```
 
 ```bash
-# 1. 准备 config — 用 docker 专用模板(容器路径已配好),只改密码
+# 1. 准备 config — 用 docker 专用模板(容器路径已配好),只改密码和默认 key
 cp config.docker.example.yaml config.yaml
-#   改 database.dsn 里的 CHANGE_ME 为你的密码(与 compose 的 POSTGRES_PASSWORD 一致)
+#   ① database.dsn 里的 CHANGE_ME 改为你的密码(与 compose 的 POSTGRES_PASSWORD 一致)
+#   ② auth.keys 的默认 dev-key(gw-key-dev-please-change-me)改掉或删除 — 代理端点
+#      认证默认开启,不改的话任何人知道这个 key 都能免费调用
 
 # 2. 改 docker-compose.yml 里 postgres 的 POSTGRES_PASSWORD(与 dsn 一致)
 

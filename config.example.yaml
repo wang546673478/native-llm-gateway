@@ -39,10 +39,12 @@ redis:
   db: 0
   pool_size: 10
 
-# 客户端认证(P7 阶段真正生效)
+# 客户端认证
+# ⚠️ 代理端点认证开关:必须开启,否则任何能访问端口的人都能免费调用(白嫖上游额度)
 auth:
-  enabled: false            # P0 阶段先关掉,免得请求被 401 挡掉
+  enabled: true
   keys:
+    # 默认 dev key — 首次部署务必改掉或删除(页面创建正式 key 后即可删)
     - name: "dev-key"
       key: "gw-key-dev-please-change-me"
       allowed_models: ["*"]
