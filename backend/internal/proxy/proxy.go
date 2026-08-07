@@ -972,6 +972,12 @@ func (e *Engine) runCandidateLoop(
 		outcome, quotaEv, attempted := e.tryCandidate(c, ctx, req, result, outProviderName, outLastErr, entry)
 		quotaEvidenceInTier = quotaEvidenceInTier || quotaEv
 		tierSawFailure = tierSawFailure || attempted
+		// P-key: 记录实际发请求的上游 key ID(换 key 重试后 result.Key 已是最终 key)。
+		// 成功 = 最终成功 key;全部失败 = 最后尝试的 key,排查「切到哪把 key」用。
+		// 名字不落库 — 查询时按 ID 现查 provider_api_keys(改名即时生效,不存快照)
+		if entry != nil && result.Key != nil {
+			entry.ProviderKeyID = result.Key.ID
+		}
 		if attempted {
 			attempts++
 		}

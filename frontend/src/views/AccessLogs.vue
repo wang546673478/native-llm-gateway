@@ -86,6 +86,12 @@
             <n-descriptions-item label="Provider">
               {{ detail.metadata.provider_name || '—' }}
             </n-descriptions-item>
+            <n-descriptions-item label="Provider Key">
+              {{ detail.metadata.provider_key_name || detail.metadata.provider_key_id || '—' }}
+              <span v-if="detail.metadata.provider_key_name && detail.metadata.provider_key_id" style="color: #999">
+                (ID: {{ detail.metadata.provider_key_id }})
+              </span>
+            </n-descriptions-item>
             <n-descriptions-item label="Model">
               {{ detail.metadata.requested_model }} → {{ detail.metadata.final_model }}
             </n-descriptions-item>
@@ -385,6 +391,16 @@ const columns: DataTableColumns<AccessLog> = [
     },
   },
   { title: 'Provider', key: 'provider_name', width: 120 },
+  {
+    // P-key: 实际发请求的上游 key,显示名为主、ID 副标(名字可重复,ID 唯一)
+    title: 'Provider Key',
+    key: 'provider_key_id',
+    width: 120,
+    render: row =>
+      row.provider_key_name
+        ? h('span', { title: `ID: ${row.provider_key_id}` }, row.provider_key_name)
+        : row.provider_key_id || '—',
+  },
   { title: '延迟', key: 'latency_ms', width: 70 },
   { title: 'Trace', key: 'trace_id', render: row => row.trace_id.substring(0, 8) },
 ]

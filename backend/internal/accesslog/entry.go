@@ -18,6 +18,12 @@ type AccessEntry struct {
 	RequestedModel string    `json:"requested_model"`
 	FinalModel     string    `json:"final_model"`
 	ProviderName   string    `json:"provider_name"`
+	// ProviderKeyID 实际发请求的上游 key ID(唯一身份,落库)。
+	// 成功 = 最终成功的 key;失败 = 最后尝试的 key(排查「切到哪把 key」用)。
+	// ProviderKeyName 不落库 — 列表/详情查询时按 ID 现查 provider_api_keys 的
+	// 当前名字填充(用户改名后历史记录同步显示新名字,不存旧快照)。
+	ProviderKeyID   string `json:"provider_key_id"`
+	ProviderKeyName string `json:"provider_key_name"`
 	Protocol       string    `json:"protocol"`
 	IsStream       bool      `json:"is_stream"`
 	StatusCode     int       `json:"status_code"`

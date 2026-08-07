@@ -2,6 +2,7 @@ package accesslog
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -65,53 +66,56 @@ func (s *Store) Insert(ctx context.Context, e *AccessEntry) error {
 // 字段一一对应;保留两份 struct 是为了让 DB 模型和业务 API 解耦
 func toRow(e *AccessEntry) *dbpkg.AccessLog {
 	return &dbpkg.AccessLog{
-		TraceID:        e.TraceID,
-		CreatedAt:      e.CreatedAt,
-		GatewayKeyID:   e.GatewayKeyID,
-		GatewayKeyName: e.GatewayKeyName,
-		Method:         e.Method,
-		Path:           e.Path,
-		ClientIP:       e.ClientIP,
-		UserAgent:      e.UserAgent,
-		RequestedModel: e.RequestedModel,
-		FinalModel:     e.FinalModel,
-		ProviderName:   e.ProviderName,
-		Protocol:       e.Protocol,
-		IsStream:       e.IsStream,
-		StatusCode:     e.StatusCode,
-		ErrorType:      e.ErrorType,
-		LatencyMs:      e.LatencyMs,
-		ReqBodyPath:    e.ReqBodyPath,
-		ReqBodySize:    e.ReqBodySize,
-		RespBodyPath:   e.RespBodyPath,
-		RespBodySize:   e.RespBodySize,
+		TraceID:         e.TraceID,
+		CreatedAt:       e.CreatedAt,
+		GatewayKeyID:    e.GatewayKeyID,
+		GatewayKeyName:  e.GatewayKeyName,
+		Method:          e.Method,
+		Path:            e.Path,
+		ClientIP:        e.ClientIP,
+		UserAgent:       e.UserAgent,
+		RequestedModel:  e.RequestedModel,
+		FinalModel:      e.FinalModel,
+		ProviderName:  e.ProviderName,
+		ProviderKeyID: e.ProviderKeyID,
+		Protocol:      e.Protocol,
+		IsStream:        e.IsStream,
+		StatusCode:      e.StatusCode,
+		ErrorType:       e.ErrorType,
+		LatencyMs:       e.LatencyMs,
+		ReqBodyPath:     e.ReqBodyPath,
+		ReqBodySize:     e.ReqBodySize,
+		RespBodyPath:    e.RespBodyPath,
+		RespBodySize:    e.RespBodySize,
 		// truncated marker 写到 filename 后缀,DB 列已移除(F1)
 	}
 }
 
 func fromRow(r *dbpkg.AccessLog) *AccessEntry {
 	return &AccessEntry{
-		ID:             r.ID,
-		TraceID:        r.TraceID,
-		CreatedAt:      r.CreatedAt,
-		GatewayKeyID:   r.GatewayKeyID,
-		GatewayKeyName: r.GatewayKeyName,
-		Method:         r.Method,
-		Path:           r.Path,
-		ClientIP:       r.ClientIP,
-		UserAgent:      r.UserAgent,
-		RequestedModel: r.RequestedModel,
-		FinalModel:     r.FinalModel,
-		ProviderName:   r.ProviderName,
-		Protocol:       r.Protocol,
-		IsStream:       r.IsStream,
-		StatusCode:     r.StatusCode,
-		ErrorType:      r.ErrorType,
-		LatencyMs:      r.LatencyMs,
-		ReqBodyPath:    r.ReqBodyPath,
-		ReqBodySize:    r.ReqBodySize,
-		RespBodyPath:   r.RespBodyPath,
-		RespBodySize:   r.RespBodySize,
+		ID:              r.ID,
+		TraceID:         r.TraceID,
+		CreatedAt:       r.CreatedAt,
+		GatewayKeyID:    r.GatewayKeyID,
+		GatewayKeyName:  r.GatewayKeyName,
+		Method:          r.Method,
+		Path:            r.Path,
+		ClientIP:        r.ClientIP,
+		UserAgent:       r.UserAgent,
+		RequestedModel:  r.RequestedModel,
+		FinalModel:      r.FinalModel,
+		ProviderName:  r.ProviderName,
+		ProviderKeyID: r.ProviderKeyID,
+		// ProviderKeyName 不落库 — List/GetByID 查询后由 fillKeyNames 现查填充
+		Protocol: r.Protocol,
+		IsStream:        r.IsStream,
+		StatusCode:      r.StatusCode,
+		ErrorType:       r.ErrorType,
+		LatencyMs:       r.LatencyMs,
+		ReqBodyPath:     r.ReqBodyPath,
+		ReqBodySize:     r.ReqBodySize,
+		RespBodyPath:    r.RespBodyPath,
+		RespBodySize:    r.RespBodySize,
 		// truncated marker 写到 filename 后缀,DB 列已移除(F1)
 	}
 }
@@ -135,6 +139,7 @@ func (s *Store) List(ctx context.Context, f QueryFilter) ([]*AccessEntry, error)
 	for i := range rows {
 		out[i] = fromRow(&rows[i])
 	}
+	s.fillKeyNames(ctx, out)
 	return out, nil
 }
 
@@ -154,7 +159,41 @@ func (s *Store) GetByID(ctx context.Context, id uint) (*AccessEntry, error) {
 	if err := s.db.WithContext(ctx).First(&row, id).Error; err != nil {
 		return nil, err
 	}
-	return fromRow(&row), nil
+	entry := fromRow(&row)
+	s.fillKeyNames(ctx, []*AccessEntry{entry})
+	return entry, nil
+}
+
+// fillKeyNames 按 provider_key_id 批量查 provider_api_keys 的当前名字,填充
+// AccessEntry.ProviderKeyName(展示用,不落库)。
+// 语义:名字是「当前身份」— 用户改名后历史记录同步显示新名字;key 被删则
+// 查不到,保持空(前端回退显示 ID)。查询失败不阻塞列表(名字留空)。
+func (s *Store) fillKeyNames(ctx context.Context, entries []*AccessEntry) {
+	ids := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.ProviderKeyID != "" && !seen[e.ProviderKeyID] {
+			seen[e.ProviderKeyID] = true
+			ids = append(ids, e.ProviderKeyID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	var rows []dbpkg.ProviderAPIKey
+	if err := s.db.WithContext(ctx).
+		Where("CAST(id AS TEXT) IN ?", ids).Find(&rows).Error; err != nil {
+		return // 查名失败保持空,不阻塞列表
+	}
+	byID := make(map[string]string, len(rows))
+	for _, r := range rows {
+		byID[fmt.Sprintf("%d", r.ID)] = r.Name
+	}
+	for _, e := range entries {
+		if n, ok := byID[e.ProviderKeyID]; ok {
+			e.ProviderKeyName = n
+		}
+	}
 }
 
 // DeleteOlderThan 删除 created_at < cutoff 的记录,返回删除数
