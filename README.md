@@ -114,6 +114,46 @@ curl -X POST http://localhost:8080/api/v1/keys \
 
 ### 快速部署(推荐:gateway + PostgreSQL)
 
+**编排文件 `docker-compose.yml`**(仓库根目录,完整内容):
+
+```yaml
+services:
+  gateway:
+    image: wuhuhhhh/native-llm-gateway:latest
+    container_name: llm-gateway
+    ports:
+      - "8080:8080"          # 前端 + API 都在这里
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro   # 只读挂载真实配置(密钥不进镜像)
+      - ./gateway-data:/app/data            # DB / key-state / access body 持久化
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: llm-gateway-postgres
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: CHANGE_ME          # ← 改成你的密码
+      POSTGRES_DB: gateway
+    volumes:
+      - ./pg-data:/var/lib/postgresql/data   # PG 数据持久化
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+```
+
 ```bash
 # 1. 准备 config — 用 docker 专用模板(容器路径已配好),只改密码
 cp config.docker.example.yaml config.yaml
