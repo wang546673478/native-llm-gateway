@@ -6,32 +6,35 @@ import "time"
 //
 // 设计为值类型语义 — Recorder 拿到指针后立即消费,Rec caller 不应修改
 type AccessEntry struct {
-	ID             uint      `json:"id"`
-	TraceID        string    `json:"trace_id"`
-	CreatedAt      time.Time `json:"created_at"`
-	GatewayKeyID   string    `json:"gateway_key_id"`
-	GatewayKeyName string    `json:"gateway_key_name"`
-	Method         string    `json:"method"`
-	Path           string    `json:"path"`
-	ClientIP       string    `json:"client_ip"`
-	UserAgent      string    `json:"user_agent"`
-	RequestedModel string    `json:"requested_model"`
-	FinalModel     string    `json:"final_model"`
-	ProviderName   string    `json:"provider_name"`
+	ID        uint      `json:"id"`
+	TraceID   string    `json:"trace_id"`
+	CreatedAt time.Time `json:"created_at"`
+	// GatewayKeyID 唯一身份(落库)。GatewayKeyName 不落库 — 列表/详情查询时按
+	// ID 现查 gateway_keys 当前名字填充(改名即时生效,不存旧快照;与
+	// ProviderKeyName 同策略)。
+	GatewayKeyID   string `json:"gateway_key_id"`
+	GatewayKeyName string `json:"gateway_key_name"`
+	Method         string `json:"method"`
+	Path           string `json:"path"`
+	ClientIP       string `json:"client_ip"`
+	UserAgent      string `json:"user_agent"`
+	RequestedModel string `json:"requested_model"`
+	FinalModel     string `json:"final_model"`
+	ProviderName   string `json:"provider_name"`
 	// ProviderKeyID 实际发请求的上游 key ID(唯一身份,落库)。
 	// 成功 = 最终成功的 key;失败 = 最后尝试的 key(排查「切到哪把 key」用)。
 	// ProviderKeyName 不落库 — 列表/详情查询时按 ID 现查 provider_api_keys 的
 	// 当前名字填充(用户改名后历史记录同步显示新名字,不存旧快照)。
 	ProviderKeyID   string `json:"provider_key_id"`
 	ProviderKeyName string `json:"provider_key_name"`
-	Protocol       string    `json:"protocol"`
-	IsStream       bool      `json:"is_stream"`
-	StatusCode     int       `json:"status_code"`
-	ErrorType      string    `json:"error_type"`
-	LatencyMs      int       `json:"latency_ms"`
-	ReqBodyPath    string    `json:"req_body_path"`
-	ReqBodySize    int       `json:"req_body_size"`
-	RespBodyPath   string    `json:"resp_body_path"`
-	RespBodySize   int       `json:"resp_body_size"`
+	Protocol        string `json:"protocol"`
+	IsStream        bool   `json:"is_stream"`
+	StatusCode      int    `json:"status_code"`
+	ErrorType       string `json:"error_type"`
+	LatencyMs       int    `json:"latency_ms"`
+	ReqBodyPath     string `json:"req_body_path"`
+	ReqBodySize     int    `json:"req_body_size"`
+	RespBodyPath    string `json:"resp_body_path"`
+	RespBodySize    int    `json:"resp_body_size"`
 	// Truncated 状态由 文件名后缀 .truncated.json 标记,不在业务 struct 里(spec F1 决议)
 }

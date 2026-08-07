@@ -34,7 +34,7 @@ Claude Code 用户接入 Gateway 出问题(连接中断、403、stream 卡死)�
 | `trace_id` | string | index | 与 `X-Request-Id` 一致 |
 | `created_at` | time | index | UTC |
 | `gateway_key_id` | string | index | auth middleware 写入的 key.id;空 = 未认证 |
-| `gateway_key_name` | string | — | 冗余(UI 直接展示) |
+| ~~`gateway_key_name`~~ | — | — | **已移除**(2026-08-07)— 名字不落库,展示时按 ID 现查 `gateway_keys` 当前名字(改名即时生效,不存快照;与 `provider_key_id` 同策略) |
 | `method` | string | — | HTTP method |
 | `path` | string | — | `/v1/messages` / `/v1/chat/completions` 等(**不含 query string**,防止泄漏 key/apikey) |
 | `client_ip` | string | — | `c.ClientIP()` |
@@ -42,6 +42,7 @@ Claude Code 用户接入 Gateway 出问题(连接中断、403、stream 卡死)�
 | `requested_model` | string | index | 客户端原始 model 名 |
 | `final_model` | string | index | alias/fallback 后的 model |
 | `provider_name` | string | index | 空 = 没路由成功 |
+| `provider_key_id` | string | — | 实际发请求的上游 key ID(成功 = 最终成功 key;失败 = 最后尝试的 key);名字不落库,展示时按 ID 现查 `provider_api_keys` 当前名字(改名即时生效) |
 | `protocol` | string | — | anthropic / openai |
 | `is_stream` | bool | — | |
 | `status_code` | int | index | 返回给客户端的 HTTP 状态 |

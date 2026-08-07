@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
@@ -285,17 +283,6 @@ func (c *rpmCounter) allow(limit int) bool {
 	}
 	c.hits = append(c.hits, now)
 	return true
-}
-
-// KeyNameFromCtx 从 gin.Context 拿出当前 gateway key 的 name
-// 给 accesslog 等不需要拿到完整 *GatewayKey 的调用方用
-func KeyNameFromCtx(c *gin.Context) string {
-	if v, ok := c.Get("gateway_key"); ok {
-		if gk, ok := v.(*GatewayKey); ok {
-			return gk.Name
-		}
-	}
-	return ""
 }
 
 // tpmCounter token 计数器(按分钟累计)

@@ -71,15 +71,15 @@ func NewAdmin(
 	mimoCookieStore MimoQuotaCookieStore,
 ) *Admin {
 	return &Admin{
-		Manager:        mgr,
-		Registry:       reg,
-		Pools:          pools,
-		Router:         r,
-		Usage:          usageRepo,
-		Aliases:        aliases,
-		Keys:           keys,
-		AccessLog:      accessLogR,
-		QuotaMgr:       quotaMgr,
+		Manager:         mgr,
+		Registry:        reg,
+		Pools:           pools,
+		Router:          r,
+		Usage:           usageRepo,
+		Aliases:         aliases,
+		Keys:            keys,
+		AccessLog:       accessLogR,
+		QuotaMgr:        quotaMgr,
 		MimoCookieStore: mimoCookieStore,
 	}
 }
@@ -689,7 +689,7 @@ func parseStatusBuckets(s string) (buckets []accesslog.StatusBucket, unknown []s
 //
 //	start        RFC3339 时间下界
 //	end          RFC3339 时间上界
-//	gateway_key  精确匹配 gateway_key_name
+//	gateway_key  按名字过滤(子查询现查 gateway_keys 当前名字的 ID 集合)
 //	provider     精确匹配 provider_name
 //	model        匹配 requested_model 或 final_model
 //	trace_id     精确匹配 trace_id
@@ -816,8 +816,9 @@ func (a *Admin) getAccessLogDetail(c *gin.Context) {
 //
 //	total_24h   — 总记录数
 //	errors_24h  — status_code >= 400 的记录数
-//	active_keys — F14 binding:真正 distinct 的 gateway_key_name 数
-//	              (COUNT(DISTINCT ...),不能误用 COUNT(*))
+//	active_keys — F14 binding:真正 distinct 的 gateway_key_id 数
+//	              (COUNT(DISTINCT ...),不能误用 COUNT(*);
+//	              gateway_key_name 不落库,distinct 按 ID 数)
 func (a *Admin) accessLogStats(c *gin.Context) {
 	store := a.accessLogStore()
 	if store == nil {
@@ -840,8 +841,9 @@ func (a *Admin) accessLogStats(c *gin.Context) {
 	errFilter.StatusMin = 400
 	errs, _ := store.Count(ctx, errFilter)
 
-	// F14: 用 GroupByCount 真正算 distinct gateway key
-	activeKeys, _ := store.GroupByCount(ctx, last24h, "gateway_key_name")
+	// F14: 用 GroupByCount 真正算 distinct gateway key(按 ID —
+	// name 不落库;ID 数才是真正的 key 数,改名不会 inflate)
+	activeKeys, _ := store.GroupByCount(ctx, last24h, "gateway_key_id")
 
 	c.JSON(http.StatusOK, gin.H{
 		"total_24h":   total,

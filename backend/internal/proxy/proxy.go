@@ -153,15 +153,16 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	var entry *accesslog.AccessEntry
 	if e.accessLog != nil {
 		entry = &accesslog.AccessEntry{
-			TraceID:        traceID,
-			CreatedAt:      time.Now().UTC(),
-			Method:         c.Request.Method,
-			Path:           c.Request.URL.Path, // 不含 query string(spec F1)
-			ClientIP:       c.ClientIP(),
-			UserAgent:      c.Request.UserAgent(),
-			GatewayKeyID:   c.GetString("gateway_key_id"),
-			GatewayKeyName: auth.KeyNameFromCtx(c),
-			IsStream:       isStream,
+			TraceID:      traceID,
+			CreatedAt:    time.Now().UTC(),
+			Method:       c.Request.Method,
+			Path:         c.Request.URL.Path, // 不含 query string(spec F1)
+			ClientIP:     c.ClientIP(),
+			UserAgent:    c.Request.UserAgent(),
+			GatewayKeyID: c.GetString("gateway_key_id"),
+			// GatewayKeyName 不在此填 — 不落库,查询时按 ID 现查 gateway_keys
+			// 当前名字(与 ProviderKeyName 同策略,改名即时生效)
+			IsStream: isStream,
 		}
 	}
 	// 持有供 defer 使用 — entry / providerName / lastErr / gatewayValidation

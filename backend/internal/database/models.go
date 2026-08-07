@@ -154,30 +154,31 @@ func (GatewayKey) TableName() string { return "gateway_keys" }
 //   - gateway_key_name 是冗余字段,UI 不用 join 也能展示;auth 关掉时为空
 //   - body_path 是相对 body_dir 的路径,不存绝对路径(避免重启后指向失效位置)
 type AccessLog struct {
-	ID              uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	TraceID         string    `gorm:"column:trace_id;index;not null" json:"trace_id"`
-	CreatedAt       time.Time `gorm:"index;column:created_at" json:"created_at"`
-	GatewayKeyID    string    `gorm:"column:gateway_key_id;index" json:"gateway_key_id"`
-	GatewayKeyName  string    `gorm:"column:gateway_key_name" json:"gateway_key_name"`
-	Method          string    `gorm:"column:method" json:"method"`
-	Path            string    `gorm:"column:path" json:"path"`
-	ClientIP        string    `gorm:"column:client_ip" json:"client_ip"`
-	UserAgent       string    `gorm:"column:user_agent" json:"user_agent"`
-	RequestedModel  string    `gorm:"column:requested_model;index" json:"requested_model"`
-	FinalModel      string    `gorm:"column:final_model;index" json:"final_model"`
-	ProviderName  string `gorm:"column:provider_name;index" json:"provider_name"`
-	ProviderKeyID string `gorm:"column:provider_key_id" json:"provider_key_id"`
+	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	TraceID   string    `gorm:"column:trace_id;index;not null" json:"trace_id"`
+	CreatedAt time.Time `gorm:"index;column:created_at" json:"created_at"`
+	// GatewayKeyID 唯一身份(落库)。GatewayKeyName 不落库 — 查询时按 ID 现查
+	// gateway_keys 当前名字(改名即时生效,不存快照;与 ProviderKeyID 同策略)
+	GatewayKeyID   string `gorm:"column:gateway_key_id;index" json:"gateway_key_id"`
+	Method         string `gorm:"column:method" json:"method"`
+	Path           string `gorm:"column:path" json:"path"`
+	ClientIP       string `gorm:"column:client_ip" json:"client_ip"`
+	UserAgent      string `gorm:"column:user_agent" json:"user_agent"`
+	RequestedModel string `gorm:"column:requested_model;index" json:"requested_model"`
+	FinalModel     string `gorm:"column:final_model;index" json:"final_model"`
+	ProviderName   string `gorm:"column:provider_name;index" json:"provider_name"`
+	ProviderKeyID  string `gorm:"column:provider_key_id" json:"provider_key_id"`
 	// ProviderKeyName 不落库 — 查询时按 provider_key_id 现查 provider_api_keys
 	// 当前名字(改名即时生效,不存快照)
-	Protocol        string    `gorm:"column:protocol" json:"protocol"`
-	IsStream        bool      `gorm:"column:is_stream" json:"is_stream"`
-	StatusCode      int       `gorm:"column:status_code;index" json:"status_code"`
-	ErrorType       string    `gorm:"column:error_type;index" json:"error_type"`
-	LatencyMs       int       `gorm:"column:latency_ms" json:"latency_ms"`
-	ReqBodyPath     string    `gorm:"column:req_body_path" json:"req_body_path"`
-	ReqBodySize     int       `gorm:"column:req_body_size" json:"req_body_size"`
-	RespBodyPath    string    `gorm:"column:resp_body_path" json:"resp_body_path"`
-	RespBodySize    int       `gorm:"column:resp_body_size" json:"resp_body_size"`
+	Protocol     string `gorm:"column:protocol" json:"protocol"`
+	IsStream     bool   `gorm:"column:is_stream" json:"is_stream"`
+	StatusCode   int    `gorm:"column:status_code;index" json:"status_code"`
+	ErrorType    string `gorm:"column:error_type;index" json:"error_type"`
+	LatencyMs    int    `gorm:"column:latency_ms" json:"latency_ms"`
+	ReqBodyPath  string `gorm:"column:req_body_path" json:"req_body_path"`
+	ReqBodySize  int    `gorm:"column:req_body_size" json:"req_body_size"`
+	RespBodyPath string `gorm:"column:resp_body_path" json:"resp_body_path"`
+	RespBodySize int    `gorm:"column:resp_body_size" json:"resp_body_size"`
 	// 注意:truncated 信息放在文件后缀 `.truncated.json`,不存 DB 列(spec §1.1 锁定 21 字段;
 	// 2026-08-07 +ProviderKeyID 第 22 列 — 排查「请求实际用哪把 key」;名字不落库,
 	// 查询时按 ID 现查 provider_api_keys(改名即时生效,不存快照)

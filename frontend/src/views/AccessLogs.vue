@@ -81,7 +81,10 @@
               </n-tag>
             </n-descriptions-item>
             <n-descriptions-item label="Gateway Key">
-              {{ detail.metadata.gateway_key_name || '—' }}
+              {{ detail.metadata.gateway_key_name || detail.metadata.gateway_key_id || '—' }}
+              <span v-if="detail.metadata.gateway_key_name && detail.metadata.gateway_key_id" style="color: #999">
+                (ID: {{ detail.metadata.gateway_key_id }})
+              </span>
             </n-descriptions-item>
             <n-descriptions-item label="Provider">
               {{ detail.metadata.provider_name || '—' }}
@@ -372,7 +375,17 @@ const columns: DataTableColumns<AccessLog> = [
     render: row =>
       h(NTag, { type: statusTagType(row.status_code), size: 'small' }, () => `${row.status_code}`),
   },
-  { title: 'Key', key: 'gateway_key_name', width: 120 },
+  {
+    // P-gateway-key-name: 名字不落库(查询时按 ID 现查 gateway_keys)—
+    // 名为主、ID 副标;key 被删则名字为空,回退显示 ID(与 Provider Key 同策略)
+    title: 'Key',
+    key: 'gateway_key_id',
+    width: 120,
+    render: row =>
+      row.gateway_key_name
+        ? h('span', { title: `ID: ${row.gateway_key_id}` }, row.gateway_key_name)
+        : row.gateway_key_id || '—',
+  },
   {
     // P-catch-all: 客户端请求名只是标签,实际使用模型(路由后)单独一列
     title: '客户端请求模型',

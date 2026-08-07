@@ -91,6 +91,9 @@ export interface AccessLog {
   requested_model: string
   final_model: string
   provider_name: string
+  // P-key: 实际发请求的上游 key(成功 = 最终成功 key;失败 = 最后尝试的 key)
+  provider_key_id: string
+  provider_key_name: string
   protocol: string
   is_stream: boolean
   status_code: number
