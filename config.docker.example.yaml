@@ -20,10 +20,10 @@ server:
   # P-web-static: 前端构建产物目录(Go 直接托管,无 nginx;未命中 SPA fallback index.html)。
   # 为空 = 不启用(纯 API 网关);容器部署固定为 /app/web/dist
   static_dir: /app/web/dist
-  # P67: 接入日志(P67 接入日志模块)
-  # 默认 enabled=false(保持现有行为);要做 observing 时开启
+  # P67: 接入日志模块 — UI 在 Access Logs 页查看每次请求明细
+  # 注意:必须 enabled=true,否则 Access Logs 页面返回 access_log_disabled
   access_log:
-    enabled: false
+    enabled: true
     body_dir: /app/data/access-body
     buffer_size: 10000
     batch_size: 100
