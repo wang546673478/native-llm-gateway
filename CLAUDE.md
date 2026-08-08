@@ -195,13 +195,13 @@ sudo systemctl start llm-gateway # systemd 托管
 
 ### 已完成(通过全部测试,网关稳定)
 
-**耦合解耦(十三轮 32+ commit):**
+**耦合解耦(十四轮 36+ commit):**
 
 | 类别 | 改动 | 效果 |
 |---|---|---|
 | 死代码 | 删 `AcquireWithFilter` filter chain + `BuildPoolFromStrings` + `routeDirectModel` + 休眠 migrations/*.sql | 消除双实现漂移 + Schema 双真相(AutoMigrate 唯一权威) |
 | 裸串魔数 | keypool.ErrorType + BillingSource 常量 + 守卫测试 | 消除 error type / billing source "改一处改多处"漂移 |
-| 复制粘贴 | provider.ToPool(六合一)/ClassifyTransportError/NewError/ParseRetryAfter/pickAllowedModel/配额关键词单源(LooksLikeQuotaError) | 协议 base + vendor + 关键词表收敛单源 |
+| 复制粘贴 | provider.ToPool(六合一)/ClassifyTransportError/NewError/ParseRetryAfter/pickAllowedModel/配额关键词单源(LooksLikeQuotaError);openai 13 处 NewError 迁移(o069cbc) | 协议 base + vendor + 关键词表收敛单源;三协议 base 构造器统一 NewError |
 | 前后端契约 | client.ts 收编 raw axios + constants.ts 集中枚举 + ProviderKeyView 单类型 | 前后端路径/类型/枚举单一真相 |
 | 行为类(用户决断) | StreamTimeoutFloor 可配置 / 429 核心单源各家分叉 / Manager 改 ProviderLookup 窄接口 | 流式超时可调、429 共享语义、router/proxy 依赖窄接口 |
 | 并发 | ReloadProviderPool 整表原子替换(修崩溃)、MutateKey(修竞态)、shutdownCtx+Stop(修泄漏)、SendOrAbort(修流阻塞泄漏) | 消除进程崩溃 + 竞态 + goroutine/流泄漏 |
@@ -210,7 +210,8 @@ sudo systemctl start llm-gateway # systemd 托管
 | 文档漂移 | metric 名 / aliases"已退役" / SQL迁移"编号执行" 三处修正 | 修 misleading doc(PromQL 抄错、删活字段、启用漂移迁移) |
 | gin路由/观测 | magic-key 契约字符串 auth 单源 / 探针 metric 泄漏(metricsProbeInc) / 429 classify 按上游成因 | 防白名单静默失效、防 metric 双计、修 429→5xx 错记 |
 | 工程层 | 构建 flags 单源(reload 委托 make build) / 健康检查端口读 config.yaml / hot-reload 需重启 Warn | 防部署二进制漂移、端口硬编码、reload 静默半生效 |
-| 重大重构(十三轮) | config keys dual-path 追查 + APIKeys 死写链删除 / Pinia providers store 接入 5 view | p.Keys 是 HealthCheck 种子(保留),APIKeys 纯写死通道(删);5 view 厂商清单共享 fetch(3a1ede1+d1aba91) |
+| 重大重构(十三轮) | config keys dual-path 追查 + APIKeys 死写链删除 / Pinia providers store 接入 5 view | APIKeys 纯写死通道(删);5 view 厂商清单共享 fetch(3a1ede1+d1aba91) |
+| 重大重构(十四轮) | timeouts 死配置孤岛删除(server_read/write/idle+request_total) / openai 13 处 NewError 单源 + io_error 归类分歧消除 / Pool interface{}→*keypool.Pool + 删 main.go buildPools / 前端 vendorOptions/regToVendor/quotaDisplay 单源 | DB 是 config key 唯一权威;三协议 base 构造收敛 NewError;per-key 熔断对 io 失败一致生效;config keys[] dual-path 彻底消除(009236a+o069cbc+2ff6d3e+afb5e83) |
 
 **单点修复:**
 
@@ -237,7 +238,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | circuit 内建默认(5/60s/30s/1) | circuit.New 硬编码 | 合法包内单源;不为集中去 import config,保留 |
 | write_timeout 双语义 | http.Server 原始值 vs 引擎 2m 流式兜底 | 有意设计差异(socket 绝对上限 vs chunk 续期),保留 |
 | `mimo.quotaCookie` 全局单例 | provider/mimo/balancer.go | 通过 MimoQuotaSet 闭包注入隔离,proxy 不直接碰,保留 |
-| config providers[].keys[] dual-path | main.go buildPools 喂 HealthCheck(负载);toManagerConfig 的 APIKeys 链纯写死 | HealthCheck 种子保留;APIKeys 写链已删(3a1ede1) |
+| config providers[].keys[] dual-path | ~~main.go buildPools~~ 已删 + APIKeys 写链已删(afb5e83+3a1ede1) | **已彻底消除**:config key 零运行时读(仅 validate 的 _ = p.Keys no-op),DB provider_api_keys 唯一权威 |
 | 测试 fakeProvider ×5 | 各 test 包局部重复 | 抽共享 testutil 会过度耦合(rich behavior mock vs 最简 stub),保留 |
 | 前端每 view 依赖 VendorInfo shape | Providers/ProviderKeys/Keys/AccessLogs/Routing 经 store 消费 | store 只共享 fetch,不抽象后端契约;shape 解耦需契约层,暂缓 |
 | hot-reload 需重启字段 | database/server/usage/providers 等 | 已加 Warn 提示;彻底支持是大重构,字段明确需重启 |
