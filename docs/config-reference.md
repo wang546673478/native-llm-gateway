@@ -12,7 +12,7 @@ auth:          # 客户端鉴权
 providers:     # 厂商配置
 routing:       # 路由规则
 keypool:       # key 池调度
-timeouts:      # 预留
+timeouts:      # provider_default(provider 未显式设 timeout 时的兜底;HTTP server 超时见 server.read/write/idle_timeout —— timeouts.server_read/write/idle/request_total 已删,零消费)
 retry:         # 失败重试
 logging:       # 日志
 metrics:       # Prometheus

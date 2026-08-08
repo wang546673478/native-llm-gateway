@@ -21,12 +21,12 @@ logger(zap;development 模式有颜色,production JSON)
    ↓
 database.Open + database.Migrate(GORM AutoMigrate — 唯一 schema 权威;已删 SQL 迁移)
    ↓
-buildPools(cfg) → map[string]*keypool.Pool         ← 提前构造,后续注入
-   ↓
 provider.Default() (Registry) + provider.NewManager + manager.LoadFromConfig
    ↓
 server.New(cfg, logger, db, manager)
-   ↓   ↑ 这里构造:router / proxy / usage / metrics / accesslog / quotacheck
+   ↓   ↑ 这里构造:Provider Key Pool 从 DB(buildKeyPools+buildOnePool 读 provider_api_keys,
+   |      SetPool 注入)—— main.go 不再 buildPools(config key 已废,P30 DB 唯一权威);
+   |      router / proxy / usage / metrics / accesslog / quotacheck
 config.Watch(ctx, cfgPath, fn(srv.Reload))         ← 热重载监听
    ↓
 srv.Run(ctx)                                       ← 注册路由 + 启动 3 个后台协程
