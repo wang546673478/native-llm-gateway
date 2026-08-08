@@ -197,7 +197,7 @@ sudo systemctl start llm-gateway # systemd 托管
 
 | 改动 | 效果 |
 |---|---|
-| `acquireFromTierLocked` 拆分⚠️(半成品) | filter chain 模式,新增 `keypool/filter.go`,9 件事拆成独立 Filter — **但生产仍走旧实现,AcquireWithFilter 零调用=死代码**,两实现有行为分歧(见下方"剩余耦合") |
+| `acquireFromTierLocked` 拆分 → **已收敛为单一实现** | filter chain 曾作为半成品死代码(零生产调用),现**已删除**(filter.go/filter_test.go)。生产唯一路径 `acquireFromTierLocked`(pool.go)承担全部 key 采集;单一真相源,无双实现漂移 |
 | `swapToOtherKey` 拆分 | `poolForFailover` / `allowedIDSetFromRequest` / `swapToOtherKey` 3 个职责 |
 | `routing.model` fallback | `filterCandidates` 里 model 为空自动用 `default_model`,允许省略字段 |
 | Pool 解耦 circuit | `BreakerFactory` 接口注入,`keypool` 不再 import `circuit` |
@@ -210,9 +210,7 @@ sudo systemctl start llm-gateway # systemd 托管
 
 | 耦合 | 位置 | 建议 |
 |---|---|---|
-| **keypool 双实现(半成品重构)** | `pool.go:acquireFromTierLocked`(生产走它) vs `filter.go:AcquireWithFilter`(filter chain,**零生产调用**=死代码) | ⚠️ 两套 key 采集逻辑各自演化。实测 naive 合并(把 acquireFromTierLocked 改调 AcquireWithFilter)会破坏 `TestAcquireFromTier_OnlyRequestedTier` + `TestPool_AcquireSkipsQuotaExceededButCanReturnAfterRestore` — filter chain 在「单 token_plan key」和「老 polled-exhausted 语义」上偏离。需先把两实现 reconcile + 扩展等价测试覆盖分歧点,再切生产;勿盲改线上 hot path |
-| `usage/adapter.go` import `proxy.UsageRecord` | (已用 type alias 解耦) | 已解决 |
-| `auth` import `keypool` | auth/provider_keys_handler.go 引用 `*keypool.Key` 类型 | 合理类型依赖(pool 注入,非构造),保留 |
-| `provider/provider.go` import `keypool` | provider 依赖 keypool | Pool 用 interface{} 已部分规避,仍直接引用类型 |
-| `handler` import `provider/mimo` | (已改闭包注入,见 bda7ad0) | 已解决 |
-| `proxy.go` 5 处 `c.Get("gateway_key")` | (已统一走 gkCtx,见 a75ea23) | 已解决 |
+| `provider/provider.go` import `keypool` | provider 依赖 keypool | Pool 用 interface{} 已规避循环,`Request.Key *keypool.Key` 为合理类型依赖,保留 |
+| `router` 依赖 `*provider.Manager` 具体类型 | router/router.go:83 | 用窄接口(Get/GetAll/Models/DefaultModelFor/…)对外,具体 Manager 只做协调器持有;CLAUDE.md 注释已说明合法依赖,暂缓接口化 |
+| `proxy.Engine` 持 3 个具体跨包引用 | proxy.Engine: `*router.Router`/`*auth.Authenticator`/`*accesslog.Recorder` | 均为注入的窄方法协作方(方法面小:Route/CheckAllowed/RecordAsync 等),接口化收益 < 复杂度,保留 |
+| `provider/{deepseek,glm,mimo,minimax} → quotacheck` | 厂商 balancer.go 实现 quotacheck.Balancer | 依赖倒置:消费者 quotacheck 定义接口,实现方注册。无循环,方向正确,保留 |
