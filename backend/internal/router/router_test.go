@@ -29,6 +29,7 @@ func (p *fakeProvider) SendStreamRequest(ctx context.Context, req *provider.Requ
 	return nil, nil, nil
 }
 func (p *fakeProvider) HealthCheck(ctx context.Context) error { return nil }
+func (p *fakeProvider) SetPool(*keypool.Pool)                 {}
 func (p *fakeProvider) Close() error                          { return nil }
 
 // newFakeManager 构造一个带 fake providers 的 Manager

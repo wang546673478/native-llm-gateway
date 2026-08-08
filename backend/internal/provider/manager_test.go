@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +28,7 @@ func (p *fakeProviderForEndpoint) SendStreamRequest(ctx context.Context, req *Re
 	return nil, nil, nil
 }
 func (p *fakeProviderForEndpoint) HealthCheck(ctx context.Context) error { return nil }
+func (p *fakeProviderForEndpoint) SetPool(*keypool.Pool)                 {}
 func (p *fakeProviderForEndpoint) Close() error                          { return nil }
 
 // TestManager_EndpointFor 查 provider 的 endpoint(baseURL,给 quotacheck.CheckQuota 用)

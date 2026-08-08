@@ -181,6 +181,13 @@ type Provider interface {
 	Protocol() Protocol
 	Models() []string
 
+	// SetPool 注入 KeyPool(server 启动时 / ReloadProviderPool 热重载时调用)。
+	// 列进接口而非可选 type-assert:任何 Provider 实现都必须可注入 pool,
+	// 新 provider 漏实现会在编译期报错,而不是运行时静默 nil pool("keypool not
+	// configured")。所有现有实现(6 vendor base + 各协议面)均已实现,故加进接口
+	// 不破坏编译。
+	SetPool(*keypool.Pool)
+
 	// SendRequest 发送非流式请求
 	SendRequest(ctx context.Context, req *Request) (*Response, error)
 

@@ -561,6 +561,27 @@ func (r *Router) ReloadAliases(aliases map[string]AliasConfig) {
 	r.logger.Info("router aliases reloaded", zap.Int("count", len(aliases)))
 }
 
+// ReloadStrategy P14: 热重载 default_strategy / max_attempts。
+// 此前这俩只在 NewRouter 构造时固化,Server.Reload 只刷 aliases —— 热改配置里
+// 的 routing.default_strategy / retry.max_attempts 会静默保留旧值(路由/调度行为
+// 半新半旧)。这里补上,让热重载对路由策略也生效。
+func (r *Router) ReloadStrategy(defaultStrategy string, maxAttempts int) {
+	if defaultStrategy == "" {
+		defaultStrategy = "priority"
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cfg.DefaultStrategy = defaultStrategy
+	r.cfg.MaxAttempts = maxAttempts
+	// policies 固定集合(priority/weight/cost/health),strategy 名只需落在已知集,
+	// 未知名已在 Route() 里 fallback priority,无需重建
+	r.logger.Info("router strategy reloaded",
+		zap.String("default_strategy", defaultStrategy), zap.Int("max_attempts", maxAttempts))
+}
+
 // ReloadCatchAll P-catch-all: 原子替换兜底路由规则(与 ReloadAliases 同频)
 func (r *Router) ReloadCatchAll(c *AliasConfig) {
 	r.mu.Lock()

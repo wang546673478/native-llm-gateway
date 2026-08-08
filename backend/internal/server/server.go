@@ -200,14 +200,9 @@ func injectPools(manager *provider.Manager, pools map[string]*keypool.Pool, logg
 		if !ok {
 			continue
 		}
-		// Provider interface 加 SetPool(*keypool.Pool) 方法
-		// 各 base 实现透传
-		if setter, ok := p.(interface {
-			SetPool(*keypool.Pool)
-		}); ok {
-			setter.SetPool(pool)
-			logger.Info("pool injected", zap.String("provider", name))
-		}
+		// SetPool 已在 Provider 接口里(编译期强制),直接调用,不再可选 type-assert
+		p.SetPool(pool)
+		logger.Info("pool injected", zap.String("provider", name))
 	}
 }
 
@@ -241,25 +236,51 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		vendor := provider.Default().VendorFor(name)
 		pool, ok := vendorPools[vendor]
 		if !ok {
-			poolCfg := keypool.Config{
-				CoolingDuration: cfg.KeyPool.CoolingDuration,
-				// P-per-key-circuit: per-key 熔断器配置(取该 vendor 第一个注册名的,
-				// 同一 vendor 共享 pool 时配置一致);0 = 不启用
-				BreakerFactory: toBreakerFactory(p.CircuitBreaker, vendor, logger),
-			}
-			// B-probe-quota: 该 vendor 没有任何注册名有余额查询 balancer
-			// (glm / qwen / gemini)→ probe 模式:配额耗尽不永久标记,每次请求
-			// 重新探测(充值即恢复);有 balancer 的(deepseek / minimax)→
-			// 默认 poll,由 quotacheck 轮询恢复
-			if !vendorHasBalancer(vendor) {
-				poolCfg.QuotaRecovery = keypool.QuotaRecoveryProbe
-			}
+			poolCfg := toPoolCfg(cfg, vendor, logger)
 			pool = buildOnePool(context.Background(), vendor, sched, poolCfg, store, logger)
 			vendorPools[vendor] = pool
 		}
 		out[name] = pool
 	}
 	return out
+}
+
+// toPoolCfg 单一来源:构造 provider pool 的 keypool.Config。
+// 低耦合修复:startup(buildKeyPools)与热重载(ReloadProviderPool)此前各自组装
+// poolCfg —— 重载路径只设 CoolingDuration,丢了 BreakerFactory(per-key 熔断)
+// 和 balancer-less vendor 的 probe 配额模式,导致管理员增删 key 后:
+//  1. 该 provider 熔断静默失效;2. glm/qwen/gemini 从 probe(安全)变 poll(永久死 key)。
+//
+// 统一到这里,两条路径永远用同一份配置。cfg 由调用方传入(buildKeyPools 与
+// ReloadProviderPool 都拿得到),不绑 Server 实例。
+func toPoolCfg(cfg *config.Config, vendor string, logger *zap.Logger) keypool.Config {
+	poolCfg := keypool.Config{
+		CoolingDuration: cfg.KeyPool.CoolingDuration,
+		// P-per-key-circuit: per-key 熔断器配置(取该 vendor 第一个注册名的,
+		// 同一 vendor 共享 pool 时配置一致);0 = 不启用
+		BreakerFactory: toBreakerFactory(providerCircuitCfg(cfg, vendor), vendor, logger),
+	}
+	// B-probe-quota: 该 vendor 没有任何注册名有余额查询 balancer
+	// (glm / qwen / gemini)→ probe 模式:配额耗尽不永久标记,每次请求
+	// 重新探测(充值即恢复);有 balancer 的(deepseek / minimax)→
+	// 默认 poll,由 quotacheck 轮询恢复
+	if !vendorHasBalancer(vendor) {
+		poolCfg.QuotaRecovery = keypool.QuotaRecoveryProbe
+	}
+	return poolCfg
+}
+
+// providerCircuitCfg 取该 vendor 第一个已启用注册名的熔断配置(共享 pool 时一致)
+func providerCircuitCfg(cfg *config.Config, vendor string) config.CircuitBreakerCfg {
+	var c config.CircuitBreakerCfg
+	for name, p := range cfg.Providers {
+		if !p.Enabled || provider.Default().VendorFor(name) != vendor {
+			continue
+		}
+		c = p.CircuitBreaker
+		break
+	}
+	return c
 }
 
 // toBreakerFactory P-per-key-circuit: config 的熔断配置 → BreakerFactory 注入 Pool。
@@ -869,6 +890,8 @@ func (s *Server) Reload(newCfg *config.Config) {
 	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases, newCfg.Routing.Chains))
 	// P-catch-all: 兜底路由与 aliases 同频热重载
 	s.router.ReloadCatchAll(toRouterCatchAll(newCfg.Routing.CatchAll, newCfg.Routing.Chains))
+	// 路由调度策略(default_strategy / max_attempts)同频热重载(此前会静默保留旧值)
+	s.router.ReloadStrategy(newCfg.Routing.DefaultStrategy, newCfg.Retry.MaxAttempts)
 
 	// Manager 定价表(cost) — 不需要重建 Provider 实例,只刷 pricing map
 	s.manager.ReloadPricing(toManagerConfigForReload(newCfg, s.pools))
@@ -910,9 +933,6 @@ func (s *Server) Reload(newCfg *config.Config) {
 // ProviderKeysHandler.Create/Delete 后会调这个
 func (s *Server) ReloadProviderPool(providerName string) {
 	sched := keypool.NewScheduler(s.cfg.KeyPool.KeyRotation)
-	poolCfg := keypool.Config{
-		CoolingDuration: s.cfg.KeyPool.CoolingDuration,
-	}
 	store := auth.NewProviderKeyStore(s.db)
 	ctx := context.Background()
 
@@ -928,14 +948,16 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		if len(names) == 0 {
 			names = []string{providerName}
 		}
-		// 建一次 pool(vendor 名),重指该 vendor 的所有注册名
+		// 建一次 pool(vendor 名),重指该 vendor 的所有注册名。
+		// poolCfg 与 startup 同一来源(toPoolCfg)—— 保留 BreakerFactory + probe
+		// 配额模式,不让重载丢失熔断/回退成 poll 永久死 key
+		poolCfg := toPoolCfg(s.cfg, vendor, s.logger)
 		pool := buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger)
 		for i, name := range names {
 			s.pools[name] = pool
+			// SetPool 已在 Provider 接口,直接调用(编译期强制,不再 type-assert)
 			if pv, ok := s.manager.Get(name); ok {
-				if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
-					setter.SetPool(pool)
-				}
+				pv.SetPool(pool)
 			}
 			if s.router != nil {
 				s.router.SetPool(name, pool)
@@ -961,14 +983,13 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		vendor := provider.Default().VendorFor(name)
 		pool, ok := vendorPools[vendor]
 		if !ok {
-			pool = buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger)
+			// 与 startup 同一配置来源(toPoolCfg)—— 保留熔断 + probe 配额模式
+			pool = buildOnePool(ctx, vendor, sched, toPoolCfg(s.cfg, vendor, s.logger), store, s.logger)
 			vendorPools[vendor] = pool
 		}
 		s.pools[name] = pool
 		if pv, ok := s.manager.Get(name); ok {
-			if setter, ok := pv.(interface{ SetPool(*keypool.Pool) }); ok {
-				setter.SetPool(pool)
-			}
+			pv.SetPool(pool) // SetPool 在 Provider 接口,编译期强制
 		}
 		// P54: 同单分支 — Router 持有的 pool 引用一并更新
 		if s.router != nil {

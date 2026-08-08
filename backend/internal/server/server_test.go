@@ -37,6 +37,7 @@ func (f *fakeProvider) SendRequest(context.Context, *provider.Request) (*provide
 func (f *fakeProvider) SendStreamRequest(context.Context, *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	return nil, nil, nil
 }
+func (f *fakeProvider) SetPool(*keypool.Pool)             {}
 func (f *fakeProvider) HealthCheck(context.Context) error { return nil }
 func (f *fakeProvider) Close() error                      { return nil }
 
