@@ -895,6 +895,12 @@ func (s *Server) Reload(newCfg *config.Config) {
 	if newCfg == nil {
 		return
 	}
+	// P-reload-scfg: 同步 s.cfg = newCfg —— 否则 key-CRUD 触发的 ReloadProviderPool
+	// (947/966/1012)会用旧快照(CoolingDuration/KeyRotation)重建 pool,与已 apply 的
+	// quotaM.Reload 等 live 字段分歧。newCfg 已由 config.Watch 加载+validate。
+	// 注意:Server/host/port/timeout/static_dir 等"需重启"字段读的是 New 时构好的
+	// http.Server/s.cfg,此处赋值不影响它们(仍是重启生效,由下方 Warn 提示)。
+	s.cfg = newCfg
 	// Router aliases
 	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases, newCfg.Routing.Chains))
 	// P-catch-all: 兜底路由与 aliases 同频热重载
