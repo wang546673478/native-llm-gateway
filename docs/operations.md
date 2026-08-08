@@ -188,7 +188,7 @@ GET /metrics    # Prometheus 格式
 | 指标 | 告警阈值 |
 |---|---|
 | `gateway_requests_total{error_type="..."}` | 错误率 > 5% |
-| `gateway_quota_key_transitions{from,to}` | 大量 ACTIVE → QUOTA_EXCEEDED |
+| `gateway_quota_key_status_transitions_total{from,to}` | 大量 ACTIVE → QUOTA_EXCEEDED |
 | `gateway_quota_pending_probes` | 持续 > 100(队列堵塞) |
 | 进程内存 | > 1GB(可能是 access log buffer 积压) |
 | 进程 UP | 进程 down |

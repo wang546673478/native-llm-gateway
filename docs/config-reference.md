@@ -142,7 +142,7 @@ routing:
 
 ```yaml
 routing:
-  aliases: {}                    # 已退役
+  aliases: {}                    # 显式 alias(仍生效,不是"已退役";catch_all 是默认路径,alias 命中优先)
   chains: {}                     # chain_ref(可选)
   catch_all:
     providers:

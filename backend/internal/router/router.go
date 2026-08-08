@@ -275,11 +275,6 @@ func (r *Router) routeAliasRule(ctx context.Context, rule AliasConfig, aliasName
 	}, nil
 }
 
-// routeDirectModel 没有别名规则时,按真实 model id 直接查找 Provider
-func (r *Router) routeDirectModel(ctx context.Context, modelID string, req *provider.Request) (*RouteIterator, error) {
-	return r.routeDirectModelWithOpts(ctx, modelID, req, &routeOpts{})
-}
-
 func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
 	// P36: 当一个 model 在多个 provider 都有声明时(例如 minimax 和 minimax-openai 都声明 MiniMax-M3)
 	// 根据客户端请求的 URL 路径推断协议,优先选协议匹配的 provider:

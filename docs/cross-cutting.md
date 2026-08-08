@@ -93,7 +93,7 @@ type AccessEntry struct {
 | `gateway_request_duration_seconds` | Histogram | `provider, status` | 请求延迟 |
 | `gateway_quota_probe_total` | Counter | `provider, result` | 探测配额(由 quotacheck emit) |
 | `gateway_quota_poll_total` | Counter | `provider, result` | 轮询配额 |
-| `gateway_quota_key_transitions` | Counter | `provider, from, to` | key 状态转移(如 ACTIVE → QUOTA_EXCEEDED) |
+| `gateway_quota_key_status_transitions_total` | Counter | `provider, from, to` | key 状态转移(如 ACTIVE → QUOTA_EXCEEDED) |
 | `gateway_quota_pending_probes` | Gauge | — | 当前待探测 key 数 |
 
 ### 2.3 Adapter 模式
