@@ -220,6 +220,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns, DataTableCreateRowProps } from 'naive-ui'
 import { api, type AccessLog, type AccessLogDetailResp } from '../api/client'
+import { useProvidersStore } from '../stores/providers'
 import { copyText } from '../utils/clipboard'
 import { fmtDateTime, fmtTime } from '../utils/time'
 
@@ -474,14 +475,15 @@ async function loadKeyOptions() {
 // 复用 /providers/registered 接口,它返回 name + protocol + models,
 // 省掉额外去 /providers 拉 key_pool/circuit 信息的开销。
 async function loadProviderModelOptions() {
+  const provStore = useProvidersStore()
   try {
-    // P-provider-vendor: Provider 过滤按厂商(/providers vendor 聚合),
+    // P-provider-vendor: Provider 过滤按厂商(store.vendors 已共享 fetch 一次),
     // 日志 provider_name 已归一为厂商名;模型列表仍用 /providers/registered 并集
-    const [provResp, regResp] = await Promise.all([
-      api.providers(),
+    const [, regResp] = await Promise.all([
+      provStore.load(),
       api.providersRegistered().catch(() => ({ providers: [], count: 0 })),
     ])
-    providerOptions.value = (provResp.vendors ?? []).map(v => ({ label: v.vendor, value: v.vendor }))
+    providerOptions.value = (provStore.vendors ?? []).map(v => ({ label: v.vendor, value: v.vendor }))
     // dedupe models across providers
     const seen = new Set<string>()
     const models: { label: string; value: string }[] = []

@@ -142,6 +142,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns, SelectOption } from 'naive-ui'
 import { api, type ProviderKeyView } from '../api/client'
+import { useProvidersStore } from '../stores/providers'
 import { copyText } from '../utils/clipboard'
 
 interface ProviderInfo {
@@ -265,14 +266,15 @@ async function load() {
   loading.value = true
   try {
     // 1. 拿 keys + providers
-    // P-provider-vendor: 绑定 Provider 按厂商 — 用 /providers(vendor 聚合)
-    // 而非 /providers/registered(注册名);同时建注册名→厂商映射供旧数据归一
-    const [keysResp, provResp] = await Promise.all([
+    // P-provider-vendor: 绑定 Provider 按厂商 — 用 /providers(vendor 聚合,
+    // 经共享 store 拉取)而非 /providers/registered(注册名);同时建注册名→厂商映射
+    const provStore = useProvidersStore()
+    const [keysResp] = await Promise.all([
       api.keys.list().catch(() => ({ keys: [], count: 0 })),
-      api.providers(),
+      provStore.load(),
     ])
     keys.value = keysResp.keys
-    const vendors: any[] = (provResp as any).vendors ?? []
+    const vendors: any[] = provStore.vendors ?? []
     regToVendor.value = {}
     for (const v of vendors) {
       for (const n of v.names ?? []) regToVendor.value[n.name] = v.vendor

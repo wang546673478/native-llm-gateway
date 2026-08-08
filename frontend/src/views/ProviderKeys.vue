@@ -78,6 +78,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { api, type ProviderKeyView, type VendorInfo } from '../api/client'
+import { useProvidersStore } from '../stores/providers'
 import { BILLING_SOURCE, BILLING_SOURCE_DEFAULT, KEY_STATUS, KEY_STATUS_DISABLED_UI, QUOTA_KIND } from '../api/constants'
 import { STATUS_PALETTE } from '../utils/status'
 import { fmtDateTime } from '../utils/time'
@@ -258,11 +259,13 @@ const columns: DataTableColumns<ProviderKeyView> = [
 async function load() {
   loading.value = true
   try {
-    // P-provider-vendor: 厂商聚合列表 → 按 vendor.names 展开,循环拉每个注册名的 api-keys
+    // P-provider-vendor: 厂商聚合列表来自共享 store → 按 vendor.names 展开,
+    // 循环拉每个注册名的 api-keys
     // (同 vendor 的多注册名共享同一 key 池,列表天然按 provider_name 相邻)
-    const provResp = await api.providers()
-    providers.value = provResp.vendors
-    const allNames = (provResp.vendors || []).flatMap(v => v.names.map(n => n.name))
+    const provStore = useProvidersStore()
+    await provStore.load()
+    providers.value = provStore.vendors
+    const allNames = provStore.vendors.flatMap(v => v.names.map(n => n.name))
     const allKeys = await Promise.all(
       allNames.map(async name => {
         try {

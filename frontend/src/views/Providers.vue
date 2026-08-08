@@ -12,11 +12,14 @@
 <script setup lang="ts">
 import { h, onMounted, ref } from 'vue'
 import { NDataTable, NSpin, NTag } from 'naive-ui'
-import { api, type VendorInfo } from '../api/client'
+import type { VendorInfo } from '../api/client'
+import { useProvidersStore } from '../stores/providers'
 
 // P-provider-vendor: 一行 = 一个厂商(vendor),names 列出该厂商的全部注册名(协议面)
+// 数据源 = 共享 providers store(全字段 VendorInfo,含 key_pool/circuit_breaker)
 const providers = ref<VendorInfo[]>([])
 const loading = ref(true)
+const store = useProvidersStore()
 
 const columns = [
   { title: 'Name', key: 'vendor' },
@@ -57,8 +60,8 @@ const columns = [
 onMounted(async () => {
   loading.value = true
   try {
-    const resp = await api.providers()
-    providers.value = resp.vendors
+    await store.load() // 共享 fetch + 缓存;vendor 清单一次
+    providers.value = store.vendors
   } finally {
     loading.value = false
   }

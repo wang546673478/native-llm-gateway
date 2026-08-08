@@ -44,9 +44,14 @@
 import { onMounted, ref } from 'vue'
 import { NCard, NDataTable, NEmpty, NSpace, NSpin, NTag, NText } from 'naive-ui'
 import { api, type RoutingResp } from '../api/client'
+import { useProvidersStore } from '../stores/providers'
 
 const data = ref<RoutingResp | null>(null)
 const loading = ref(true)
+
+// P-provider-vendor: 自动模式下展示「参与 provider → 默认模型」,
+// 从共享 providers store 拉实际参与方(静态 vendor 清单,无重度图表字段)
+const store = useProvidersStore()
 
 // 自动模式下展示「参与 provider → 默认模型」,从 /providers 拉取实际参与方
 const autoProviders = ref<Array<{ provider: string; protocol: string; defaultModel: string }>>([])
@@ -69,9 +74,9 @@ onMounted(async () => {
   try {
     data.value = await api.routing()
     if (data.value?.catch_all && (data.value.catch_all.Providers ?? []).length === 0) {
-      // 自动模式:拉 provider 列表,展示参与方与默认模型(第一个声明 = 默认)
-      const prov = await api.providers()
-      autoProviders.value = prov.vendors.map(v => ({
+      // 自动模式:展示参与方与默认模型(第一个声明 = 默认)。vendor 清单共享 fetch 一次
+      await store.load()
+      autoProviders.value = store.vendors.map(v => ({
         provider: v.vendor,
         protocol: v.names?.[0]?.protocol ?? '',
         defaultModel: v.models?.[0] ?? '',
