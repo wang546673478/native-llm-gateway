@@ -712,11 +712,17 @@ func TestPollAllBalancers_ExhaustedThenWindowRefreshRestores(t *testing.T) {
 		}
 	}
 
-	// 阶段 3:05:00 窗口刷新 → 余额回升 100% → poll 恢复
+	// 阶段 3:05:00 窗口刷新 → 余额回升 100% → poll 恢复 ACTIVE(给 key 一次真实请求机会)
+	// Bug fix 2026-08-08 修订:不能只靠 ReportSuccess 恢复 — QE key 不被调度,
+	// 永远没有请求发到它。poll 读到确实有额度就恢复,同时 ResetCooling 防瞬时升级。
 	b.byID["dead"] = Balance{HasQuota: true, Raw: 100, Kind: "percent"}
 	m.pollAllBalancers(context.Background())
 	if keys[1].Status != keypool.KeyStatusActive {
-		t.Fatalf("after refresh: dead status = %s, want ACTIVE (auto-restored)", keys[1].Status)
+		t.Fatalf("after refresh: dead status = %s, want ACTIVE (poll restore 给 key 机会)", keys[1].Status)
+	}
+	// 恢复后 CoolingCount 被重置
+	if keys[1].CoolingCount != 0 {
+		t.Errorf("dead CoolingCount = %d, want 0 (ResetCooling)", keys[1].CoolingCount)
 	}
 	if keys[1].Remaining != 100 {
 		t.Errorf("dead Remaining = %v, want 100", keys[1].Remaining)

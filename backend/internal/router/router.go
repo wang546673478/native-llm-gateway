@@ -242,7 +242,7 @@ func (r *Router) routeAliasRule(ctx context.Context, rule AliasConfig, aliasName
 		pol = r.policies["priority"]
 	}
 
-	candidates := r.filterCandidates(ctx, rule.Providers, req)
+	candidates := r.filterCandidates(ctx, rule.Providers, req, o)
 	if len(candidates) == 0 {
 		return nil, ErrNoRoute
 	}
@@ -308,10 +308,17 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 	}, nil
 }
 
-// filterCandidates 协议匹配 + 健康 + 已注册
-func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute, req *provider.Request) []ProviderRoute {
+// filterCandidates 协议匹配 + 健康 + 已注册 + 白名单模型选择
+// P-whitelist-select (Bug fix 2026-08-09): 显式 alias/catch_all 也遵循白名单语义 —
+// 白名单非空时,优先从 provider 声明的模型里挑白名单命中的,覆盖显式 model 字段。
+// 之前只有自动模式(routeCatchAllAuto)应用白名单,显式列表用 config 写死的 model
+// (如 mimo-v2.5),导致 key 白名单配 mimo-v2.5-pro 时 result.ModelID=mimo-v2.5
+// → 白名单校验 403 "does not allow model mimo-v2.5"。现统一两种模式。
+func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute, req *provider.Request, o *routeOpts) []ProviderRoute {
 	reqProto := detectProtocol(req.Path)
 	out := make([]ProviderRoute, 0, len(providers))
+	// 白名单参与选择(与 routeCatchAllAuto 同逻辑)
+	whitelistSelect := len(o.AllowedModels) > 0 && !sliceContains(o.AllowedModels, "*")
 	for _, p := range providers {
 		pv, ok := r.manager.Get(p.Name)
 		if !ok {
@@ -323,6 +330,29 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		// P-per-key-circuit: provider 级健康过滤已移除 — 熔断器在 keypool(per-key)
 		// P-mixed-tier-pool: 补块级计费来源(显式 alias providers 列表里没写这个字段)
 		p.BillingSource = r.manager.BillingSourceFor(p.Name)
+		// P-whitelist-select: 白名单里有这个 provider 声明的模型 → 用白名单模型
+		// 覆盖显式 model 字段(用户配白名单 = 声明能用的模型,应优先)。
+		// 注意:不 continue 删除不匹配的 provider — 候选保留,由 proxy 的 tryCandidate
+		// 白名单校验逐个跳过,全部跳过时 handleAllFailed 返 403 model_not_allowed
+		// (删候选会让 proxy 无候选 → 503 no_route,语义错误)
+		if whitelistSelect {
+			picked := ""
+			for _, am := range o.AllowedModels {
+				if sliceContains(pv.Models(), am) {
+					picked = am
+					break
+				}
+			}
+			if picked != "" {
+				p.Model = picked
+			}
+		}
+		// P-model-default: 显式 alias 列表里没填 model 时,fallback 到 provider 的 default_model
+		// 这样用户配路由可以省略 model 字段,让 default_model 决定
+		// (单一职责:model 字段只在用户主动精确控制时填,避免冗余)
+		if p.Model == "" {
+			p.Model = r.manager.DefaultModelFor(p.Name)
+		}
 		out = append(out, p)
 	}
 	return out

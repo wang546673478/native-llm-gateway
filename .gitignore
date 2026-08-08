@@ -15,6 +15,7 @@ data/
 *.db
 *.db-journal
 key-state.json
+key-state.json.backup-*
 
 # IDE
 .idea/

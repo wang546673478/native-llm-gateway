@@ -2,7 +2,15 @@
 
 > 一个协议感知的 LLM Gateway,为 AI Agent(Claude Code、Codex、任意 OpenAI 兼容客户端)提供多 Provider 自动路由、API Key 池化、tier 计费(token_plan → api → free)和自动故障转移。
 
-📘 **完整实现规格书**:`Native LLM Gateway — 完整实现规格书 v2.md`(注意:设计基线,现状差异见规格书顶部横幅)
+📘 **架构总览**:`docs/ARCHITECTURE.md` 一份图谱,新人 30 分钟上手
+📘 **完整实现规格书 v2**:`Native LLM Gateway — 完整实现规格书 v2.md`(设计基线,差异看横幅)
+📘 **Provider 厂商目录**:`docs/providers.md`(当前内置的所有厂商)
+📘 **子系统详解**:`docs/subsystems.md`(quotacheck / auth / usage)
+📘 **横切关注点**:`docs/cross-cutting.md`(accesslog / metrics / circuit)
+📘 **配置参考**:`docs/config-reference.md`(config.yaml 完整字段)
+📘 **前端**:`docs/frontend.md`(管理 UI)
+📘 **运维**:`docs/operations.md`(部署 / 脚本 / 监控)
+📘 **文档索引**:`docs/INDEX.md` 一站式目录
 📕 **踩坑与排错**:`docs/踩坑与排错.md`
 📗 **新增厂商指南**:`docs/provider厂商定制包指南.md`
 
@@ -64,8 +72,9 @@ wire_api = "responses"
 
 | 厂商 | 注册名(协议面) | billing | 余额恢复 | Responses API |
 |---|---|---|---|---|
-| `deepseek` | `deepseek`(openai)+ `deepseek-anthropic`(anthropic) | api | poll(官方余额接口) | ✅(`responses_api: true`) |
-| `minimax` | `minimax`(anthropic)+ `minimax-openai`(openai) | **token_plan** | poll(`token_plan/remains`) | ✅(`responses_api: true`) |
+| `deepseek` | `deepseek`(openai)+ `deepseek-anthropic`(anthropic) | api | poll(官方余额接口) | ✅(`responses_api: true`,仅 v4-flash) |
+| `minimax` | `minimax`(anthropic)+ `minimax-openai`(openai) | **token_plan** | poll(`token_plan/remains`) | ✅ |
+| `mimo` | `mimo`(openai)+ `mimo-token-plan`(openai,token_plan 套餐) + `mimo-anthropic`(anthropic) + `mimo-anthropic-token-plan` | 同 vendor 共享 pool | probe(未文档化端点,cookie 鉴权) | ✅ |
 | `glm` | `glm`(openai)+ `glm-anthropic`(anthropic) | api | poll(官方 monitor 端点) | ❌ |
 | `qwen` | `qwen`(openai) | api | probe(无接口,每次请求重探) | ❌ |
 | `gemini` | `gemini`(google) | api | probe(无接口,每次请求重探) | ❌ |
@@ -225,3 +234,7 @@ backend/internal/
 - 配额耗尽标记按厂商分两档:poll(有余额接口:deepseek/minimax/glm)→ 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;probe(无接口:qwen/gemini)→ 不永久标记,每次请求重新探测,恢复后自动可用
 - 跨厂商切换时客户端回带的推理块会被网关剥离 + 强制 `effort=none`(DeepSeek 校验)
 - provider 的 endpoint/protocol/models 改动需重载(用 `./gateway-reload.sh` 无感重载,自动编译+优雅排空);routing/价格/key 热重载。重载后 key 状态从 `key-state.json` 快照恢复(QUOTA_EXCEEDED/COOLING 不丢),无需重新 poll 确认
+
+## 已知耦合点(2026-08 现状)
+
+代码已能跑但**过度耦合** — 任何跨包改动(如 sticky session)预计 ~35 个文件,详见 `docs/ARCHITECTURE.md` §5 + §9 改动前检查清单。改进方向见文档末尾讨论。

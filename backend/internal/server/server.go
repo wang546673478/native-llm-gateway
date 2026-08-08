@@ -241,8 +241,7 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 				CoolingDuration: cfg.KeyPool.CoolingDuration,
 				// P-per-key-circuit: per-key 熔断器配置(取该 vendor 第一个注册名的,
 				// 同一 vendor 共享 pool 时配置一致);0 = 不启用
-				CircuitBreaker: toCircuitConfig(p.CircuitBreaker),
-				CircuitLogger:  logger,
+				BreakerFactory: toBreakerFactory(p.CircuitBreaker, vendor, logger),
 			}
 			// B-probe-quota: 该 vendor 没有任何注册名有余额查询 balancer
 			// (glm / qwen / gemini)→ probe 模式:配额耗尽不永久标记,每次请求
@@ -259,10 +258,14 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 	return out
 }
 
-// toCircuitConfig P-per-key-circuit: config 的熔断配置 → circuit.Config。
+// toBreakerFactory P-per-key-circuit: config 的熔断配置 → BreakerFactory 注入 Pool。
 // 配置了 failure_threshold > 0 才启用(0 = 不启用,测试/默认场景)
-func toCircuitConfig(c config.CircuitBreakerCfg) circuit.Config {
-	return circuit.Config{
+// Pool 通过工厂方法拿到熔断器,keypool 包不再直接 import circuit
+func toBreakerFactory(c config.CircuitBreakerCfg, vendorPrefix string, logger *zap.Logger) keypool.BreakerFactory {
+	if c.FailureThreshold <= 0 {
+		return nil // 不启用
+	}
+	cbCfg := circuit.Config{
 		FailureThreshold: c.FailureThreshold,
 		FailureWindow:    c.FailureWindow,
 		OpenTimeout:      c.OpenTimeout,
@@ -270,6 +273,32 @@ func toCircuitConfig(c config.CircuitBreakerCfg) circuit.Config {
 		CountableErrors:  c.CountableErrors,
 		ExcludedErrors:   c.ExcludedErrors,
 	}
+	return func(keyID string) keypool.Breaker {
+		br := circuit.New(vendorPrefix+"/"+keyID, cbCfg)
+		br.SetLogger(logger)
+		return &circuitBreakerAdapter{br: br}
+	}
+}
+
+// circuitBreakerAdapter 适配 circuit.Breaker → keypool.Breaker 接口
+type circuitBreakerAdapter struct {
+	br *circuit.Breaker
+}
+
+func (a *circuitBreakerAdapter) Allow() bool {
+	return a.br.Allow()
+}
+
+func (a *circuitBreakerAdapter) RecordSuccess() {
+	a.br.RecordSuccess()
+}
+
+func (a *circuitBreakerAdapter) RecordFailure(errType string) {
+	a.br.RecordFailure(errType)
+}
+
+func (a *circuitBreakerAdapter) State() string {
+	return string(a.br.State())
 }
 
 // vendorHasBalancer 该 vendor 的任意注册名是否注册了余额查询 balancer

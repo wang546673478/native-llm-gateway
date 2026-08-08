@@ -8,10 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"go.uber.org/zap"
-
-	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 )
 
 // QuotaRecoveryMode 配额耗尽的恢复策略
@@ -28,6 +24,19 @@ const (
 	QuotaRecoveryProbe QuotaRecoveryMode = "probe"
 )
 
+// BreakerFactory 抽象熔断器工厂 — Pool 不再直接 import circuit 包
+// 由调用方(server.buildOnePool)注入,既保持 per-key 熔断语义,又解耦 keypool ↔ circuit
+type BreakerFactory func(keyID string) Breaker
+
+// Breaker 熔断器接口 — Pool 只需要 Allow/RecordSuccess/RecordFailure 三个方法
+type Breaker interface {
+	Allow() bool
+	RecordSuccess()
+	RecordFailure(errType string)
+	// State 返回熔断器状态(CLOSED/OPEN/HALF_OPEN),用于 Keys() 快照
+	State() string
+}
+
 // Config Pool 配置
 type Config struct {
 	CoolingDuration time.Duration // 默认冷却时长
@@ -38,9 +47,8 @@ type Config struct {
 	// 之前熔断器是 per-provider 的 — 一把 key 5 个 5xx 连坐整 provider,
 	// healthy key 一起被跳过(2026-08-06 实测:weige 出问题,key-1 也被跳过)。
 	// 现在每把 key 独立熔断;FailureThreshold <= 0 = 不启用(测试场景)
-	CircuitBreaker circuit.Config
-	// 熔断状态转变日志(nil = 不打)
-	CircuitLogger *zap.Logger
+	// 通过 BreakerFactory 注入,Pool 不再直接 import circuit 包
+	BreakerFactory BreakerFactory
 }
 
 // Pool 管理一个 Provider 下的所有 Key
@@ -53,7 +61,7 @@ type Pool struct {
 	// P-per-key-circuit: per-key 熔断器(key.ID → breaker,懒创建)。
 	// 5 个 5xx/timeout/connection 在窗口内只熔断这一把 key,
 	// 同 provider 的 healthy key 照常参与调度(2026-08-06 之前是 provider 级连坐)
-	breakers map[string]*circuit.Breaker
+	breakers map[string]Breaker
 	// P68: quota restore 回调槽(默认 nil = no-op)。
 	// 注入方是 quotacheck.Manager,Pool 不感知 quotacheck 包,避免 import cycle。
 	// 签名带 fromStatus:让 callback 知道状态变之前的值,用于 emit transition metric。
@@ -77,23 +85,22 @@ func NewPool(providerName string, keys []*Key, scheduler Scheduler, cfg Config) 
 		cfg:          cfg,
 		keys:         keys,
 		scheduler:    scheduler,
-		breakers:     make(map[string]*circuit.Breaker),
+		breakers:     make(map[string]Breaker),
 	}
 }
 
 // breakerFor P-per-key-circuit: 取(或懒创建)指定 key 的熔断器。
 // 调用方必须已持 p.mu(写锁)— 懒创建会写 breakers map。
-// 未配置熔断(Config.CircuitBreaker.FailureThreshold <= 0)→ nil
-func (p *Pool) breakerFor(k *Key) *circuit.Breaker {
-	if p.cfg.CircuitBreaker.FailureThreshold <= 0 {
+// 无 BreakerFactory 注入 → nil(测试场景)
+func (p *Pool) breakerFor(k *Key) Breaker {
+	if p.cfg.BreakerFactory == nil {
 		return nil
 	}
-	br, ok := p.breakers[k.ID]
-	if !ok {
-		br = circuit.New(k.ProviderName+"/"+k.ID, p.cfg.CircuitBreaker)
-		br.SetLogger(p.cfg.CircuitLogger)
-		p.breakers[k.ID] = br
+	if br, ok := p.breakers[k.ID]; ok {
+		return br
 	}
+	br := p.cfg.BreakerFactory(k.ID)
+	p.breakers[k.ID] = br
 	return br
 }
 
@@ -332,12 +339,26 @@ func (p *Pool) ReportSuccess(k *Key) {
 		br.RecordSuccess()
 	}
 
+	// Bug fix (2026-08-08): 上游实际请求成功 → 从 QE 状态恢复
+	// poll 读到 100% 不直接 restore(避免 MiniMax 状态机滞后)— 必须等真实请求成功
+	// 余额信息被 poll 持续更新,这里只做状态切换
+	if k.Status == KeyStatusQuotaExceeded {
+		k.Status = KeyStatusActive
+		k.QuotaProbeAttempts = 0
+		k.QuotaExceededSince = time.Time{}
+		k.UpdatedAt = time.Now()
+		k.CoolingCount = 0 // reset 冷却计数,新窗口
+	}
+
 	// 如果是 LIMITED(配额受限但仍可用),成功不改变状态
 	// 如果之前错误状态是 COOLING 但已恢复,这里就保持 ACTIVE
 }
 
 // ReportRateLimit 上报 429,触发冷却
 // retryAfter 来自 Retry-After header;为 0 时用默认 CoolingDuration
+// Bug fix (2026-08-08): token_plan key 连续冷却 3 次 → 升级为 QUOTA_EXCEEDED
+// 之前没有退出机制,key 反复 429 → 反复刷新 60s COOLING → 永远卡在冷却中
+// 但 remaining 早已恢复。升级 QE 后由 quotacheck poll 接管恢复决策
 func (p *Pool) ReportRateLimit(k *Key, retryAfter time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -356,6 +377,14 @@ func (p *Pool) ReportRateLimit(k *Key, retryAfter time.Duration) {
 	k.UpdatedAt = now
 	// P-no-disabled: 冷却次数不设上限 — 反复限流只会反复冷却(COOLING 期间不参与
 	// 调度,天然自限),不会永久禁用。终端状态没有恢复路径
+
+	// Bug fix: 连续冷却升级 QE — 仅 token_plan 适用(api 层冷却本就是正常限流)
+	if k.CoolingCount >= 3 && k.BillingSource == "token_plan" {
+		k.Status = KeyStatusQuotaExceeded
+		k.QuotaExceededSince = now
+		k.QuotaProbeAttempts = 0
+		k.UpdatedAt = now
+	}
 }
 
 // ReportError 上报非 429 错误
@@ -452,6 +481,15 @@ func (p *Pool) RestoreQuota(k *Key) {
 	}
 }
 
+// ResetCooling 重置 key 的冷却计数(CoolingCount)
+// 用途:poll 读到余额恢复(QE → ACTIVE)后调用,防止"充值 → 立即又被 429 连续升级 QE"的无意义计数累积
+func (p *Pool) ResetCooling(k *Key) {
+	p.mu.Lock()
+	k.CoolingCount = 0
+	k.UpdatedAt = time.Now()
+	p.mu.Unlock()
+}
+
 // IncQuotaProbeAttempts 探测次数 +1(RESTORE 时由 Manager reset 为 0)
 // 返回新的 attempts 数
 func (p *Pool) IncQuotaProbeAttempts(k *Key) int {
@@ -524,8 +562,8 @@ func (p *Pool) Keys() []Key {
 		// RLock 下写 map 是 race;breaker 内部自带锁)
 		if br, ok := p.breakers[k.ID]; ok {
 			st := br.State()
-			out[i].CircuitState = string(st)
-			out[i].CircuitOpen = st != circuit.StateClosed
+			out[i].CircuitState = st
+			out[i].CircuitOpen = st != "CLOSED"
 		}
 	}
 	return out

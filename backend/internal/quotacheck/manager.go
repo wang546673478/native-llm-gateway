@@ -620,15 +620,25 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 					}
 					// 非 ACTIVE(QE/COOLING):不写不标,保留旧值
 				} else {
-					// 有额度:正常更新 + 恢复 QE key
+					// 有额度:恢复 QE key
+					// Bug fix (2026-08-08) 修订:不能只靠 ReportSuccess 恢复 —
+					// QE 的 key 不再被调度,永远没有请求发到它,ReportSuccess 永远
+					// 不触发 → QE 永久卡死(实测 weige 100% 一直 QE)。
+					// 改为:poll 读到「确实有额度」就恢复 ACTIVE(充值到账的信号),
+					// 给这个 key 一次真实请求机会。若上游仍 429 → ReportRateLimit
+					// 连续冷却升级 QE(防瞬时风暴),下轮 poll 又读 100% 再恢复 — 逐步试探。
+					// 冷档 60s 期间不参与调度,避免瞬时流量风暴。
 					k.QuotaZeroStreak = 0
 					k.Remaining = bal.Raw
 					if k.Status == keypool.KeyStatusQuotaExceeded {
-						m.logger.Info("poll: quota restored",
+						m.logger.Info("poll: quota restored (give key a request chance)",
 							zap.String("provider", vendorName),
 							zap.String("key_id", k.ID),
 							zap.Float64("remaining", bal.Raw))
 						pool.RestoreQuota(k)
+						// 重置冷却计数,防充值后立即再升级 QE 的无意义循环叠加
+						// (RestoreQuota 已重置 QuotaExceededSince;这里保证 CoolingCount 也清零)
+						pool.ResetCooling(k)
 						m.metricsPollInc(vendorName, "restored")
 					} else {
 						m.metricsPollInc(vendorName, "ok")
