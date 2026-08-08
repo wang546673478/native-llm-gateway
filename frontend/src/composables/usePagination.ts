@@ -7,13 +7,13 @@
 import { ref, type Ref } from 'vue'
 
 export const DEFAULT_PAGE_SIZE = 20
-export const DEFAULT_PAGE_SIZES = [20, 50, 100, 200] as const
+export const DEFAULT_PAGE_SIZES: number[] = [20, 50, 100, 200]
 
 export interface Pagination {
   page: number
   pageSize: number
   showSizePicker: boolean
-  pageSizes: readonly number[]
+  pageSizes: number[]
   itemCount: number
 }
 

@@ -197,7 +197,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
+import { usePagination } from '../composables/usePagination'
 import {
   NButton,
   NCard,
@@ -226,13 +227,12 @@ const message = useMessage()
 const records = ref<AccessLog[]>([])
 const stats = ref({ total_24h: 0, errors_24h: 0, active_keys: 0 })
 const loading = ref(false)
-const pagination = reactive({
-  page: 1,
-  pageSize: 20,
-  itemCount: 0,
-  showSizePicker: true,
-  pageSizes: [20, 50, 100, 200] as number[],
-})
+// 分页状态 + handlers 收敛到共享 usePagination
+const { pagination, onPageChange, onPageSizeChange } = usePagination(load)
+
+function resetPage() {
+  pagination.value.page = 1
+}
 
 const filterTraceId = ref('')
 const filterKey = ref<string | null>(null)
@@ -447,8 +447,8 @@ async function load() {
   loading.value = true
   try {
     const params = buildParams({
-      limit: pagination.pageSize,
-      offset: (pagination.page - 1) * pagination.pageSize,
+      limit: pagination.value.pageSize,
+      offset: (pagination.value.page - 1) * pagination.value.pageSize,
     })
 
     const [listResp, statsResp] = await Promise.all([
@@ -456,7 +456,7 @@ async function load() {
       api.accessLogs.stats(),
     ])
     records.value = listResp.records
-    pagination.itemCount = listResp.total
+    pagination.value.itemCount = listResp.total
     stats.value = statsResp
   } catch (error: unknown) {
     message.error(`加载失败: ${errorMessage(error)}`)
@@ -500,19 +500,8 @@ async function loadProviderModelOptions() {
   }
 }
 
-function onPageChange(page: number) {
-  pagination.page = page
-  load()
-}
-
-function onPageSizeChange(pageSize: number) {
-  pagination.pageSize = pageSize
-  pagination.page = 1
-  load()
-}
-
 function resetAndLoad() {
-  pagination.page = 1
+  resetPage()
   load()
 }
 
