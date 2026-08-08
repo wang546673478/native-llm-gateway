@@ -50,6 +50,10 @@ type Engine struct {
 	// Task 7: 配合 streamCnt 实现 F4 全局 1000 上限。
 	streamBuf sync.Map
 	streamCnt int64 // atomic counter — 保护 maxConcurrentStreams 上限
+	// gkCtx 统一从 gin context 抽取 auth.GatewayKey。消除散落在各函数的
+	// c.Get("gateway_key") magic key(CLAUDE.md 明确禁止)— 改 auth 字段/字段名
+	// 只改 context.go 一处,不再改 proxy.go 5 处。
+	gkCtx GatewayKeyContext
 }
 
 // streamAcc 是单条流式响应的累积 buffer + truncated 标记。
@@ -73,11 +77,14 @@ type Config struct {
 	AccessLog     *accesslog.Recorder // P67: 可选,nil 表示未启用
 	// QuotaChecker token_plan 降档的配额探测;nil = 不探测(直接当未耗尽)
 	// 由 server 注入 quotacheck.CheckQuota wrapper,proxy 不直接依赖 quotacheck 包
-	QuotaChecker  QuotaChecker
-	MaxRetry      int                 // 最大 failover 次数,默认 3
+	QuotaChecker QuotaChecker
+	MaxRetry     int // 最大 failover 次数,默认 3
 	// WriteTimeout 流式写 deadline 续期预算(取 server.write_timeout)。
 	// 非流式响应仍是绝对上限;流式场景按 chunk 续期成空闲超时。<=0 时默认 2min。
 	WriteTimeout time.Duration
+	// GkContext 可选的 GatewayKey 提取抽象;nil 时用默认实现(defaultGatewayKeyContext)。
+	// 供测试 mock / 特殊上下文注入,生产留空即可。
+	GkContext GatewayKeyContext
 }
 
 // NewEngine 构造 Proxy Engine
@@ -97,6 +104,9 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 2 * time.Minute
 	}
+	if cfg.GkContext == nil {
+		cfg.GkContext = defaultGatewayKeyContext
+	}
 	return &Engine{
 		logger:        cfg.Logger,
 		router:        cfg.Router,
@@ -108,6 +118,7 @@ func NewEngine(cfg Config) *Engine {
 		quotaChecker:  cfg.QuotaChecker,
 		maxRetry:      cfg.MaxRetry,
 		writeTimeout:  cfg.WriteTimeout,
+		gkCtx:         cfg.GkContext,
 	}
 }
 
@@ -125,16 +136,14 @@ func NewEngine(cfg Config) *Engine {
 //   - DefaultModel != 当前 model(避免无意义的自循环)
 //   - DefaultModel 必须经过 CheckAllowed(防止 fallback 绕过白名单)
 func (e *Engine) tryDefaultModelFallback(c *gin.Context, currentModel string, req *provider.Request) string {
-	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok && gk.DefaultModel != "" && gk.DefaultModel != currentModel {
-			// fallback 必须本身在白名单里 — 防止 fallback 绕过白名单
-			if e.authn != nil && e.authn.CheckAllowed(gk, gk.DefaultModel) != nil {
-				return ""
-			}
-			req.Model = gk.DefaultModel
-			req.Body, _ = rewriteModelField(req.Body, gk.DefaultModel)
-			return gk.DefaultModel
+	if gk := e.gkCtx.Get(c); gk != nil && gk.DefaultModel != "" && gk.DefaultModel != currentModel {
+		// fallback 必须本身在白名单里 — 防止 fallback 绕过白名单
+		if e.authn != nil && e.authn.CheckAllowed(gk, gk.DefaultModel) != nil {
+			return ""
 		}
+		req.Model = gk.DefaultModel
+		req.Body, _ = rewriteModelField(req.Body, gk.DefaultModel)
+		return gk.DefaultModel
 	}
 	return ""
 }
@@ -163,7 +172,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			Path:         c.Request.URL.Path, // 不含 query string(spec F1)
 			ClientIP:     c.ClientIP(),
 			UserAgent:    c.Request.UserAgent(),
-			GatewayKeyID: c.GetString("gateway_key_id"),
+			GatewayKeyID: e.gkCtx.ID(c),
 			// GatewayKeyName 不在此填 — 不落库,查询时按 ID 现查 gateway_keys
 			// 当前名字(与 ProviderKeyName 同策略,改名即时生效)
 			IsStream: isStream,
@@ -282,7 +291,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		Body:         body,
 		Model:        model,
 		IsStream:     isStream,
-		GatewayKeyID: c.GetString("gateway_key_id"),
+		GatewayKeyID: e.gkCtx.ID(c),
 		TraceID:      traceID,
 	}
 	if entry != nil {
@@ -291,16 +300,14 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 
 	// 4. 路由(failover iterator) — P34: 把 GatewayKey 绑定的 ProviderKeyIDs 传给 Router
 	var routeOpts []router.RouteOption
-	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok {
-			if len(gk.ProviderKeyIDs) > 0 {
-				routeOpts = append(routeOpts, router.WithProviderKeyIDs(gk.ProviderKeyIDs))
-			}
-			// P-whitelist-select: 白名单参与 catch_all 自动模式的候选模型选择 —
-			// key 允许的模型就是链上实际服务的模型(通配 * 不参与选择)
-			if len(gk.AllowedModels) > 0 && !(len(gk.AllowedModels) == 1 && gk.AllowedModels[0] == "*") {
-				routeOpts = append(routeOpts, router.WithAllowedModels(gk.AllowedModels))
-			}
+	if gk := e.gkCtx.Get(c); gk != nil {
+		if len(gk.ProviderKeyIDs) > 0 {
+			routeOpts = append(routeOpts, router.WithProviderKeyIDs(gk.ProviderKeyIDs))
+		}
+		// P-whitelist-select: 白名单参与 catch_all 自动模式的候选模型选择 —
+		// key 允许的模型就是链上实际服务的模型(通配 * 不参与选择)
+		if len(gk.AllowedModels) > 0 && !(len(gk.AllowedModels) == 1 && gk.AllowedModels[0] == "*") {
+			routeOpts = append(routeOpts, router.WithAllowedModels(gk.AllowedModels))
 		}
 	}
 	iter, err := e.router.Route(ctx, req, routeOpts...)
@@ -324,41 +331,39 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	// 4.5 探针:provider 绑定检查(白名单已移入 tryOneCandidate 逐候选校验,
 	// 入口不再单独拒绝 — 同 tier 乱序下白名单外候选会被跳过继续试白名单内的)。
 	// 迭代器不支持 reset:探针通过的候选直接用 runWithFirstResult 作为第一个开始循环
-	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok {
-			probeResult, probeErr := iter.Next()
-			if probeErr != nil {
-				// 没更多候选
-				e.handleAllFailed(c, req, lastErr, traceID)
-				return
-			}
-			// P19: provider 绑定检查 — 若 key.Providers 非空,路由结果必须在列表里
-			if len(gk.Providers) > 0 && e.authn != nil {
-				if e.authn.CheckProvider(gk, probeResult.ProviderName) != nil {
-					e.logger.Warn("key provider mismatch",
-						zap.String("key", gk.Name),
-						zap.Strings("key_providers", gk.Providers),
-						zap.String("routed_provider", probeResult.ProviderName),
-						zap.String("model", model),
-						zap.String("trace_id", traceID),
-					)
-					c.JSON(http.StatusForbidden, gin.H{
-						"error": gin.H{
-							"type": "key_provider_mismatch",
-							"message": fmt.Sprintf("key %q is bound to providers %v but request routes to %q",
-								gk.Name, gk.Providers, probeResult.ProviderName),
-						},
-					})
-					return
-				}
-			}
-			// 记下第一个候选的 provider name,供 defer 写 ProviderName
-			lastProviderName = probeResult.ProviderName
-			// 检查通过,把这个候选放回 iterator(不太好做,所以重置当前 idx)
-			// 简单做法:迭代器不支持 reset,改为手动用 probeResult 开始循环
-			e.runWithFirstResult(c, ctx, req, iter, probeResult, &lastProviderName, &lastErr, entry)
+	if gk := e.gkCtx.Get(c); gk != nil {
+		probeResult, probeErr := iter.Next()
+		if probeErr != nil {
+			// 没更多候选
+			e.handleAllFailed(c, req, lastErr, traceID)
 			return
 		}
+		// P19: provider 绑定检查 — 若 key.Providers 非空,路由结果必须在列表里
+		if len(gk.Providers) > 0 && e.authn != nil {
+			if e.authn.CheckProvider(gk, probeResult.ProviderName) != nil {
+				e.logger.Warn("key provider mismatch",
+					zap.String("key", gk.Name),
+					zap.Strings("key_providers", gk.Providers),
+					zap.String("routed_provider", probeResult.ProviderName),
+					zap.String("model", model),
+					zap.String("trace_id", traceID),
+				)
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": gin.H{
+						"type": "key_provider_mismatch",
+						"message": fmt.Sprintf("key %q is bound to providers %v but request routes to %q",
+							gk.Name, gk.Providers, probeResult.ProviderName),
+					},
+				})
+				return
+			}
+		}
+		// 记下第一个候选的 provider name,供 defer 写 ProviderName
+		lastProviderName = probeResult.ProviderName
+		// 检查通过,把这个候选放回 iterator(不太好做,所以重置当前 idx)
+		// 简单做法:迭代器不支持 reset,改为手动用 probeResult 开始循环
+		e.runWithFirstResult(c, ctx, req, iter, probeResult, &lastProviderName, &lastErr, entry)
+		return
 	}
 
 	// 5. 依次尝试,failover — Task 5 分层语义:
@@ -865,9 +870,9 @@ func (e *Engine) runWithFirstResult(c *gin.Context, ctx context.Context, req *pr
 type candidateOutcome int
 
 const (
-	outcomeOK          candidateOutcome = iota // 请求已成功处理,调用方直接 return
-	outcomeFatal                               // 不可重试错误 — 调用方 handleAllFailed 收尾(透传原错误)
-	outcomeContinue                            // 继续下一候选(可携带额度证据)
+	outcomeOK       candidateOutcome = iota // 请求已成功处理,调用方直接 return
+	outcomeFatal                            // 不可重试错误 — 调用方 handleAllFailed 收尾(透传原错误)
+	outcomeContinue                         // 继续下一候选(可携带额度证据)
 )
 
 // runCandidateLoop 候选循环 — Task 5 分层 failover 的唯一实现。
@@ -891,7 +896,7 @@ func (e *Engine) runCandidateLoop(
 	outLastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
 ) {
-	attempts := 0         // 当前层「实际尝试」次数(白名单 skip 不计入预算)
+	attempts := 0 // 当前层「实际尝试」次数(白名单 skip 不计入预算)
 	currentTier := ""
 	quotaEvidenceInTier := false // 当前层是否出现过额度证据(仅 token_plan 层可产生,决策 9)
 	tierSawFailure := false      // 当前层是否有过实际失败(白名单 skip 不算,决策:纯 skip 层自由推进)
@@ -1031,45 +1036,43 @@ func (e *Engine) tryCandidate(
 	// P-catch-all: 白名单按候选逐个校验 — 白名单外的候选像没 key 一样跳过,
 	// 继续试链上其他候选。同 tier 内 provider 顺序不定,不能因第一个候选
 	// 不符就整请求 403;链上全部候选都被排除时由 handleAllFailed 收尾返 403
-	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok && e.authn != nil {
-			// P-whitelist-check: 优先用客户端原始模型名(req.Model)校验白名单。
-			// 不用 result.ModelID — 路由内部选的候选模型可能跟客户端请求不同
-			// (如 client 发 mimo-v2.5,路由选中 mimo-v2.5-pro,白名单只有 mimo-v2.5-pro
-			// → result.ModelID=mimo-v2.5-pro 通过;但 client 发 claude-opus-5,candidate
-			// 选 mimo-v2.5,req.Model 不在白名单 → 合理 403)
-			// 唯一例外:客户端没发真实模型名(没 alias,走 catch_all)→ req.Model 是占位,
-			// 不在白名单里 → 落后 fallback 到 result.ModelID
-			checkModel := req.Model
-			if checkModel == "" || checkModel == result.ModelID {
-				checkModel = result.ModelID
-			}
-			if err := e.authn.CheckAllowed(gk, checkModel); err != nil {
-				// fallback: req.Model 不在白名单但 result.ModelID 在 → 也放行
-				if checkModel != result.ModelID {
-					if err2 := e.authn.CheckAllowed(gk, result.ModelID); err2 == nil {
-						// result.ModelID 在白名单里 → 放行
-						goto afterWhitelist
-					}
-				}
-				*outProviderName = result.ProviderName
-				*lastErr = &provider.ProviderError{
-					ProviderName: result.ProviderName,
-					StatusCode:   http.StatusForbidden,
-					ErrorType:    provider.ErrorTypeModelNotAllowed,
-					Message:      fmt.Sprintf("key %q does not allow model %q", gk.Name, checkModel),
-				}
-				e.logger.Debug("candidate skipped (not in key whitelist)",
-					zap.String("key", gk.Name),
-					zap.String("provider", result.ProviderName),
-					zap.String("model", checkModel),
-					zap.String("result_model", result.ModelID),
-					zap.Strings("allowed", gk.AllowedModels),
-					zap.String("trace_id", req.TraceID))
-				return outcomeContinue, false, false // 未实际尝试:不算失败、不计预算
-			}
-			afterWhitelist:
+	if gk := e.gkCtx.Get(c); gk != nil && e.authn != nil {
+		// P-whitelist-check: 优先用客户端原始模型名(req.Model)校验白名单。
+		// 不用 result.ModelID — 路由内部选的候选模型可能跟客户端请求不同
+		// (如 client 发 mimo-v2.5,路由选中 mimo-v2.5-pro,白名单只有 mimo-v2.5-pro
+		// → result.ModelID=mimo-v2.5-pro 通过;但 client 发 claude-opus-5,candidate
+		// 选 mimo-v2.5,req.Model 不在白名单 → 合理 403)
+		// 唯一例外:客户端没发真实模型名(没 alias,走 catch_all)→ req.Model 是占位,
+		// 不在白名单里 → 落后 fallback 到 result.ModelID
+		checkModel := req.Model
+		if checkModel == "" || checkModel == result.ModelID {
+			checkModel = result.ModelID
 		}
+		if err := e.authn.CheckAllowed(gk, checkModel); err != nil {
+			// fallback: req.Model 不在白名单但 result.ModelID 在 → 也放行
+			if checkModel != result.ModelID {
+				if err2 := e.authn.CheckAllowed(gk, result.ModelID); err2 == nil {
+					// result.ModelID 在白名单里 → 放行
+					goto afterWhitelist
+				}
+			}
+			*outProviderName = result.ProviderName
+			*lastErr = &provider.ProviderError{
+				ProviderName: result.ProviderName,
+				StatusCode:   http.StatusForbidden,
+				ErrorType:    provider.ErrorTypeModelNotAllowed,
+				Message:      fmt.Sprintf("key %q does not allow model %q", gk.Name, checkModel),
+			}
+			e.logger.Debug("candidate skipped (not in key whitelist)",
+				zap.String("key", gk.Name),
+				zap.String("provider", result.ProviderName),
+				zap.String("model", checkModel),
+				zap.String("result_model", result.ModelID),
+				zap.Strings("allowed", gk.AllowedModels),
+				zap.String("trace_id", req.TraceID))
+			return outcomeContinue, false, false // 未实际尝试:不算失败、不计预算
+		}
+	afterWhitelist:
 	}
 	// P-catch-all: 记录实际使用的上游模型(候选的目标模型,如 MiniMax-M3 —
 	// 客户端请求名可能只是标签)。failover 时每次尝试都覆盖,最后一次成功者胜出
@@ -1279,12 +1282,10 @@ func (e *Engine) swapToOtherKey(c *gin.Context, req *provider.Request, result *r
 		return false
 	}
 	var idSet map[uint]struct{}
-	if gkVal, ok := c.Get("gateway_key"); ok {
-		if gk, ok := gkVal.(*auth.GatewayKey); ok && len(gk.ProviderKeyIDs) > 0 {
-			idSet = make(map[uint]struct{}, len(gk.ProviderKeyIDs))
-			for _, id := range gk.ProviderKeyIDs {
-				idSet[id] = struct{}{}
-			}
+	if gk := e.gkCtx.Get(c); gk != nil && len(gk.ProviderKeyIDs) > 0 {
+		idSet = make(map[uint]struct{}, len(gk.ProviderKeyIDs))
+		for _, id := range gk.ProviderKeyIDs {
+			idSet[id] = struct{}{}
 		}
 	}
 	k, err := pool.AcquireFromTierExcludingIDs(result.Tier, result.Key.ID, idSet, string(result.Protocol))
