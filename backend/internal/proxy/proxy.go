@@ -1144,7 +1144,7 @@ func (e *Engine) tryCandidate(
 			// I-1:换 key 后二次尝试返回额度类错误 — 与首次额度类错误同权:
 			// token_plan 层记证据,允许层切换降档(网络源 / auth 源都走这里,
 			// 必须在 auth 分支和 !isNetworkClass 分支之前判定,否则证据被丢弃)
-			if isQuotaClass(pe2) && result.Tier == "token_plan" {
+			if isQuotaClass(pe2) && result.Tier == string(keypool.BillingSourceTokenPlan) {
 				return outcomeContinue, true, true
 			}
 			// auth 源:换 key 穷尽 → 无证据继续、不查额度(决策表 row 3)
@@ -1162,7 +1162,7 @@ func (e *Engine) tryCandidate(
 		}
 		// 网络类换不到 key / 换 key 仍网络失败 → 主动查询(仅 token_plan 层,决策 9:
 		// api 层无套餐额度概念,不查询不设证据;未知一律按未耗尽留在层内)
-		if result.Tier != "token_plan" {
+		if result.Tier != string(keypool.BillingSourceTokenPlan) {
 			return outcomeContinue, false, true
 		}
 		if result.Key == nil {
@@ -1186,7 +1186,7 @@ func (e *Engine) tryCandidate(
 	// 额度类 → 仅 token_plan 层记证据(决策 9:api 层无套餐额度概念,
 	// api/free 层的 429/quota 是单 key 限流,不构成层切换证据)
 	if isQuotaClass(pe) {
-		if result.Tier == "token_plan" {
+		if result.Tier == string(keypool.BillingSourceTokenPlan) {
 			return outcomeContinue, true, true
 		}
 		return outcomeContinue, false, true

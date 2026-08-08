@@ -568,7 +568,7 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 			continue
 		}
 		baseURL := m.prov.EndpointFor(providerName)
-		for _, tier := range []string{"token_plan", "api", "free"} {
+		for _, tier := range keypool.TierOrder {
 			for _, k := range pool.KeyPtrs() {
 				effective := k.BillingSource
 				if effective == "" {

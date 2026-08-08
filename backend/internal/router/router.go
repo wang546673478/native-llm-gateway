@@ -460,7 +460,7 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 //   - provider 没有声明任何 key → pool.Tiers() 返回 [],同样兜底 "api"
 //     (调用方 AcquireFromTier 实际拿不到 key 时会自动 continue)
 func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool) []KeyCandidate {
-	tierOrder := []string{"token_plan", "api", "free"}
+	tierOrder := keypool.TierOrder
 	buckets := make(map[string][]KeyCandidate, 3)
 	for _, t := range tierOrder {
 		buckets[t] = nil

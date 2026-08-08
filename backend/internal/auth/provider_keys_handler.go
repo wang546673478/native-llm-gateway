@@ -283,20 +283,16 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 	billingSource := strings.TrimSpace(req.BillingSource)
-	if billingSource == "" {
-		billingSource = "api" // 默认
-	}
-	// 简单校验,避免脏数据
-	switch billingSource {
-	case "token_plan", "api", "free":
-		// ok
-	default:
+	// 校验+兜底统一走 keypool.Normalize(值须为 token_plan/api/free,空→api),避免散落字面量
+	if bs, ok := keypool.Normalize(billingSource); !ok {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":  "invalid_billing_source",
 			"detail": "billing_source must be one of: token_plan, api, free",
 			"got":    billingSource,
 		})
 		return
+	} else {
+		billingSource = bs
 	}
 	k := &dbpkg.ProviderAPIKey{
 		ProviderName:  providerName,

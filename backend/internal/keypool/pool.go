@@ -155,7 +155,7 @@ func (p *Pool) Acquire() (*Key, error) {
 // AcquireForProtocol P-provider-vendor: 按请求协议取 key(带 tier 降级)
 // proto 为空 = 不过滤;非空时只取 Protocols 为空或包含该协议的 key
 func (p *Pool) AcquireForProtocol(proto string) (*Key, error) {
-	for _, tier := range []string{"token_plan", "api", "free"} {
+	for _, tier := range TierOrder {
 		k, err := p.AcquireFromTier(tier, nil, proto)
 		if err == nil {
 			return k, nil
@@ -177,7 +177,7 @@ func (p *Pool) AcquireFromIDs(allowedIDs []uint, proto string) (*Key, error) {
 	for _, id := range allowedIDs {
 		set[id] = struct{}{}
 	}
-	for _, tier := range []string{"token_plan", "api", "free"} {
+	for _, tier := range TierOrder {
 		k, err := p.AcquireFromTier(tier, set, proto)
 		if err == nil {
 			return k, nil
@@ -213,7 +213,7 @@ func (p *Pool) AcquireFromTierExcludingIDs(tier, excludeID string, allowedIDSet 
 // (parseKeyIDUint 转换比较,与 allowedIDSet 过滤一致;excludeID 是 DB 数字 ID 字符串)
 func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}, excludeID string, proto string) (*Key, error) {
 	if tier == "" {
-		tier = "api" // 兜底
+		tier = string(BillingSourceDefault) // 兜底
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -270,7 +270,7 @@ func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}
 
 	// P-quota-balance: token_plan tier 在进入 tier 过滤前按 Remaining 降序稳定排序
 	// 稳定排序保证 Remaining 相等时仍维持 RoundRobin 原始顺序
-	if tier == "token_plan" {
+	if tier == string(BillingSourceTokenPlan) {
 		sort.SliceStable(usable, func(i, j int) bool {
 			return usable[i].Remaining > usable[j].Remaining
 		})
@@ -281,7 +281,7 @@ func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}
 	for _, k := range usable {
 		bs := k.BillingSource
 		if bs == "" {
-			bs = "api" // 兜底
+			bs = string(BillingSourceDefault) // 兜底
 		}
 		if bs == tier {
 			// P-quota-prefer: 跳过「已轮询且余额耗尽」的 key — 否则 round-robin
@@ -379,7 +379,7 @@ func (p *Pool) ReportRateLimit(k *Key, retryAfter time.Duration) {
 	// 调度,天然自限),不会永久禁用。终端状态没有恢复路径
 
 	// Bug fix: 连续冷却升级 QE — 仅 token_plan 适用(api 层冷却本就是正常限流)
-	if k.CoolingCount >= 3 && k.BillingSource == "token_plan" {
+	if k.CoolingCount >= 3 && k.BillingSource == string(BillingSourceTokenPlan) {
 		k.Status = KeyStatusQuotaExceeded
 		k.QuotaExceededSince = now
 		k.QuotaProbeAttempts = 0
@@ -594,14 +594,14 @@ func (p *Pool) Tiers() []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	tierOrder := []string{"token_plan", "api", "free"}
+	tierOrder := TierOrder
 	seen := map[string]bool{}
 	var out []string
 	for _, want := range tierOrder {
 		for _, k := range p.keys {
 			bs := k.BillingSource
 			if bs == "" {
-				bs = "api" // 兜底
+				bs = string(BillingSourceDefault) // 兜底
 			}
 			if bs == want && !seen[want] {
 				seen[want] = true

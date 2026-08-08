@@ -125,7 +125,7 @@ func newMimoQuotaBalancer() *mimoQuotaBalancer {
 
 func (b *mimoQuotaBalancer) FetchBalance(ctx context.Context, _ string, k *keypool.Key) (quotacheck.Balance, error) {
 	// token_plan key → 套餐用量端点;api/free/空 → 按量余额端点
-	if k != nil && k.BillingSource == "token_plan" {
+	if k != nil && k.BillingSource == string(keypool.BillingSourceTokenPlan) {
 		return fetchMimoQuota(ctx, b.client, tokenPlanUsagePath, "mimo:/api/v1/tokenPlan/usage")
 	}
 	return fetchMimoQuota(ctx, b.client, balancePath, "mimo:/api/v1/balance")
