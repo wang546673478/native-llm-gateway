@@ -63,7 +63,7 @@ func NewOpenAI(cfg provider.ProviderConfig) (provider.Provider, error) {
 			ChatPath:      openaiChatPath,
 			ResponsesPath: openaiResponsesPath, // P-responses
 			StreamUsage:   true,                // MiniMax 支持 stream_options.include_usage
-			Pool:          provider.ToPool(cfg.Pool),
+			Pool:          cfg.Pool,
 		}),
 		cfg: cfg,
 	}, nil

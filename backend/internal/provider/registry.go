@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 )
 
 // Factory 是 Provider 工厂函数
@@ -21,7 +23,7 @@ type ProviderConfig struct {
 	Protocol         Protocol
 	Timeout          time.Duration
 	Models           []string
-	Pool             interface{} // *keypool.Pool — 用 interface{} 避免循环依赖
+	Pool             *keypool.Pool // 具体类型 — provider 已 import keypool(SetPool 用),原 interface{} "避免循环" 注释已过时
 	FailureThreshold int
 	FailureWindow    time.Duration
 	OpenTimeout      time.Duration

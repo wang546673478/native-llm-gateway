@@ -97,7 +97,7 @@ func newOpenAI(cfg provider.ProviderConfig, regName string) (provider.Provider, 
 			ChatPath:      "",            // 端点已含 /v1 → 默认 /v1/chat/completions
 			ResponsesPath: responsesPath, // 原生支持 Responses API,端点已含 /v1 → /responses
 			StreamUsage:   true,          // 流式末尾带 usage,网关才能记账
-			Pool:          provider.ToPool(cfg.Pool),
+			Pool:          cfg.Pool,
 		}),
 		cfg: cfg,
 	}, nil

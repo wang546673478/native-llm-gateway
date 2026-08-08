@@ -69,7 +69,7 @@ func newAnthropic(cfg provider.ProviderConfig, regName string) (provider.Provide
 			Name:     regName,
 			Endpoint: cfg.Endpoint,
 			Timeout:  cfg.Timeout,
-			Pool:     provider.ToPool(cfg.Pool),
+			Pool:     cfg.Pool,
 			// ForceThinkingDisabled 不设默认开:MIMO v2.5 是 thinking 模型,
 			// 强制 disabled 会损失深度思考能力;compact 后 400 实测触发再开
 		}),

@@ -70,7 +70,7 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Timeout:     cfg.Timeout,
 			ChatPath:    ChatPath, // 端点已含 v4 前缀 → 无 /v1
 			StreamUsage: true,     // 流式末尾带 usage,便于 Gateway 端记账
-			Pool:        provider.ToPool(cfg.Pool),
+			Pool:        cfg.Pool,
 		}),
 		cfg: cfg,
 	}, nil

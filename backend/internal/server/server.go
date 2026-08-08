@@ -385,7 +385,7 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool) *provider.ManagerConfig {
 	mcfg := &provider.ManagerConfig{
 		Providers: make(map[string]provider.ManagerProviderConfig, len(cfg.Providers)),
-		Pools:     make(map[string]any, len(pools)),
+		Pools:     make(map[string]*keypool.Pool, len(pools)),
 		// P-provider-timeout: 热重载同频带全局默认(provider.timeout==0 时兜底)
 		DefaultTimeout: cfg.Timeouts.ProviderDefault,
 	}

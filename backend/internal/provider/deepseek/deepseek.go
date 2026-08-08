@@ -75,7 +75,7 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			// P-responses: endpoint 无 /v1 → 透传 /v1/responses(官方原生支持,Codex 兼容)
 			ResponsesPath: "/v1/responses",
 			StreamUsage:   true, // 让流式末尾带 usage,便于 Gateway 端记账
-			Pool:          provider.ToPool(cfg.Pool),
+			Pool:          cfg.Pool,
 		}),
 		cfg: cfg,
 	}, nil
