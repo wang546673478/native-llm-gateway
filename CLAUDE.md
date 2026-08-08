@@ -195,7 +195,7 @@ sudo systemctl start llm-gateway # systemd 托管
 
 ### 已完成(通过全部测试,网关稳定)
 
-**耦合解耦(十四轮 36+ commit):**
+**耦合解耦(十五轮 40+ commit):**
 
 | 类别 | 改动 | 效果 |
 |---|---|---|
@@ -212,6 +212,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | 工程层 | 构建 flags 单源(reload 委托 make build) / 健康检查端口读 config.yaml / hot-reload 需重启 Warn | 防部署二进制漂移、端口硬编码、reload 静默半生效 |
 | 重大重构(十三轮) | config keys dual-path 追查 + APIKeys 死写链删除 / Pinia providers store 接入 5 view | APIKeys 纯写死通道(删);5 view 厂商清单共享 fetch(3a1ede1+d1aba91) |
 | 重大重构(十四轮) | timeouts 死配置孤岛删除(server_read/write/idle+request_total) / openai 13 处 NewError 单源 + io_error 归类分歧消除 / Pool interface{}→*keypool.Pool + 删 main.go buildPools / 前端 vendorOptions/regToVendor/quotaDisplay 单源 | DB 是 config key 唯一权威;三协议 base 构造收敛 NewError;per-key 熔断对 io 失败一致生效;config keys[] dual-path 彻底消除(009236a+o069cbc+2ff6d3e+afb5e83) |
+| 深度审计(十五轮) | 数据竞态 F1/F2/F4 / DB 数据完整性 H1/M1/M2 / 热重载 s.cfg 分歧 / 前端过滤契约补漏 / 文档漂移 | 锁边界 + 熔断热路径竞态(3 subagent:并发/DB/热载审计)全修 → -race 0 race;usage/accesslog/gateway-key 静默丢数据+重复插+reload 误吞全修(ef9308d+e2f163d+c0d12dc+93e929e+545cc72) |
 
 **单点修复:**
 
@@ -243,3 +244,4 @@ sudo systemctl start llm-gateway # systemd 托管
 | 前端每 view 依赖 VendorInfo shape | Providers/ProviderKeys/Keys/AccessLogs/Routing 经 store 消费 | store 只共享 fetch,不抽象后端契约;shape 解耦需契约层,暂缓 |
 | hot-reload 需重启字段 | database/server/usage/providers 等 | 已加 Warn 提示;彻底支持是大重构,字段明确需重启 |
 | PG role/DB 常量(pg-init vs docker) | 不同层、无 schema 影响 | AutoMigrate 自愈,schema 无风险,保留 |
+| admin list 锁外读 *Key(F3) | server SetKeyStatusLookup/SetPoolLookup + auth handler 读 k.Status | admin 频次 + amd64 不撕裂;为低危竞态在热路径加锁风险>收益,保留 |
