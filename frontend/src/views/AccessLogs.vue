@@ -255,8 +255,10 @@ const statusOptions = [
   { label: '上游 4xx', value: 'upstream_4xx' },
   { label: '上游 429', value: 'upstream_429' },
   { label: '上游 5xx', value: 'upstream_5xx' },
+  { label: '请求无效', value: 'invalid_request' },
   { label: '连接错误', value: 'connection_error' },
   { label: '超时', value: 'timeout' },
+  { label: '流中断', value: 'stream_interrupted' },
   { label: '客户端断开', value: 'client_disconnected' },
   { label: '未知错误', value: 'unknown' },
 ]
