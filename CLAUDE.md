@@ -195,7 +195,7 @@ sudo systemctl start llm-gateway # systemd 托管
 
 ### 已完成(通过全部测试,网关稳定)
 
-**耦合解耦(十一轮 30+ commit):**
+**耦合解耦(十三轮 32+ commit):**
 
 | 类别 | 改动 | 效果 |
 |---|---|---|
@@ -210,6 +210,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | 文档漂移 | metric 名 / aliases"已退役" / SQL迁移"编号执行" 三处修正 | 修 misleading doc(PromQL 抄错、删活字段、启用漂移迁移) |
 | gin路由/观测 | magic-key 契约字符串 auth 单源 / 探针 metric 泄漏(metricsProbeInc) / 429 classify 按上游成因 | 防白名单静默失效、防 metric 双计、修 429→5xx 错记 |
 | 工程层 | 构建 flags 单源(reload 委托 make build) / 健康检查端口读 config.yaml / hot-reload 需重启 Warn | 防部署二进制漂移、端口硬编码、reload 静默半生效 |
+| 重大重构(十三轮) | config keys dual-path 追查 + APIKeys 死写链删除 / Pinia providers store 接入 5 view | p.Keys 是 HealthCheck 种子(保留),APIKeys 纯写死通道(删);5 view 厂商清单共享 fetch(3a1ede1+d1aba91) |
 
 **单点修复:**
 
@@ -236,9 +237,8 @@ sudo systemctl start llm-gateway # systemd 托管
 | circuit 内建默认(5/60s/30s/1) | circuit.New 硬编码 | 合法包内单源;不为集中去 import config,保留 |
 | write_timeout 双语义 | http.Server 原始值 vs 引擎 2m 流式兜底 | 有意设计差异(socket 绝对上限 vs chunk 续期),保留 |
 | `mimo.quotaCookie` 全局单例 | provider/mimo/balancer.go | 通过 MimoQuotaSet 闭包注入隔离,proxy 不直接碰,保留 |
-| config providers[].keys[] dual-path | main.go legacy pool builder 被 DB 路径遮蔽 | 删除需彻底追 main.go,风险>收益,暂缓 |
-| 测试 fakeProvider ×5 | 各 test 包局部重复 | 抽共享 testutil 是更大重构,暂缓 |
-| 前端每 view 独立 fetch providers/keypool | Providers/ProviderKeys/Keys/AccessLogs/Routing | 抽 Pinia store 是更大重构,暂缓 |
-| 前端 usePagination 已建未接 | Usage/AccessLogs 仍内联分页 | 接上需改模板绑定,低优先 |
+| config providers[].keys[] dual-path | main.go buildPools 喂 HealthCheck(负载);toManagerConfig 的 APIKeys 链纯写死 | HealthCheck 种子保留;APIKeys 写链已删(3a1ede1) |
+| 测试 fakeProvider ×5 | 各 test 包局部重复 | 抽共享 testutil 会过度耦合(rich behavior mock vs 最简 stub),保留 |
+| 前端每 view 依赖 VendorInfo shape | Providers/ProviderKeys/Keys/AccessLogs/Routing 经 store 消费 | store 只共享 fetch,不抽象后端契约;shape 解耦需契约层,暂缓 |
 | hot-reload 需重启字段 | database/server/usage/providers 等 | 已加 Warn 提示;彻底支持是大重构,字段明确需重启 |
 | PG role/DB 常量(pg-init vs docker) | 不同层、无 schema 影响 | AutoMigrate 自愈,schema 无风险,保留 |
