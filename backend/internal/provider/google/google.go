@@ -97,7 +97,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		b.cfg.Pool.ReportError(key, "io_error")
+		b.cfg.Pool.ReportError(key, string(provider.ErrorTypeConnection)) // io read 失败即连接型 — 与返回的 ErrorTypeConnection 一致
 		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
 

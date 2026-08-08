@@ -483,7 +483,7 @@ async function loadProviderModelOptions() {
       provStore.load(),
       api.providersRegistered().catch(() => ({ providers: [], count: 0 })),
     ])
-    providerOptions.value = (provStore.vendors ?? []).map(v => ({ label: v.vendor, value: v.vendor }))
+    providerOptions.value = provStore.vendorOptions
     // dedupe models across providers
     const seen = new Set<string>()
     const models: { label: string; value: string }[] = []

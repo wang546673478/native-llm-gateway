@@ -141,9 +141,14 @@ func (e *Engine) tryDefaultModelFallback(c *gin.Context, currentModel string, re
 		if e.authn != nil && e.authn.CheckAllowed(gk, gk.DefaultModel) != nil {
 			return ""
 		}
-		req.Model = gk.DefaultModel
-		req.Body, _ = rewriteModelField(req.Body, gk.DefaultModel)
-		return gk.DefaultModel
+		// 只有 body 重写成功才切 default model — 否则 body 仍是原模型,Model 与
+		// Body 会不同步(与 alias/tryCandidate 的 rewriteModelField 用法一致)
+		if newBody, ok2 := rewriteModelField(req.Body, gk.DefaultModel); ok2 {
+			req.Body = newBody
+			req.Model = gk.DefaultModel
+			return gk.DefaultModel
+		}
+		return ""
 	}
 	return ""
 }
@@ -570,7 +575,6 @@ func (e *Engine) doStream(
 			e.logger.Warn("write stream chunk (client likely disconnected)",
 				zap.String("provider", result.ProviderName),
 				zap.Error(err))
-			_ = canFlush
 			return true, nil, &provider.ProviderError{
 				ProviderName: result.ProviderName,
 				ErrorType:    provider.ErrorTypeClientDisconnected,

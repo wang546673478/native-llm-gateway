@@ -100,11 +100,7 @@ func (b *Base) upstreamPath(req *provider.Request) string {
 //  5. 解析 OpenAI 格式响应,提取 Usage
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	if b.cfg.Pool == nil {
-		return nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			ErrorType:    provider.ErrorTypeConnection,
-			Message:      "keypool not configured",
-		}
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 优先用路由层已 acquire 的 key — 否则双 acquire 可能拿到
 	// 不同 key,429 上报冷却标到没发过请求的 healthy key 上(2026-08-06 实测)
@@ -113,11 +109,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	if key == nil {
 		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
 		if err != nil {
-			return nil, &provider.ProviderError{
-				ProviderName: b.cfg.Name,
-				ErrorType:    provider.ErrorTypeConnection,
-				Message:      fmt.Sprintf("no available key: %v", err),
-			}
+			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
 	}
 
@@ -125,11 +117,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		strings.TrimRight(b.cfg.Endpoint, "/")+b.upstreamPath(req),
 		bytes.NewReader(req.Body))
 	if err != nil {
-		return nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			ErrorType:    provider.ErrorTypeConnection,
-			Message:      err.Error(),
-		}
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+key.Key)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -147,20 +135,14 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	if err != nil {
 		errType := provider.ClassifyTransportError(ctx, err)
 		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name, ErrorType: errType,
-			Message: err.Error(),
-		}
+		return nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		b.cfg.Pool.ReportError(key, "io_error")
-		return nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name, ErrorType: provider.ErrorTypeConnection,
-			Message: err.Error(),
-		}
+		b.cfg.Pool.ReportError(key, string(provider.ErrorTypeConnection)) // io read 失败即连接型 — 与返回的 ErrorTypeConnection 一致,触发 per-key 熔断
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
 
 	// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
@@ -172,13 +154,8 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			errType = provider.ErrorTypeQuotaExceeded
 		}
 		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			StatusCode:   httpResp.StatusCode,
-			ErrorType:    errType,
-			Message:      fmt.Sprintf("upstream base_resp error %d: %s", code, msg),
-			RawError:     body,
-		}
+		return nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), body)
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -192,14 +169,10 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
 
-		return nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			StatusCode:   httpResp.StatusCode,
-			ErrorType:    errType,
-			Message:      fmt.Sprintf("upstream returned %d", httpResp.StatusCode),
-			RetryAfter:   retryAfter,
-			RawError:     body,
-		}
+		pe := provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
+		pe.RetryAfter = retryAfter // 429 冷却时常(failover 计冷却用);其他类型为 0
+		return nil, pe
 	}
 
 	// 成功
@@ -223,11 +196,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 //	data: [DONE]\n\n
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	if b.cfg.Pool == nil {
-		return nil, nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			ErrorType:    provider.ErrorTypeConnection,
-			Message:      "keypool not configured",
-		}
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
 	key := req.Key
@@ -235,11 +204,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if key == nil {
 		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
 		if err != nil {
-			return nil, nil, &provider.ProviderError{
-				ProviderName: b.cfg.Name,
-				ErrorType:    provider.ErrorTypeConnection,
-				Message:      fmt.Sprintf("no available key: %v", err),
-			}
+			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
 	}
 
@@ -266,11 +231,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		strings.TrimRight(b.cfg.Endpoint, "/")+b.upstreamPath(req),
 		bytes.NewReader(streamBody))
 	if err != nil {
-		return nil, nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			ErrorType:    provider.ErrorTypeConnection,
-			Message:      err.Error(),
-		}
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+key.Key)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -283,10 +244,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if err != nil {
 		errType := provider.ClassifyTransportError(ctx, err)
 		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name, ErrorType: errType,
-			Message: err.Error(),
-		}
+		return nil, nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -299,13 +257,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		} else {
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
-		return nil, nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			StatusCode:   httpResp.StatusCode,
-			ErrorType:    errType,
-			Message:      fmt.Sprintf("upstream returned %d", httpResp.StatusCode),
-			RawError:     body,
-		}
+		return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
 	}
 
 	// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
@@ -327,13 +280,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			errType = provider.ErrorTypeQuotaExceeded
 		}
 		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, &provider.ProviderError{
-			ProviderName: b.cfg.Name,
-			StatusCode:   httpResp.StatusCode,
-			ErrorType:    errType,
-			Message:      fmt.Sprintf("upstream base_resp error %d: %s", code, msg),
-			RawError:     peeked,
-		}
+		return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
 	}
 	// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
 	streamReader := io.MultiReader(bytes.NewReader(peeked), reader)

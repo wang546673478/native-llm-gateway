@@ -182,7 +182,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		respBody, readErr := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
 		if readErr != nil {
-			b.cfg.Pool.ReportError(key, "io_error")
+			b.cfg.Pool.ReportError(key, string(provider.ErrorTypeConnection)) // io read 失败即连接型 — 与返回的 ErrorTypeConnection 一致
 			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, readErr.Error())
 		}
 		// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),

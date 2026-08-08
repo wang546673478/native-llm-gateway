@@ -31,6 +31,11 @@ export const useProvidersStore = defineStore('providers', {
       }
       return m
     },
+    // vendor → SelectOption 下拉(ProviderKeys/AccessLogs/Keys 三处各 map 一次,
+    // 收敛单源;选项 label 与 value 都是厂商名)
+    vendorOptions(): { label: string; value: string }[] {
+      return (this.vendors ?? []).map(v => ({ label: v.vendor, value: v.vendor }))
+    },
   },
   actions: {
     async load() {

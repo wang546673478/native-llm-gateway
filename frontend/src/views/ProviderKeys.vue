@@ -90,6 +90,8 @@ const saving = ref(false)
 const modalVisible = ref(false)
 const editing = ref(false)
 const message = useMessage()
+// P-provider-vendor: store 持 vendors 单一来源;load() 内填充 providers
+const provStore = useProvidersStore()
 
 const form = ref({
   // P-provider-vendor: 提交目标 = 选中 vendor 的第一个注册名(pool 共享,任意协议面可写)
