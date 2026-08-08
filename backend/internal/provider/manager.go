@@ -93,6 +93,9 @@ type Manager struct {
 	endpoints map[string]string
 }
 
+// 编译期断言:Manager 满足路由/代理层依赖的窄接口 ProviderLookup
+var _ ProviderLookup = (*Manager)(nil)
+
 // NewManager 构造 Manager
 func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 	return &Manager{

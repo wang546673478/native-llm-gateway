@@ -24,7 +24,10 @@ type Config struct {
 	Name     string
 	Endpoint string // e.g. https://api.minimax.chat
 	Timeout  time.Duration
-	Pool     *keypool.Pool
+	// StreamTimeoutFloor 流式请求超时下限(默认 600s=10分钟,见 NewBase)。
+	// <=0 时用协议默认。
+	StreamTimeoutFloor time.Duration
+	Pool               *keypool.Pool
 	// ForceThinkingDisabled P-deepseek-thinking: 上行前把 body 的 thinking 强制写成
 	// {"type":"disabled"}。DeepSeek /anthropic 把 adaptive(Claude Code 发的)当 enabled 处理,
 	// 严格校验历史里每个 assistant tool_use 消息必须回带 thinking 块 — Claude Code compact
@@ -44,6 +47,9 @@ func NewBase(cfg Config) *Base {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 90 * time.Second
+	}
+	if cfg.StreamTimeoutFloor <= 0 {
+		cfg.StreamTimeoutFloor = 600 * time.Second // anthropic 协议默认 10 分钟
 	}
 	return &Base{
 		cfg:    cfg,
@@ -250,8 +256,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	// 10 分钟足够绝大多数 thinking 模型生成;超时由 context 控制
 	// (调用方 ctx cancel 即触发中断)
 	streamTimeout := b.cfg.Timeout
-	if streamTimeout < 600*time.Second {
-		streamTimeout = 600 * time.Second
+	if streamTimeout < b.cfg.StreamTimeoutFloor {
+		streamTimeout = b.cfg.StreamTimeoutFloor
 	}
 	client := &http.Client{Timeout: streamTimeout}
 

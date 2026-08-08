@@ -29,7 +29,10 @@ type Config struct {
 	Name     string
 	Endpoint string // e.g. https://generativelanguage.googleapis.com/v1beta
 	Timeout  time.Duration
-	Pool     *keypool.Pool
+	// StreamTimeoutFloor 流式请求超时下限(默认 120s,见 NewBase)。
+	// Google 长生成(thinking/长上下文)可覆盖此值调高;<=0 用协议默认。
+	StreamTimeoutFloor time.Duration
+	Pool               *keypool.Pool
 }
 
 // Base Google 协议基类
@@ -43,6 +46,9 @@ func NewBase(cfg Config) *Base {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
+	}
+	if cfg.StreamTimeoutFloor <= 0 {
+		cfg.StreamTimeoutFloor = 120 * time.Second // google 协议默认 2 分钟
 	}
 	return &Base{
 		cfg:    cfg,
@@ -99,7 +105,11 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		// P49: 带 body 检测 quota
 		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 		if errType == provider.ErrorTypeRateLimit {
-			b.cfg.Pool.ReportRateLimit(key, 0)
+			// P-429: 与 openai/anthropic 一致,解析 Retry-After 头用冷却时长
+			// (核心源 provider.ParseRetryAfter;google 之前丢弃头部用 0)。
+			// 注:google 不做 in-provider 重试(与 openai 同),只用于冷却上报。
+			retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
+			b.cfg.Pool.ReportRateLimit(key, retryAfter)
 		} else {
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
@@ -134,8 +144,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	}
 
 	streamTimeout := b.cfg.Timeout
-	if streamTimeout < 120*time.Second {
-		streamTimeout = 120 * time.Second
+	if streamTimeout < b.cfg.StreamTimeoutFloor {
+		streamTimeout = b.cfg.StreamTimeoutFloor
 	}
 	client := &http.Client{Timeout: streamTimeout}
 
@@ -163,7 +173,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		// P49: 带 body 检测 quota
 		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 		if errType == provider.ErrorTypeRateLimit {
-			b.cfg.Pool.ReportRateLimit(key, 0)
+			retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
+			b.cfg.Pool.ReportRateLimit(key, retryAfter)
 		} else {
 			b.cfg.Pool.ReportError(key, string(errType))
 		}

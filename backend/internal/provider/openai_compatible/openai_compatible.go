@@ -24,7 +24,12 @@ type Config struct {
 	Name     string
 	Endpoint string // e.g. https://api.deepseek.com
 	Timeout  time.Duration
-	Pool     *keypool.Pool
+	// StreamTimeoutFloor 流式请求超时下限(默认 600s=10分钟)。
+	// 见 NewBase:服务端 thinking/长上下文流式可能远大于非流式 Timeout,
+	// 这里给流式单独保底,避免 120s/60s 的普通超时把长生成切断。
+	// <=0 时按协议默认(openai/anthropic=600s,google=120s)。
+	StreamTimeoutFloor time.Duration
+	Pool               *keypool.Pool
 	// ChatPath 是 chat completions 端点的路径,默认 /v1/chat/completions
 	// DeepSeek 用 /chat/completions(无 /v1 前缀);其他 OpenAI 兼容家族都用默认
 	ChatPath string
@@ -53,6 +58,9 @@ func NewBase(cfg Config) *Base {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
+	}
+	if cfg.StreamTimeoutFloor <= 0 {
+		cfg.StreamTimeoutFloor = 600 * time.Second // openai 协议默认 10 分钟
 	}
 	if cfg.ChatPath == "" {
 		cfg.ChatPath = "/v1/chat/completions"
@@ -243,14 +251,14 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		streamBody = injectStreamUsage(streamBody)
 	}
 
-	// 流式超时:拉到 10 分钟
+	// 流式超时:floor 可配置(默认 10 分钟)
 	// http.Client.Timeout 限制整个请求生命周期(包括读 body)。
 	// 对于流式响应,Anthropic / OpenAI 官方自家超时是 10 分钟,thinking / 长上下文
 	// 模型可能更久。120s 太短,容易触发 context deadline exceeded,
 	// 导致客户端报 "Connection closed mid-response"。
 	streamTimeout := b.cfg.Timeout
-	if streamTimeout < 600*time.Second {
-		streamTimeout = 600 * time.Second
+	if streamTimeout < b.cfg.StreamTimeoutFloor {
+		streamTimeout = b.cfg.StreamTimeoutFloor
 	}
 	client := &http.Client{Timeout: streamTimeout}
 

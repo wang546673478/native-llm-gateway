@@ -71,14 +71,14 @@ func WithAllowedModels(models []string) RouteOption {
 }
 
 // Router 持有所有路由决策所需的状态
-// 注:Router.manager 保持 *provider.Manager 具体类型 — proxy 通过 Router.Manager()
-// 拿它取 Provider 实例(发请求用),Router 是 provider 相关协调者,依赖是合理的。
-// 这不算违反低耦合:是单向依赖,非循环/反向。强行接口化会让 Router 同时持接口+
-// 具体两个 manager(Method 冲突),反而更糟。
+// 注:Router.manager 用窄接口 provider.ProviderLookup,而非 *provider.Manager 具体类型。
+// 之前持具体 Manager 违反 CLAUDE.md「Router 只接收窄接口」;改成只持接口(不持具体)
+// 避免旧注释担心的「同时持接口+具体两个 manager 的 Method 冲突」—— Router 现在只
+// 有一个字段,类型是接口。通用协调/查询无需 Manager 具体方法。
 type Router struct {
 	mu       sync.RWMutex
 	logger   *zap.Logger
-	manager  *provider.Manager
+	manager  provider.ProviderLookup
 	pools    map[string]*keypool.Pool
 	aliases  map[string]AliasConfig
 	catchAll *AliasConfig // P-catch-all: 未知 model 名兜底(nil = 不兜底)
@@ -87,7 +87,7 @@ type Router struct {
 }
 
 // NewRouter 构造 Router
-func NewRouter(logger *zap.Logger, manager *provider.Manager, pools map[string]*keypool.Pool, cfg Config) *Router {
+func NewRouter(logger *zap.Logger, manager provider.ProviderLookup, pools map[string]*keypool.Pool, cfg Config) *Router {
 	if cfg.DefaultStrategy == "" {
 		cfg.DefaultStrategy = "priority"
 	}
@@ -395,7 +395,7 @@ type RouteIterator struct {
 	alias          string
 	candidates     []KeyCandidate
 	pools          map[string]*keypool.Pool
-	manager        *provider.Manager
+	manager        provider.ProviderLookup
 	providerKeyIDs []uint // P34: 限定的 ProviderKey ID 子集(空 = 不限)
 	current        int
 }
@@ -604,8 +604,8 @@ func (r *Router) CatchAllConfig() *AliasConfig {
 	return &c
 }
 
-// Manager 返回底层 provider.Manager(Proxy 用来查 Provider 实例)
-func (r *Router) Manager() *provider.Manager { return r.manager }
+// Manager 返回窄接口 provider.ProviderLookup(Proxy 用其查 Provider/Cost)
+func (r *Router) Manager() provider.ProviderLookup { return r.manager }
 
 // Pool 返回指定 Provider 的 KeyPool(Proxy 用来 ReportSuccess/ReportRateLimit)
 func (r *Router) Pool(providerName string) *keypool.Pool { return r.pools[providerName] }
