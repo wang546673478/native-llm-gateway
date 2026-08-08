@@ -697,6 +697,10 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		s.accessR, // P67: 接入日志 Recorder(可能为 no-op)
 		s.quotaM,  // P68 / P-quota-balance: quota 恢复 worker(可能为 nil)
 		auth.NewMimoQuotaCookieStore(s.db), // P-mimo-quota: cookie 持久化(单行)
+		// P-mimo-quota 解耦:处理器不 import provider/mimo,由 server(顶层编排者)
+		// 把 vendor 专属校验/注入闭包传入 — 与 keyStatusLookup/quotaMarkFunc 同模式
+		mimo.ValidateQuotaCookie, // MimoQuotaValidate
+		mimo.SetQuotaCookie,      // MimoQuotaSet
 	)
 	admin.Register(r.Group("/api/v1"))
 

@@ -17,7 +17,6 @@ import (
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
-	"github.com/wang546673478/native-llm-gateway/internal/provider/mimo"
 	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 	"github.com/wang546673478/native-llm-gateway/internal/usage"
@@ -45,6 +44,11 @@ type Admin struct {
 	QuotaMgr  *quotacheck.Manager // P68/P-quota-balance: quota 恢复 worker(nil 时前端拿到 default)
 	// P-mimo-quota: MIMO 控制台 cookie 持久化仓库(可能为 nil — 无 DB 时跳过持久化)
 	MimoCookieStore MimoQuotaCookieStore
+	// P-mimo-quota 解耦:处理器不 import 具体 vendor 包(provider/mimo),由 server
+	// 层注入 vendor 专属的 cookie 校验/设置闭包 — 与 keyStatusLookup/quotaMarkFunc
+	// 等函数注入同模式。nil = 该特性不可用(返回明确错误而非 panic)。
+	MimoQuotaValidate func(ctx context.Context, cookie string) error // 打一次 usage 端点校验
+	MimoQuotaSet      func(cookie string)                           // 热注入到内存(影响路由配额判断)
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -69,6 +73,8 @@ func NewAdmin(
 	accessLogR *accesslog.Recorder,
 	quotaMgr *quotacheck.Manager,
 	mimoCookieStore MimoQuotaCookieStore,
+	mimoValidate func(ctx context.Context, cookie string) error, // 可 nil
+	mimoSet func(cookie string), // 可 nil
 ) *Admin {
 	return &Admin{
 		Manager:         mgr,
@@ -81,6 +87,8 @@ func NewAdmin(
 		AccessLog:       accessLogR,
 		QuotaMgr:        quotaMgr,
 		MimoCookieStore: mimoCookieStore,
+		MimoQuotaValidate: mimoValidate,
+		MimoQuotaSet:      mimoSet,
 	}
 }
 
@@ -278,8 +286,13 @@ func (a *Admin) postMimoQuotaCookie(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
-	// 先验证候选 cookie(打一次 usage 端点;失败 = 过期/无效,不写入)
-	if err := mimo.ValidateQuotaCookie(ctx, strings.TrimSpace(body.Cookie)); err != nil {
+	// 先验证候选 cookie(打一次 usage 端点;失败 = 过期/无效,不写入)。
+	// 具体 vendor 校验由 server 注入的 MimoQuotaValidate 闭包执行(处理器不 import 厂商包)。
+	if a.MimoQuotaValidate == nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "cookie_validation_unavailable"})
+		return
+	}
+	if err := a.MimoQuotaValidate(ctx, strings.TrimSpace(body.Cookie)); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":  "cookie_invalid",
 			"detail": fmt.Sprintf("cookie rejected by MIMO: %v", err),
@@ -292,7 +305,10 @@ func (a *Admin) postMimoQuotaCookie(c *gin.Context) {
 			return
 		}
 	}
-	mimo.SetQuotaCookie(body.Cookie)
+	// 热注入到内存(影响路由配额判断),由 server 层注入的 setter 闭包完成。
+	if a.MimoQuotaSet != nil {
+		a.MimoQuotaSet(body.Cookie)
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "mimo quota cookie updated"})
 }
 
