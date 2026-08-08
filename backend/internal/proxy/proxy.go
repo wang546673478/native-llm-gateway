@@ -424,6 +424,12 @@ func classifyError(statusCode int, providerEmpty bool, upstreamErrType *provider
 			return "timeout"
 		case provider.ErrorTypeConnection:
 			return "connection_error"
+		case provider.ErrorTypeRateLimit:
+			// P-429-failover: 上游 429(rate_limit)是 retryable,failover 耗尽时会
+			// 被 handleAllFailed 重写为 502 wire status —— 但真实成因还是上游限流。
+			// 按上游错误而非重写后的 client status 归类,否则 429 被误记 upstream_5xx,
+			// ?status=upstream_429 过滤查不到(与 metrics 的 429 标签分裂)。
+			return "upstream_429"
 		}
 	}
 	return "upstream_4xx"

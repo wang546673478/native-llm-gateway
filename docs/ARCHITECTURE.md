@@ -19,7 +19,7 @@ config.Load(cfgPath) → *config.Config
    ↓
 logger(zap;development 模式有颜色,production JSON)
    ↓
-database.Open + database.Migrate(GORM AutoMigrate + migrations/00X.up.sql)
+database.Open + database.Migrate(GORM AutoMigrate — 唯一 schema 权威;已删 SQL 迁移)
    ↓
 buildPools(cfg) → map[string]*keypool.Pool         ← 提前构造,后续注入
    ↓

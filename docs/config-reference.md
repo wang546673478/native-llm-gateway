@@ -261,9 +261,10 @@ access_logs (ProviderKeyID / GatewayKeyID 都是字符串,无 FK)
 ### 12.1 数据库迁移
 
 - `cmd/gateway/main.go` 启动时调 `database.Migrate(db)`
-- GORM AutoMigrate + `migrations/00X.up.sql` 编号顺序执行
+- 唯一 schema 权威是 GORM AutoMigrate(database.Migrate 遍历 9 个模型 struct);
+  已删后端 dormant 的 migrations/*.sql(此前与 struct 漂移且无代码执行)
 - 新增字段用 GORM 的 `AutoMigrate`(改 struct + `gorm:"column:..."` tag)
-- 大改用 SQL 迁移文件
+- 大改直接改 struct,由 AutoMigrate 增加/改列(不维护独立 SQL 迁移)
 
 ### 12.2 SQLite → PostgreSQL 迁移工具
 

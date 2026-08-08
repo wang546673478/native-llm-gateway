@@ -936,6 +936,9 @@ func (s *Server) Reload(newCfg *config.Config) {
 		zap.Int("aliases", len(newCfg.Routing.Aliases)),
 		zap.Int("auth_keys", len(newCfg.Auth.Keys)),
 	)
+	// P-reload-restart-required: 明确提示哪些字段热重载不生效,需重启。
+	// 避免 operator 改这些字段后以为 reload 已应用(silent partial apply)。
+	s.logger.Warn("config hot-reload is partial — 需重启才生效的字段: database / server(host,port,timeouts,static_dir,access_log.*) / usage(batch_size,flush_interval) / providers(instance,pool,endpoint,timeout)")
 }
 
 // ReloadProviderPool P35: 从 DB 重建指定 provider 的 Pool,注入到 Provider
