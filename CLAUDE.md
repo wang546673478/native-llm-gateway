@@ -197,7 +197,7 @@ sudo systemctl start llm-gateway # systemd 托管
 
 | 改动 | 效果 |
 |---|---|
-| `acquireFromTierLocked` 拆分 | filter chain 模式,新增 `keypool/filter.go`,9 件事拆成独立 Filter |
+| `acquireFromTierLocked` 拆分⚠️(半成品) | filter chain 模式,新增 `keypool/filter.go`,9 件事拆成独立 Filter — **但生产仍走旧实现,AcquireWithFilter 零调用=死代码**,两实现有行为分歧(见下方"剩余耦合") |
 | `swapToOtherKey` 拆分 | `poolForFailover` / `allowedIDSetFromRequest` / `swapToOtherKey` 3 个职责 |
 | `routing.model` fallback | `filterCandidates` 里 model 为空自动用 `default_model`,允许省略字段 |
 | Pool 解耦 circuit | `BreakerFactory` 接口注入,`keypool` 不再 import `circuit` |
@@ -210,8 +210,9 @@ sudo systemctl start llm-gateway # systemd 托管
 
 | 耦合 | 位置 | 建议 |
 |---|---|---|
-| `usage/adapter.go` import `proxy.UsageRecord` | usage 反向依赖 proxy | 把 UsageRecord 移到 usage 包,proxy type alias |
-| `auth` import `keypool.BuildPoolFromStrings` | auth/provider_keys_handler.go:399 | 抽到 server 层注入 |
+| **keypool 双实现(半成品重构)** | `pool.go:acquireFromTierLocked`(生产走它) vs `filter.go:AcquireWithFilter`(filter chain,**零生产调用**=死代码) | ⚠️ 两套 key 采集逻辑各自演化。实测 naive 合并(把 acquireFromTierLocked 改调 AcquireWithFilter)会破坏 `TestAcquireFromTier_OnlyRequestedTier` + `TestPool_AcquireSkipsQuotaExceededButCanReturnAfterRestore` — filter chain 在「单 token_plan key」和「老 polled-exhausted 语义」上偏离。需先把两实现 reconcile + 扩展等价测试覆盖分歧点,再切生产;勿盲改线上 hot path |
+| `usage/adapter.go` import `proxy.UsageRecord` | (已用 type alias 解耦) | 已解决 |
+| `auth` import `keypool` | auth/provider_keys_handler.go 引用 `*keypool.Key` 类型 | 合理类型依赖(pool 注入,非构造),保留 |
 | `provider/provider.go` import `keypool` | provider 依赖 keypool | Pool 用 interface{} 已部分规避,仍直接引用类型 |
-| `proxy.go:1145` 直调 `quotacheck.CheckQuota` | proxy 依赖 quotacheck | 通过 Pool 回调注入 |
-| `router.go` 用 `manager.GetAll/DefaultModelFor/BillingSourceFor` | router 依赖 provider 细节 | Router 只接收窄接口(Provider lookup) |
+| `handler` import `provider/mimo` | (已改闭包注入,见 bda7ad0) | 已解决 |
+| `proxy.go` 5 处 `c.Get("gateway_key")` | (已统一走 gkCtx,见 a75ea23) | 已解决 |
