@@ -399,11 +399,12 @@ func (p *Pool) ReportError(k *Key, errType string) {
 	k.LastErrorAt = now
 	k.UpdatedAt = now
 
-	// P-per-key-circuit: 5xx/timeout/connection → 该 key 熔断计数。
+	// P-per-key-circuit: server_error/timeout/connection → 该 key 熔断计数。
 	// 只熔断这一把 key,不连坐同 provider 其他 key(2026-08-06 之前 provider 级连坐)。
-	// 429(rate_limit)/quota/auth/invalid_request 不计数(与 circuit.shouldCount 一致)
-	switch errType {
-	case "server_error", "timeout", "connection":
+	// 429(rate_limit)/quota/auth/invalid_request 不计数(与 circuit.shouldCount 一致)。
+	// 哪些 errType 触发熔断由 keypool.ErrorType 单一集合决定(见 errtype.go),
+	// 不再散落裸字符串字面量。
+	if TripsBreaker(errType) {
 		if br := p.breakerFor(k); br != nil {
 			br.RecordFailure(errType)
 		}
@@ -411,17 +412,17 @@ func (p *Pool) ReportError(k *Key, errType string) {
 
 	var quotaCB func(*Key, KeyStatus)
 	var fromStatus KeyStatus
-	switch errType {
-	case "auth":
+	switch ErrorType(errType) {
+	case ErrorTypeAuth:
 		// P-no-disabled: 上游 401/403-auth:key 本身有问题 → 冷却 5 分钟而非禁用。
 		// 冷却期间不参与调度,到期自动重试 — 换 key/修 key 后自动恢复
 		k.Status = KeyStatusCooling
 		k.CoolingUntil = now.Add(5 * time.Minute)
-	case "invalid_request":
+	case ErrorTypeInvalidRequest:
 		// P-invalid-req: 上游 400 通常是「这个请求内容它不支持」(agent 回带的
 		// 其他厂商 thinking 块、tool 格式差异等),不是 key 有问题 —
 		// 只计数,不禁用。禁用会把整条链打死且无恢复路径
-	case "quota_exceeded":
+	case ErrorTypeQuotaExceeded:
 		if p.cfg.QuotaRecovery == QuotaRecoveryProbe {
 			// B-probe-quota: 无 balancer 的 api 厂商(glm/qwen/gemini)没有轮询
 			// 恢复通道 — 标 QUOTA_EXCEEDED 就是永久死 key。只计数不标记,
