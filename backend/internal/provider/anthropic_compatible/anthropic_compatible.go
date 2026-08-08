@@ -393,11 +393,17 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 				if err != nil {
 					if err == io.EOF {
 						if buf.Len() > 0 {
-							ch <- &provider.StreamChunk{Data: append([]byte{}, buf.Bytes()...)}
+							if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Data: append([]byte{}, buf.Bytes()...)}) {
+								return
+							}
 						}
-						ch <- &provider.StreamChunk{Err: io.EOF}
+						if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Err: io.EOF}) {
+							return
+						}
 					} else {
-						ch <- &provider.StreamChunk{Err: err}
+						if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Err: err}) {
+							return
+						}
 					}
 					return
 				}
@@ -409,7 +415,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 						// P42 + P65: 在转发前尝试解析 usage 和 model
 						extractAnthropicStreamUsage(eventData, &inputTokens, &outputTokens, &cacheCreation, &cacheRead, &upstreamModel)
 						eventData = append(eventData, '\n', '\n')
-						ch <- &provider.StreamChunk{Data: eventData}
+						if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Data: eventData}) {
+							return
+						}
 						buf.Reset()
 					}
 					continue

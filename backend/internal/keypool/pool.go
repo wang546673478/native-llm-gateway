@@ -580,6 +580,18 @@ func (p *Pool) KeyPtrs() []*Key {
 	return out
 }
 
+// MutateKey 在持有 p.mu(写锁)下安全改单把 key 的字段。
+// 低耦合修复:quotacheck 轮询此前直接写 k.Status/k.Remaining/k.QuotaZeroStreak
+// 等(不经锁),与请求路径 ReportSuccess/ReportError(在 p.mu 下写同一批字段)
+// 形成数据竞争。把「外部要改 key 字段」统一收敛到 keypool 的锁内变更——
+// 外部(quotacheck)不再也不应该知道内部加锁细节(高内聚)。
+// k 必须是本 pool 的 KeyPtrs() 里的指针。
+func (p *Pool) MutateKey(k *Key, fn func(*Key)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fn(k)
+}
+
 // Size Key 总数
 func (p *Pool) Size() int {
 	p.mu.RLock()

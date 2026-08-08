@@ -107,6 +107,10 @@ type Manager struct {
 	workerCtx    context.Context
 	workerCancel context.CancelFunc
 	workerMu     sync.Mutex
+	// shutdownCtx 服务关闭根 ctx,由 Server.Run 在启动时注入。
+	// Reload 重新 Start 的 worker 从它派生 —— 保证热重载重启的 poll/probe goroutine
+	// 也随进程关闭终止(之前 Reload 用 context.Background() 导致 worker 永久泄漏)。
+	shutdownCtx context.Context
 
 	// 测试可注入
 	now   func() time.Time
@@ -163,6 +167,12 @@ func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, metric
 // Start 启动 polling + probe goroutines
 // 注意: callback 已经在 NewManager 时注入,这里不再 inject(避免重复 log)
 // 支持 Reload 重新调用 — 先 cancel 旧 worker 再启新的
+// SetShutdownCtx 注入服务关闭根 ctx(Server.Run 启动时/Reload 前调用)。
+// Reload 重新 Start 的 worker 从它派生,保证热重载重启的 goroutine 也随进程关闭停止。
+func (m *Manager) SetShutdownCtx(ctx context.Context) {
+	m.shutdownCtx = ctx
+}
+
 func (m *Manager) Start(ctx context.Context) {
 	m.workerMu.Lock()
 	defer m.workerMu.Unlock()
@@ -242,6 +252,20 @@ func (m *Manager) injectOneCallback(providerName string, p *keypool.Pool) {
 func (m *Manager) ReinjectCallback(providerName string, p *keypool.Pool) {
 	m.injectOneCallback(providerName, p)
 	m.metricsSetPending(m.sched.pendingCount())
+}
+
+// Pools 返回底层 PoolsRef(唯一持锁的 pool map 引用)。
+// 供 Server.ReloadProviderPool 在原子替换整张 map 时取锁用。
+func (m *Manager) Pools() *PoolsRef { return m.pools }
+
+// SwapPools 原子替换 pool map 引用(加写锁,与 poll 的 Get() 读锁互斥)。
+// 低耦合修复:此前 ReloadProviderPool 就地写共享 map,与 poll 的 Get()(RLock 拷贝)
+// 并发 → Go map 并发读写在管理员增删 key 时触发进程崩溃。用整表替换代替就地写,
+// 地图本不就地变更,读方持有「不变量快照」,天然无并发 map 访问。
+func (r *PoolsRef) SwapPools(newMap map[string]*keypool.Pool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pools = newMap
 }
 
 // rescanExisting 冷启动:把已有 QUOTA_EXCEEDED 的 key 立即入堆
@@ -582,8 +606,11 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				// (2026-08-06 实测:key-1 显示冷却 7.5 小时,实际早已过期,
 				// 一个请求就刷新回 ACTIVE)
 				if k.Status == keypool.KeyStatusCooling && m.now().After(k.CoolingUntil) {
-					k.Status = keypool.KeyStatusActive
-					k.UpdatedAt = m.now()
+					// 锁内改(与请求路径 Report* 的写一致),避免数据竞争
+					pool.MutateKey(k, func(kk *keypool.Key) {
+						kk.Status = keypool.KeyStatusActive
+						kk.UpdatedAt = m.now()
+					})
 				}
 				bal, err := balancer.FetchBalance(ctx, baseURL, k)
 				if err != nil {
@@ -595,42 +622,50 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 					continue
 				}
 
-				k.QuotaKind = bal.Kind
-				k.LastPolledAt = time.Now()
+				pool.MutateKey(k, func(kk *keypool.Key) {
+					kk.QuotaKind = bal.Kind
+					kk.LastPolledAt = time.Now()
+				})
 
 				// P-quota-poll-guard: 只有「有额度」或「连续 2 轮确认无额度」才写 Remaining /
 				// 标 QE。单次瞬态 0 读不覆盖上次已知正值、不标记 — 2026-08-05 实测:
 				// MiniMax 余额 API 对 healthy key-1 瞬态读 0,poll 直接标 QE,
 				// key-1 整晚趴着,流量全落到 weige 直到它耗尽 → 整链掉 deepseek
 				if !bal.HasQuota {
-					// 无额度:连续 2 轮确认才标 QE;单次瞬态 0 保留上次已知余额
-					if k.Status == keypool.KeyStatusActive {
-						k.QuotaZeroStreak++
-						if k.QuotaZeroStreak >= 2 {
-							k.Remaining = bal.Raw
-							m.logger.Info("poll: quota exhausted (2 consecutive)",
-								zap.String("provider", vendorName),
-								zap.String("key_id", k.ID),
-								zap.Float64("remaining", bal.Raw))
-							pool.ReportQuotaExceeded(k)
-							m.metricsPollInc(vendorName, "exhausted")
-						} else {
-							m.metricsPollInc(vendorName, "ok")
+					// 无额度:连续 2 轮确认才标 QE;单次瞬态 0 保留上次已知余额。
+					// streak 读改写收敛到 keypool 锁内(MutateKey),消除与请求路径的数据竞争
+					markQE := false
+					pool.MutateKey(k, func(kk *keypool.Key) {
+						if kk.Status != keypool.KeyStatusActive {
+							return // 非 ACTIVE(QE/COOLING):不写不标,保留旧值
 						}
+						kk.QuotaZeroStreak++
+						if kk.QuotaZeroStreak >= 2 {
+							kk.Remaining = bal.Raw
+							markQE = true
+						}
+					})
+					if markQE {
+						m.logger.Info("poll: quota exhausted (2 consecutive)",
+							zap.String("provider", vendorName),
+							zap.String("key_id", k.ID),
+							zap.Float64("remaining", bal.Raw))
+						pool.ReportQuotaExceeded(k)
+						m.metricsPollInc(vendorName, "exhausted")
+					} else if k.Status == keypool.KeyStatusActive {
+						m.metricsPollInc(vendorName, "ok")
 					}
-					// 非 ACTIVE(QE/COOLING):不写不标,保留旧值
 				} else {
-					// 有额度:恢复 QE key
-					// Bug fix (2026-08-08) 修订:不能只靠 ReportSuccess 恢复 —
-					// QE 的 key 不再被调度,永远没有请求发到它,ReportSuccess 永远
-					// 不触发 → QE 永久卡死(实测 weige 100% 一直 QE)。
-					// 改为:poll 读到「确实有额度」就恢复 ACTIVE(充值到账的信号),
-					// 给这个 key 一次真实请求机会。若上游仍 429 → ReportRateLimit
-					// 连续冷却升级 QE(防瞬时风暴),下轮 poll 又读 100% 再恢复 — 逐步试探。
-					// 冷档 60s 期间不参与调度,避免瞬时流量风暴。
-					k.QuotaZeroStreak = 0
-					k.Remaining = bal.Raw
-					if k.Status == keypool.KeyStatusQuotaExceeded {
+					// 有额度:清 streak + 写 Remaining,并在 QE 时恢复 ACTIVE。
+					// streaked 字段读改写收敛到 keypool 锁内;RestoreQuota 本身也加锁,
+					// 顺序执行不嵌套(先 MutateKey 改字段,再 RestoreQuota 做迁移)。
+					restore := false
+					pool.MutateKey(k, func(kk *keypool.Key) {
+						kk.QuotaZeroStreak = 0
+						kk.Remaining = bal.Raw
+						restore = kk.Status == keypool.KeyStatusQuotaExceeded
+					})
+					if restore {
 						m.logger.Info("poll: quota restored (give key a request chance)",
 							zap.String("provider", vendorName),
 							zap.String("key_id", k.ID),
@@ -696,6 +731,11 @@ func (m *Manager) Reload(newCfg ManagerConfig) {
 		return
 	}
 	m.logger.Info("quotacheck.Manager reload: enabling")
-	// Re-Start:context 用 background(因为 Server.Run 顶层 ctx 已经 cancel 不掉)
-	m.Start(context.Background())
+	// Re-Start:派生自 shutdownCtx(服务关闭时会 cancel,worker 随进程终止),
+	// 不再用 context.Background() —— 否则热重载重启的 worker 永久泄漏。
+	rootCtx := context.Background()
+	if m.shutdownCtx != nil {
+		rootCtx = m.shutdownCtx
+	}
+	m.Start(rootCtx)
 }

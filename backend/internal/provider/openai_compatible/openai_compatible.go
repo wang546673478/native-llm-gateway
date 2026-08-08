@@ -364,9 +364,13 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
 				if err == io.EOF {
-					ch <- &provider.StreamChunk{Err: io.EOF}
+					if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Err: io.EOF}) {
+						return
+					}
 				} else {
-					ch <- &provider.StreamChunk{Err: err}
+					if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Err: err}) {
+						return
+					}
 				}
 				return
 			}
@@ -380,8 +384,12 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			}
 			payload := bytes.TrimSpace(line[5:])
 			if bytes.Equal(payload, []byte("[DONE]")) {
-				ch <- &provider.StreamChunk{Data: line}
-				ch <- &provider.StreamChunk{Err: io.EOF}
+				if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Data: line}) {
+					return
+				}
+				if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Err: io.EOF}) {
+					return
+				}
 				return
 			}
 			// P42: 尝试从 chunk JSON 抽 usage
@@ -389,7 +397,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 				lastUsage = u
 			}
 			// 把 "data: {...}\n\n" 还原成 SSE 事件
-			ch <- &provider.StreamChunk{Data: append(line, '\n', '\n')}
+			if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Data: append(line, '\n', '\n')}) {
+				return
+			}
 		}
 	}()
 

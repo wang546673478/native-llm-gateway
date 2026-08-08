@@ -521,6 +521,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	// P68: 启动 quota restore worker(probing + polling)
 	if s.quotaM != nil {
+		// 注入关闭根 ctx:热重载(Reload)重新 Start 的 worker 也从它派生,
+		// 保证随进程关闭终止(不再泄漏)。
+		s.quotaM.SetShutdownCtx(ctx)
 		s.quotaM.Start(ctx)
 	}
 
@@ -546,6 +549,11 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		s.logger.Info("shutdown signal received")
 		s.usageC.Stop() // flush 剩余记录
+		// P-quota-worker: 停止 quota restore / 轮询 worker(否则热重载重启的
+		// goroutine 不受控地泄漏,跨进程完全退出)
+		if s.quotaM != nil {
+			s.quotaM.Stop()
+		}
 		if s.accessR != nil {
 			_ = s.accessR.Close() // flush buffer + stop retention
 		}
@@ -953,14 +961,18 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		// 配额模式,不让重载丢失熔断/回退成 poll 永久死 key
 		poolCfg := toPoolCfg(s.cfg, vendor, s.logger)
 		pool := buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger)
+		// 低耦合修复:构建新 map(copy + 该 vendor 更新)后整表原子替换,
+		// 不再就地写 s.pools —— 消除与 quotacheck poll 的 Get()(RLock 拷贝)
+		// 并发 map 读写的进程崩溃。旧 map 永不就地变,读方持旧快照也安全。
+		newPools := make(map[string]*keypool.Pool, len(s.pools))
+		for k, v := range s.pools {
+			newPools[k] = v
+		}
 		for i, name := range names {
-			s.pools[name] = pool
+			newPools[name] = pool
 			// SetPool 已在 Provider 接口,直接调用(编译期强制,不再 type-assert)
 			if pv, ok := s.manager.Get(name); ok {
 				pv.SetPool(pool)
-			}
-			if s.router != nil {
-				s.router.SetPool(name, pool)
 			}
 			// P-provider-vendor: 共享 pool 每 vendor 只注入一次 quota callback —
 			// 多个注册名指向同一 pool,每个名字都调会把 callback 绑定两次且
@@ -969,11 +981,20 @@ func (s *Server) ReloadProviderPool(providerName string) {
 				s.quotaM.ReinjectCallback(name, pool)
 			}
 		}
+		// 整表原子替换:server / router / quotacheck 三者都指到新 map
+		s.pools = newPools
+		if s.router != nil {
+			s.router.SetPools(newPools)
+		}
+		if s.quotaM != nil {
+			s.quotaM.Pools().SwapPools(newPools)
+		}
 		s.logger.Info("provider pool reloaded", zap.String("vendor", vendor), zap.Int("keys", pool.Size()), zap.Strings("names", names))
 		return
 	}
 	// 全量重建 — 按 vendor 分组,每组建一次 pool 重指该 vendor 所有注册名
-	vendorPools := make(map[string]*keypool.Pool)
+	newPools := make(map[string]*keypool.Pool)
+	vendorPools := make(map[string]*keypool.Pool) // 局部去重:vendor → pool
 	// P-provider-vendor: 共享 pool 的 quota callback 每 pool 只注入一次(见单分支注释)
 	injectedPools := make(map[*keypool.Pool]bool)
 	for name, p := range s.cfg.Providers {
@@ -987,18 +1008,22 @@ func (s *Server) ReloadProviderPool(providerName string) {
 			pool = buildOnePool(ctx, vendor, sched, toPoolCfg(s.cfg, vendor, s.logger), store, s.logger)
 			vendorPools[vendor] = pool
 		}
-		s.pools[name] = pool
+		newPools[name] = pool
 		if pv, ok := s.manager.Get(name); ok {
 			pv.SetPool(pool) // SetPool 在 Provider 接口,编译期强制
-		}
-		// P54: 同单分支 — Router 持有的 pool 引用一并更新
-		if s.router != nil {
-			s.router.SetPool(name, pool)
 		}
 		if s.quotaM != nil && !injectedPools[pool] {
 			injectedPools[pool] = true
 			s.quotaM.ReinjectCallback(name, pool)
 		}
 	}
-	s.logger.Info("all provider pools reloaded", zap.Int("providers", len(s.pools)))
+	// 整表原子替换(不再就地写 s.pools,防并发 map 崩溃)
+	s.pools = newPools
+	if s.router != nil {
+		s.router.SetPools(newPools)
+	}
+	if s.quotaM != nil {
+		s.quotaM.Pools().SwapPools(newPools)
+	}
+	s.logger.Info("all provider pools reloaded", zap.Int("providers", len(newPools)))
 }

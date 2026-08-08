@@ -193,9 +193,13 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
 				if err == io.EOF {
-					ch <- &provider.StreamChunk{Err: io.EOF}
+					if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Err: io.EOF}) {
+						return
+					}
 				} else {
-					ch <- &provider.StreamChunk{Err: err}
+					if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Err: err}) {
+						return
+					}
 				}
 				return
 			}
@@ -209,7 +213,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			lineBuf.WriteString("data: ")
 			lineBuf.Write(line)
 			lineBuf.WriteString("\n\n")
-			ch <- &provider.StreamChunk{Data: lineBuf.Bytes()}
+			if !provider.SendOrAbort(ctx, ch, &provider.StreamChunk{Data: lineBuf.Bytes()}) {
+				return
+			}
 		}
 	}()
 

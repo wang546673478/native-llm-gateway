@@ -610,10 +610,18 @@ func (r *Router) Manager() provider.ProviderLookup { return r.manager }
 // Pool 返回指定 Provider 的 KeyPool(Proxy 用来 ReportSuccess/ReportRateLimit)
 func (r *Router) Pool(providerName string) *keypool.Pool { return r.pools[providerName] }
 
-// SetPool 注入 Pool(由 main.go 在启动时调用,把 cfg 里声明的 KeyPool 绑到 Router)
+// SetPool 注入单 provider 的 Pool(仅供启动时/测试;热重载请用 SetPools 整表替换,
+// 避免就地写共享 map 造成与 quotacheck 轮询的并发 map 崩溃)
 func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
 	if r.pools == nil {
 		r.pools = make(map[string]*keypool.Pool)
 	}
 	r.pools[providerName] = pool
+}
+
+// SetPools 整表替换 Router 持有的 pool map(引用替换,不就地写)。
+// ReloadProviderPool 热重载时用它把整张新 map 指给 Router —— 旧 map 永不就地变,
+// 并发读方持旧 map 快照也安全,消除了就地写共享 map 的并发崩溃。
+func (r *Router) SetPools(newMap map[string]*keypool.Pool) {
+	r.pools = newMap
 }
