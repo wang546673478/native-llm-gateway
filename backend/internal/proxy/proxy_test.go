@@ -513,6 +513,10 @@ func buildEngineMulti(t *testing.T, providers []*fakeProvider, pools map[string]
 	}
 	engineCfg := Config{
 		Router: r, Logger: zap.NewNop(), Usage: rec, Metrics: NoopMetricsRecorder{}, AccessLog: accessR,
+		// 注入默认 QuotaChecker — 测试走全局 quotacheck balancer registry(与生产一致)
+		QuotaChecker: CheckQuotaFunc(func(ctx context.Context, providerName, baseURL string, k *keypool.Key) (bool, error) {
+			return quotacheck.CheckQuota(ctx, providerName, baseURL, k)
+		}),
 	}
 	for _, o := range opts {
 		o(&engineCfg)

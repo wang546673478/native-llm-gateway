@@ -23,7 +23,6 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
-	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
 
@@ -40,6 +39,7 @@ type Engine struct {
 	tokenRecorder TokenUsageRecorder  // P13: TPM 计数回调(可选)
 	authn         *auth.Authenticator // P19: Provider binding 检查
 	accessLog     *accesslog.Recorder // P67: 接入日志 Recorder(可选,启用时为非 nil)
+	quotaChecker  QuotaChecker        // token_plan 降档的配额探测(nil 时跳过探测)
 	maxRetry      int
 	// writeTimeout 流式写 deadline 的续期预算(取 server.write_timeout)。
 	// http.Server.WriteTimeout 是「响应整体绝对上限」,流式场景下长生成会被
@@ -71,6 +71,9 @@ type Config struct {
 	TokenRecorder TokenUsageRecorder  // P13: 可选
 	Authenticator *auth.Authenticator // P19: 可选,绑定 Provider 检查
 	AccessLog     *accesslog.Recorder // P67: 可选,nil 表示未启用
+	// QuotaChecker token_plan 降档的配额探测;nil = 不探测(直接当未耗尽)
+	// 由 server 注入 quotacheck.CheckQuota wrapper,proxy 不直接依赖 quotacheck 包
+	QuotaChecker  QuotaChecker
 	MaxRetry      int                 // 最大 failover 次数,默认 3
 	// WriteTimeout 流式写 deadline 续期预算(取 server.write_timeout)。
 	// 非流式响应仍是绝对上限;流式场景按 chunk 续期成空闲超时。<=0 时默认 2min。
@@ -102,6 +105,7 @@ func NewEngine(cfg Config) *Engine {
 		tokenRecorder: cfg.TokenRecorder,
 		authn:         cfg.Authenticator,
 		accessLog:     cfg.AccessLog,
+		quotaChecker:  cfg.QuotaChecker,
 		maxRetry:      cfg.MaxRetry,
 		writeTimeout:  cfg.WriteTimeout,
 	}
@@ -1029,22 +1033,42 @@ func (e *Engine) tryCandidate(
 	// 不符就整请求 403;链上全部候选都被排除时由 handleAllFailed 收尾返 403
 	if gkVal, ok := c.Get("gateway_key"); ok {
 		if gk, ok := gkVal.(*auth.GatewayKey); ok && e.authn != nil {
-			if err := e.authn.CheckAllowed(gk, result.ModelID); err != nil {
+			// P-whitelist-check: 优先用客户端原始模型名(req.Model)校验白名单。
+			// 不用 result.ModelID — 路由内部选的候选模型可能跟客户端请求不同
+			// (如 client 发 mimo-v2.5,路由选中 mimo-v2.5-pro,白名单只有 mimo-v2.5-pro
+			// → result.ModelID=mimo-v2.5-pro 通过;但 client 发 claude-opus-5,candidate
+			// 选 mimo-v2.5,req.Model 不在白名单 → 合理 403)
+			// 唯一例外:客户端没发真实模型名(没 alias,走 catch_all)→ req.Model 是占位,
+			// 不在白名单里 → 落后 fallback 到 result.ModelID
+			checkModel := req.Model
+			if checkModel == "" || checkModel == result.ModelID {
+				checkModel = result.ModelID
+			}
+			if err := e.authn.CheckAllowed(gk, checkModel); err != nil {
+				// fallback: req.Model 不在白名单但 result.ModelID 在 → 也放行
+				if checkModel != result.ModelID {
+					if err2 := e.authn.CheckAllowed(gk, result.ModelID); err2 == nil {
+						// result.ModelID 在白名单里 → 放行
+						goto afterWhitelist
+					}
+				}
 				*outProviderName = result.ProviderName
 				*lastErr = &provider.ProviderError{
 					ProviderName: result.ProviderName,
 					StatusCode:   http.StatusForbidden,
 					ErrorType:    provider.ErrorTypeModelNotAllowed,
-					Message:      fmt.Sprintf("key %q does not allow model %q", gk.Name, result.ModelID),
+					Message:      fmt.Sprintf("key %q does not allow model %q", gk.Name, checkModel),
 				}
 				e.logger.Debug("candidate skipped (not in key whitelist)",
 					zap.String("key", gk.Name),
 					zap.String("provider", result.ProviderName),
-					zap.String("model", result.ModelID),
+					zap.String("model", checkModel),
+					zap.String("result_model", result.ModelID),
 					zap.Strings("allowed", gk.AllowedModels),
 					zap.String("trace_id", req.TraceID))
 				return outcomeContinue, false, false // 未实际尝试:不算失败、不计预算
 			}
+			afterWhitelist:
 		}
 	}
 	// P-catch-all: 记录实际使用的上游模型(候选的目标模型,如 MiniMax-M3 —
@@ -1142,7 +1166,13 @@ func (e *Engine) tryCandidate(
 			// 没有 key 可查(无 pool 场景)— 按未知处理
 			return outcomeContinue, false, true
 		}
-		has, qerr := quotacheck.CheckQuota(ctx, result.ProviderName, e.endpointFor(result.ProviderName), result.Key)
+		// P-quota-checker: 通过注入的 QuotaChecker 探测,proxy 不直接依赖 quotacheck 包
+		// (低耦合:quotacheck 是横切关注点,通过接口注入)
+		if e.quotaChecker == nil {
+			// 无 checker(未注入)→ 不探测,按未知处理
+			return outcomeContinue, false, true
+		}
+		has, qerr := e.quotaChecker.CheckQuota(ctx, result.ProviderName, e.endpointFor(result.ProviderName), result.Key)
 		if qerr != nil || has {
 			return outcomeContinue, false, true
 		}

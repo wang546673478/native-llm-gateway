@@ -371,35 +371,3 @@ func (h *ProviderKeysHandler) markQuotaExceeded(c *gin.Context) {
 	h.quotaMarkFunc(providerName, fmt.Sprintf("%d", id))
 	c.JSON(http.StatusOK, gin.H{"marked_quota_exceeded": true})
 }
-
-// BuildProviderPools 从 DB 读所有 provider 的 enabled key,
-// 构造 provider_name → *keypool.Pool 的映射
-// Authenticator 启动时调一次,之后 reload 也会调
-func BuildProviderPools(ctx context.Context, store ProviderKeyStore, poolCfg keypool.Config) (map[string]*keypool.Pool, error) {
-	if store == nil {
-		return map[string]*keypool.Pool{}, nil
-	}
-	// 先拿所有 provider(按名字分组)
-	rows, err := store.List(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-	byProvider := map[string][]string{}
-	for _, r := range rows {
-		if !r.Enabled {
-			continue
-		}
-		byProvider[r.ProviderName] = append(byProvider[r.ProviderName], r.KeyHash)
-	}
-	pools := make(map[string]*keypool.Pool, len(byProvider))
-	for name, keys := range byProvider {
-		if len(keys) == 0 {
-			continue
-		}
-		pools[name] = keypool.BuildPoolFromStrings(name, keys, poolCfg)
-	}
-	return pools, nil
-}
-
-// 防止引入但没用
-var _ = errors.New

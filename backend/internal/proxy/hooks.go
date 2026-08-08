@@ -6,26 +6,13 @@ import (
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/usage"
 )
 
-// UsageRecord 用量记录(简化版,P8 接 usage.Collector)
-type UsageRecord struct {
-	TraceID      string
-	GatewayKeyID string
-	ProviderName string
-	ModelID      string
-	Protocol     string
-	// P47: 计费来源(token_plan / api / free)— 冗余存方便按维度聚合统计
-	BillingSource string
-	InputTokens   int
-	OutputTokens  int
-	TotalTokens   int
-	Cost          float64
-	LatencyMs     int64
-	IsStream      bool
-	StatusCode    int
-	ErrorType     string
-}
+// UsageRecord 用量记录 — type alias 指向 usage.Record
+// 单一职责:数据结构归 usage 包所有,proxy 只引用。消除 usage→proxy 反向依赖
+// (之前 UsageRecord 定义在 proxy,usage/adapter.go 反向 import proxy,违反低耦合)
+type UsageRecord = usage.Record
 
 // UsageRecorder 用量记录钩子
 // P5 阶段用 NoopUsageRecorder,P8 接入 usage.Collector

@@ -142,6 +142,10 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		TokenRecorder: newAuthTokenRecorder(authn), // P13: TPM 计数(若 auth 启用)
 		Authenticator: authn,                       // P19: Provider 绑定检查
 		AccessLog:     accessR,                     // P67: 接入日志
+		// P-quota-checker: 注入 quotacheck 探测 (proxy 不直接依赖 quotacheck 包)
+		QuotaChecker: proxy.CheckQuotaFunc(func(ctx context.Context, providerName, baseURL string, k *keypool.Key) (bool, error) {
+			return quotacheck.CheckQuota(ctx, providerName, baseURL, k)
+		}),
 		MaxRetry:      cfg.Retry.MaxAttempts,
 		// 流式写 deadline 续期预算 — 与 http.Server.WriteTimeout 同源,
 		// 流式场景下按 chunk 续期成空闲超时(非流式仍是绝对上限)

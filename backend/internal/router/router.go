@@ -71,6 +71,10 @@ func WithAllowedModels(models []string) RouteOption {
 }
 
 // Router 持有所有路由决策所需的状态
+// 注:Router.manager 保持 *provider.Manager 具体类型 — proxy 通过 Router.Manager()
+// 拿它取 Provider 实例(发请求用),Router 是 provider 相关协调者,依赖是合理的。
+// 这不算违反低耦合:是单向依赖,非循环/反向。强行接口化会让 Router 同时持接口+
+// 具体两个 manager(Method 冲突),反而更糟。
 type Router struct {
 	mu       sync.RWMutex
 	logger   *zap.Logger
