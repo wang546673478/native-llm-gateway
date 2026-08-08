@@ -239,8 +239,11 @@ func (m *Manager) injectOneCallback(providerName string, p *keypool.Pool) {
 		)
 	}
 	// 把已经是 QUOTA_EXCEEDED 的 key 重新入堆(防止 reload 丢失状态)
+	// F1: MutateKey 锁内读 Status(避免与请求路径写竞态)
 	for _, k := range p.KeyPtrs() {
-		if k.Status == keypool.KeyStatusQuotaExceeded {
+		isQE := false
+		p.MutateKey(k, func(kk *keypool.Key) { isQE = kk.Status == keypool.KeyStatusQuotaExceeded })
+		if isQE {
 			m.logger.Info("reinjecting quota_exceeded key after pool reload",
 				zap.String("provider", providerName),
 				zap.String("key_id", k.ID),
@@ -283,7 +286,9 @@ func (m *Manager) rescanExisting() {
 		}
 		seen[pool] = true
 		for _, k := range pool.KeyPtrs() {
-			if k.Status == keypool.KeyStatusQuotaExceeded {
+			isQE := false // F1: 锁内读 Status,避免与请求路径写竞态
+			pool.MutateKey(k, func(kk *keypool.Key) { isQE = kk.Status == keypool.KeyStatusQuotaExceeded })
+			if isQE {
 				m.logger.Info("cold-start: scheduling existing quota_exceeded key",
 					zap.String("provider", name),
 					zap.String("key_id", k.ID),
@@ -326,7 +331,14 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 	if k == nil {
 		return
 	}
-	fromStatus := string(k.Status)
+	// F1 竞态修复:锁外读 k.Status / k.QuotaProbeAttempts(KeyPtrs() 已放锁)与请求
+	// 路径 p.mu 下写竞态。在 MutateKey 锁内快照这两个字段供下方 switch 使用。
+	fromStatus := ""
+	attemptsNow := 0
+	pool.MutateKey(k, func(kk *keypool.Key) {
+		fromStatus = string(kk.Status)
+		attemptsNow = kk.QuotaProbeAttempts
+	})
 
 	switch result {
 	case ResultRestored:
@@ -354,15 +366,15 @@ func (m *Manager) handleProbeResult(providerName, keyID string, result Result) {
 			zap.String("key_id", keyID),
 		)
 		// P-no-disabled: auth 失败同样不禁用 — 保持 QE 重调度,换 key 后自动恢复
-		backoff := m.backoff(k.QuotaProbeAttempts + 1)
+		backoff := m.backoff(attemptsNow + 1)
 		nextAt := m.now().Add(m.jitter(backoff, m.cfg.ProbeJitterPct))
-		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, k.QuotaProbeAttempts+1)
+		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, attemptsNow+1)
 
 	case ResultTransportError:
 		// 网络问题,不消耗 attempt
-		backoff := m.backoff(k.QuotaProbeAttempts + 1) // 比 still_exhausted 多 1
+		backoff := m.backoff(attemptsNow + 1) // 比 still_exhausted 多 1
 		nextAt := m.now().Add(m.jitter(backoff, m.cfg.ProbeJitterPct))
-		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, k.QuotaProbeAttempts)
+		m.sched.scheduleKey(providerName, keyID, nextAt, backoff, attemptsNow)
 	}
 }
 
@@ -484,8 +496,13 @@ func (m *Manager) runProbe(ctx context.Context, it *probeItem) {
 	if k == nil {
 		return
 	}
-	// 只探测 QuotaExceeded key(其他状态跳过)
-	if k.Status != keypool.KeyStatusQuotaExceeded {
+	// 只探测 QuotaExceeded key(其他状态跳过)。F1 竞态修复:MutateKey 锁内读
+	// Status,避免锁外读(KeyPtrs() 已放锁)与请求路径写竞态。
+	isQE := false
+	pool.MutateKey(k, func(kk *keypool.Key) {
+		isQE = kk.Status == keypool.KeyStatusQuotaExceeded
+	})
+	if !isQE {
 		return
 	}
 
@@ -618,13 +635,15 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 				// 恢复),poll 顺手恢复 — 否则 dashboard 一直显示 COOLING
 				// (2026-08-06 实测:key-1 显示冷却 7.5 小时,实际早已过期,
 				// 一个请求就刷新回 ACTIVE)
-				if k.Status == keypool.KeyStatusCooling && m.now().After(k.CoolingUntil) {
-					// 锁内改(与请求路径 Report* 的写一致),避免数据竞争
-					pool.MutateKey(k, func(kk *keypool.Key) {
+				// F2 竞态修复:read+decide+flip 收进 single MutateKey("锁内 re-check
+				// Status+CoolingUntil"),避免锁外读到过期值后把仍 429 冷却的 key
+				// 硬重置 ACTIVE、绕过冷却。
+				pool.MutateKey(k, func(kk *keypool.Key) {
+					if kk.Status == keypool.KeyStatusCooling && m.now().After(kk.CoolingUntil) {
 						kk.Status = keypool.KeyStatusActive
 						kk.UpdatedAt = m.now()
-					})
-				}
+					}
+				})
 				bal, err := balancer.FetchBalance(ctx, baseURL, k)
 				if err != nil {
 					m.logger.Warn("poll balance err",
@@ -648,10 +667,12 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 					// 无额度:连续 2 轮确认才标 QE;单次瞬态 0 保留上次已知余额。
 					// streak 读改写收敛到 keypool 锁内(MutateKey),消除与请求路径的数据竞争
 					markQE := false
+					wasActive := false // 锁内读 Status 供下方 metric 判定(不再锁外重读)
 					pool.MutateKey(k, func(kk *keypool.Key) {
 						if kk.Status != keypool.KeyStatusActive {
 							return // 非 ACTIVE(QE/COOLING):不写不标,保留旧值
 						}
+						wasActive = true
 						kk.QuotaZeroStreak++
 						if kk.QuotaZeroStreak >= 2 {
 							kk.Remaining = bal.Raw
@@ -665,7 +686,7 @@ func (m *Manager) pollAllBalancers(ctx context.Context) {
 							zap.Float64("remaining", bal.Raw))
 						pool.ReportQuotaExceeded(k)
 						m.metricsPollInc(vendorName, "exhausted")
-					} else if k.Status == keypool.KeyStatusActive {
+					} else if wasActive {
 						m.metricsPollInc(vendorName, "ok")
 					}
 				} else {

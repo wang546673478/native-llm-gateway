@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,7 @@ type Server struct {
 	router   *router.Router
 	engine   *proxy.Engine
 	pools    map[string]*keypool.Pool
+	poolsMu  sync.RWMutex // F4: 保护 s.pools 字段读(s.pools[name])/写(= newPools)
 	auth     *auth.Authenticator
 	usageC   *usage.Collector
 	usageR   *usage.Repository
@@ -204,6 +206,15 @@ func injectPools(manager *provider.Manager, pools map[string]*keypool.Pool, logg
 		p.SetPool(pool)
 		logger.Info("pool injected", zap.String("provider", name))
 	}
+}
+
+// poolFor 读 s.pools[name](F4 竞态修复:poolsMu RLock,与 ReloadProviderPool 的
+// s.pools=newPools 写同步;admin list 闭包用它替代裸 s.pools[providerName] 读)。
+func (s *Server) poolFor(providerName string) (*keypool.Pool, bool) {
+	s.poolsMu.RLock()
+	defer s.poolsMu.RUnlock()
+	pool, ok := s.pools[providerName]
+	return pool, ok
 }
 
 // buildKeyPools 为每个 enabled Provider 构造一个 KeyPool
@@ -749,7 +760,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	pkHandler := auth.NewProviderKeysHandler(s.db, s.ReloadProviderPool)
 	// P68: 注入 status lookup,让 list endpoint 返回 key 运行时状态
 	pkHandler.SetKeyStatusLookup(func(providerName, keyID string) string {
-		pool, ok := s.pools[providerName]
+		pool, ok := s.poolFor(providerName)
 		if !ok {
 			return ""
 		}
@@ -762,7 +773,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	})
 	// P-quota-balance: 注入 live key lookup,让 list endpoint 返回 Remaining / LastPolledAt
 	pkHandler.SetPoolLookup(func(providerName, keyID string) (*keypool.Key, bool) {
-		pool, ok := s.pools[providerName]
+		pool, ok := s.poolFor(providerName)
 		if !ok {
 			return nil, false
 		}
@@ -775,7 +786,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	})
 	// P68: 注入 quota mark func(手动把 key 标 QUOTA_EXCEEDED)
 	pkHandler.SetQuotaMarkFunc(func(providerName, keyID string) {
-		pool, ok := s.pools[providerName]
+		pool, ok := s.poolFor(providerName)
 		if !ok {
 			return
 		}
@@ -992,7 +1003,9 @@ func (s *Server) ReloadProviderPool(providerName string) {
 			}
 		}
 		// 整表原子替换:server / router / quotacheck 三者都指到新 map
+		s.poolsMu.Lock()
 		s.pools = newPools
+		s.poolsMu.Unlock()
 		if s.router != nil {
 			s.router.SetPools(newPools)
 		}
@@ -1028,7 +1041,9 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		}
 	}
 	// 整表原子替换(不再就地写 s.pools,防并发 map 崩溃)
+	s.poolsMu.Lock()
 	s.pools = newPools
+	s.poolsMu.Unlock()
 	if s.router != nil {
 		s.router.SetPools(newPools)
 	}

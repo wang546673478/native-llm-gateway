@@ -192,16 +192,16 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 	// 按 name 确定性排序:同 tier 内稳定、可解释;想要自定义顺序配显式
 	// catch_all providers 列表(如 ["minimax", "mimo-token-plan"])
 	sort.Slice(routes, func(i, j int) bool { return routes[i].Name < routes[j].Name })
-	keyCandidates := buildKeyCandidates(routes, r.pools)
+	pools := r.poolsSnapshot() // F4: RLock 快照,与 SetPools 写同步
+	keyCandidates := buildKeyCandidates(routes, pools)
 	return &RouteIterator{
 		alias:          aliasName,
 		candidates:     keyCandidates,
-		pools:          r.pools,
+		pools:          pools,
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
 }
-
 // sliceContains 简单 contains helper(避免引入 slices 依赖的版本问题)
 func sliceContains(list []string, v string) bool {
 	for _, s := range list {
@@ -264,12 +264,12 @@ func (r *Router) routeAliasRule(ctx context.Context, rule AliasConfig, aliasName
 	if err != nil {
 		return nil, err
 	}
-	keyCandidates := buildKeyCandidates(ordered, r.pools)
+	keyCandidates := buildKeyCandidates(ordered, r.poolsSnapshot())
 
 	return &RouteIterator{
 		alias:          aliasName,
 		candidates:     keyCandidates,
-		pools:          r.pools,
+		pools:          r.poolsSnapshot(),
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
@@ -304,12 +304,12 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 	}
 
 	// P64: auto-discovery 路径也按 tier 跨 provider 拉平
-	keyCandidates := buildKeyCandidates(candidates, r.pools)
+	keyCandidates := buildKeyCandidates(candidates, r.poolsSnapshot())
 
 	return &RouteIterator{
 		alias:          modelID,
 		candidates:     keyCandidates,
-		pools:          r.pools,
+		pools:          r.poolsSnapshot(),
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
@@ -603,11 +603,25 @@ func (r *Router) CatchAllConfig() *AliasConfig {
 func (r *Router) Manager() provider.ProviderLookup { return r.manager }
 
 // Pool 返回指定 Provider 的 KeyPool(Proxy 用来 ReportSuccess/ReportRateLimit)
-func (r *Router) Pool(providerName string) *keypool.Pool { return r.pools[providerName] }
+// F4 竞态修复:读 r.pools 字段取 RLock(RWMutex),与 SetPool/SetPools 写同步。
+func (r *Router) Pool(providerName string) *keypool.Pool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.pools[providerName]
+}
+
+// poolsSnapshot 返回当前 pool map 的引用(RLock 读),供 routing 路径一次性快照。
+func (r *Router) poolsSnapshot() map[string]*keypool.Pool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.pools
+}
 
 // SetPool 注入单 provider 的 Pool(仅供启动时/测试;热重载请用 SetPools 整表替换,
 // 避免就地写共享 map 造成与 quotacheck 轮询的并发 map 崩溃)
 func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.pools == nil {
 		r.pools = make(map[string]*keypool.Pool)
 	}
@@ -618,5 +632,7 @@ func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
 // ReloadProviderPool 热重载时用它把整张新 map 指给 Router —— 旧 map 永不就地变,
 // 并发读方持旧 map 快照也安全,消除了就地写共享 map 的并发崩溃。
 func (r *Router) SetPools(newMap map[string]*keypool.Pool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.pools = newMap
 }
