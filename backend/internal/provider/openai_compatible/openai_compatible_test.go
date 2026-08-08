@@ -407,9 +407,9 @@ func TestParseRetryAfter(t *testing.T) {
 		"junk": 0,
 	}
 	for in, want := range cases {
-		got := parseRetryAfter(in)
+		got := provider.ParseRetryAfter(in)
 		if got != want {
-			t.Errorf("parseRetryAfter(%q) = %v, want %v", in, got, want)
+			t.Errorf("provider.ParseRetryAfter(%q) = %v, want %v", in, got, want)
 		}
 	}
 }

@@ -97,7 +97,7 @@ func newOpenAI(cfg provider.ProviderConfig, regName string) (provider.Provider, 
 			ChatPath:      "",            // 端点已含 /v1 → 默认 /v1/chat/completions
 			ResponsesPath: responsesPath, // 原生支持 Responses API,端点已含 /v1 → /responses
 			StreamUsage:   true,          // 流式末尾带 usage,网关才能记账
-			Pool:          toPool(cfg.Pool),
+			Pool:          provider.ToPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil
@@ -143,12 +143,3 @@ func init() {
 }
 
 // toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
-func toPool(p interface{}) *keypool.Pool {
-	if p == nil {
-		return nil
-	}
-	if pp, ok := p.(*keypool.Pool); ok {
-		return pp
-	}
-	return nil
-}

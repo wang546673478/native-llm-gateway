@@ -75,7 +75,7 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			// P-responses: endpoint 无 /v1 → 透传 /v1/responses(官方原生支持,Codex 兼容)
 			ResponsesPath: "/v1/responses",
 			StreamUsage:   true, // 让流式末尾带 usage,便于 Gateway 端记账
-			Pool:          toPool(cfg.Pool),
+			Pool:          provider.ToPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil
@@ -118,12 +118,3 @@ func init() {
 }
 
 // toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
-func toPool(p interface{}) *keypool.Pool {
-	if p == nil {
-		return nil
-	}
-	if pp, ok := p.(*keypool.Pool); ok {
-		return pp
-	}
-	return nil
-}

@@ -103,7 +103,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
+		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
 		if err != nil {
 			return nil, &provider.ProviderError{
 				ProviderName: b.cfg.Name,
@@ -177,7 +177,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	}
 
 	if httpResp.StatusCode >= 400 {
-		retryAfter := parseRetryAfter(httpResp.Header.Get("Retry-After"))
+		retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
 		// P49: 带 body 检测 quota exceeded(401/403 + body 含 quota 关键字 → 升级为 quota_exceeded,触发 failover)
 		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 
@@ -228,7 +228,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol("openai") // P-provider-vendor: 按本包协议过滤
+		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
 		if err != nil {
 			return nil, nil, &provider.ProviderError{
 				ProviderName: b.cfg.Name,
@@ -405,7 +405,7 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 		return err
 	}
 	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.AcquireForProtocol("openai"); err == nil { // P-provider-vendor: 按本包协议过滤
+		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)); err == nil { // P-provider-vendor: 按本包协议过滤
 			req.Header.Set("Authorization", "Bearer "+k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
 		}
@@ -536,13 +536,3 @@ func injectStreamUsage(body []byte) []byte {
 
 // parseRetryAfter 解析 Retry-After header(秒数或 HTTP 日期)
 // 简化:只支持秒数
-func parseRetryAfter(v string) time.Duration {
-	if v == "" {
-		return 0
-	}
-	var secs int
-	if _, err := fmt.Sscanf(v, "%d", &secs); err != nil {
-		return 0
-	}
-	return time.Duration(secs) * time.Second
-}

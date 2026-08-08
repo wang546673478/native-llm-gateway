@@ -69,7 +69,7 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Name:     name,
 			Endpoint: cfg.Endpoint,
 			Timeout:  cfg.Timeout,
-			Pool:     toPool(cfg.Pool),
+			Pool:     provider.ToPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil
@@ -99,15 +99,6 @@ func init() {
 }
 
 // toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
-func toPool(p interface{}) *keypool.Pool {
-	if p == nil {
-		return nil
-	}
-	if pp, ok := p.(*keypool.Pool); ok {
-		return pp
-	}
-	return nil
-}
 
 // P-provider-vendor: openai 协议实现在 openai.go(注册名 "minimax-openai")。
 // 官方文档特性(2026-08-04 全量调研,Anthropic 面):

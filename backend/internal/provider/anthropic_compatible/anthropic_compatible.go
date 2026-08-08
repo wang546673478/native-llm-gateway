@@ -144,7 +144,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol("anthropic")
+		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
 		if err != nil {
 			return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
@@ -186,7 +186,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		// 1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded;P-quota-guard 见 classifyUpstream
 		errType, msg := b.classifyUpstream(httpResp.StatusCode, httpResp.Header, respBody, key)
 		if errType == provider.ErrorTypeRateLimit {
-			retryAfter := parseRetryAfter(httpResp.Header.Get("Retry-After"))
+			retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
 			b.cfg.Pool.ReportRateLimit(key, retryAfter)
 			if !retried {
 				retried = true
@@ -238,7 +238,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol("anthropic")
+		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
 		if err != nil {
 			return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
@@ -292,7 +292,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			// P49: 带 body 检测 quota + P-quota-guard 降级
 			errType, msg := b.classifyUpstream(httpResp.StatusCode, httpResp.Header, respBody, key)
 			if errType == provider.ErrorTypeRateLimit {
-				retryAfter := parseRetryAfter(httpResp.Header.Get("Retry-After"))
+				retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
 				b.cfg.Pool.ReportRateLimit(key, retryAfter)
 				if !retried {
 					retried = true
@@ -512,7 +512,7 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 		return err
 	}
 	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.AcquireForProtocol("anthropic"); err == nil {
+		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic)); err == nil {
 			req.Header.Set("x-api-key", k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
 		}
@@ -594,15 +594,4 @@ func parseAnthropicUsage(body []byte) *provider.Usage {
 		},
 	}
 	return u
-}
-
-func parseRetryAfter(v string) time.Duration {
-	if v == "" {
-		return 0
-	}
-	var secs int
-	if _, err := fmt.Sscanf(v, "%d", &secs); err != nil {
-		return 0
-	}
-	return time.Duration(secs) * time.Second
 }

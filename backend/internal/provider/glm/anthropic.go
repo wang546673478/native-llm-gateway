@@ -50,7 +50,7 @@ func NewAnthropic(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Name:     anthropicName,
 			Endpoint: cfg.Endpoint,
 			Timeout:  cfg.Timeout,
-			Pool:     toPool(cfg.Pool),
+			Pool:     provider.ToPool(cfg.Pool),
 		}),
 		cfg: cfg,
 	}, nil
