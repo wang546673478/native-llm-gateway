@@ -21,7 +21,9 @@ cd "$(dirname "$0")/.."   # 仓库根
 
 BIN="bin/gateway"
 BACKUP_DIR="bin/backups"
-PORT="${GATEWAY_PORT:-8080}"
+# 端口默认读 config.yaml 的 server.port(唯一真相),GATEWAY_PORT 可覆盖
+DEFAULT_PORT="$(awk '/^  port:/{print $2}' config.yaml 2>/dev/null | head -1)"
+PORT="${GATEWAY_PORT:-${DEFAULT_PORT:-8080}}"
 SVC="llm-gateway"
 
 log() { echo -e "\033[1;32m[gateway-rollback]\033[0m $*"; }

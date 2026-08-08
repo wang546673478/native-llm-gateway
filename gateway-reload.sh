@@ -21,11 +21,14 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BIN="bin/gateway"
-PORT="${GATEWAY_PORT:-8080}"
+# 端口默认读 config.yaml 的 server.port(唯一真相),GATEWAY_PORT 可覆盖
+DEFAULT_PORT="$(awk '/^  port:/{print $2}' config.yaml 2>/dev/null | head -1)"
+PORT="${GATEWAY_PORT:-${DEFAULT_PORT:-8080}}"
 
 echo "[1/3] 编译新二进制..."
-go -C backend build -o "../${BIN}.new" ./cmd/gateway
-mv "${BIN}.new" "${BIN}"
+# 用 make build 作为唯一编译源(flags 单一来源,避免此处与 Makefile/deploy 漂移
+# 产生不同二进制 —— 此前这里裸 go build 丢了 -trimpath/-ldflags)。
+make build
 
 echo "[2/3] systemctl restart llm-gateway(优雅排空由 systemd 完成)..."
 sudo systemctl restart llm-gateway

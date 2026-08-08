@@ -20,7 +20,10 @@ cd "$(dirname "$0")/.."   # 仓库根
 BIN="bin/gateway"
 NEWBIN="bin/gateway.new"
 BACKUP_DIR="bin/backups"
-PORT="${GATEWAY_PORT:-8080}"
+# 端口默认读 config.yaml 的 server.port(唯一真相),而非硬编码 8080;
+# GATEWAY_PORT 环境变量可覆盖。
+DEFAULT_PORT="$(awk '/^  port:/{print $2}' config.yaml 2>/dev/null | head -1)"
+PORT="${GATEWAY_PORT:-${DEFAULT_PORT:-8080}}"
 SVC="llm-gateway"
 SKIP_TEST="${SKIP_TEST:-0}"
 
