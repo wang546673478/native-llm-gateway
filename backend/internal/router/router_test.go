@@ -814,9 +814,9 @@ func TestRouter_CatchAllAuto_DeterministicOrder(t *testing.T) {
 			Status: keypool.KeyStatusActive, BillingSource: tier, CreatedAt: now, UpdatedAt: now}
 	}
 	pools := map[string]*keypool.Pool{
-		"minimax":                  keypool.NewPool("minimax", []*keypool.Key{mkKey("minimax", "token_plan")}, nil, keypool.Config{}),
+		"minimax":                   keypool.NewPool("minimax", []*keypool.Key{mkKey("minimax", "token_plan")}, nil, keypool.Config{}),
 		"mimo-token-plan-anthropic": keypool.NewPool("mimo-token-plan-anthropic", []*keypool.Key{mkKey("mimo-token-plan-anthropic", "token_plan")}, nil, keypool.Config{}),
-		"deepseek-anthropic":       keypool.NewPool("deepseek-anthropic", []*keypool.Key{mkKey("deepseek-anthropic", "api")}, nil, keypool.Config{}),
+		"deepseek-anthropic":        keypool.NewPool("deepseek-anthropic", []*keypool.Key{mkKey("deepseek-anthropic", "api")}, nil, keypool.Config{}),
 	}
 	r := NewRouter(zap.NewNop(), mgr, pools, Config{
 		Aliases:  map[string]AliasConfig{},
@@ -872,10 +872,10 @@ func TestBuildKeyCandidates_MixedTierPool_BlockBillingIntersects(t *testing.T) {
 	}
 	shared := keypool.NewPool("mimo", []*keypool.Key{mkKey("token_plan"), mkKey("api")}, nil, keypool.Config{})
 	pools := map[string]*keypool.Pool{
-		"mimo":                        shared,
-		"mimo-token-plan":             shared,
-		"mimo-anthropic":              shared,
-		"mimo-token-plan-anthropic":   shared,
+		"mimo":                      shared,
+		"mimo-token-plan":           shared,
+		"mimo-anthropic":            shared,
+		"mimo-token-plan-anthropic": shared,
 	}
 	routes := []ProviderRoute{
 		{Name: "mimo-anthropic", Model: "mimo-v2.5", BillingSource: "api"},

@@ -13,14 +13,15 @@
 //   - 未文档化端点,官方不保证稳定;失效可降级为错误码驱动(402/429),同 minimax 先例
 //
 // 实测响应 schema(2026-08-07,真实账号):
-//   usage:
-//     {"code":0,"message":"","data":{"usage":{"percent":0.00,"items":[
-//       {"name":"plan_total_token","used":0,"limit":11000000000,"percent":0.00},
-//       {"name":"compensation_total_token","used":0,"limit":0,"percent":0}]}}}
-//   balance:
-//     {"code":0,"message":"","data":{"balance":"5.00","frozenBalance":"0.00",
-//      "currency":"CNY","giftBalance":"5.00","cashBalance":"0.00"}}
-//   balance 字段是字符串;percent 是 0~1 小数。
+//
+//	usage:
+//	  {"code":0,"message":"","data":{"usage":{"percent":0.00,"items":[
+//	    {"name":"plan_total_token","used":0,"limit":11000000000,"percent":0.00},
+//	    {"name":"compensation_total_token","used":0,"limit":0,"percent":0}]}}}
+//	balance:
+//	  {"code":0,"message":"","data":{"balance":"5.00","frozenBalance":"0.00",
+//	   "currency":"CNY","giftBalance":"5.00","cashBalance":"0.00"}}
+//	balance 字段是字符串;percent 是 0~1 小数。
 //
 // 决策:
 //   - 按 key.BillingSource 分端点:token_plan key → usage 端点(套餐剩余),

@@ -28,7 +28,7 @@
 //     禁止以 API 调用形式用于自动化脚本和自定义应用后端;夜间消耗 0.8x
 //  11. Web Search 按次计费(¥16/1000 次),不含在 token 价内
 //  12. 定价(¥/M tokens,国内):mimo-v2.5-pro cache命中 ¥0.025 / 未命中 ¥3.00 / 输出 ¥6.00;
-//      mimo-v2.5 cache命中 ¥0.02 / 未命中 ¥1.00 / 输出 ¥2.00(÷1000 进 cost_per_1k)
+//     mimo-v2.5 cache命中 ¥0.02 / 未命中 ¥1.00 / 输出 ¥2.00(÷1000 进 cost_per_1k)
 //
 // 实现策略:继承 openai_compatible.Base,端点已含 /v1 → ChatPath 用默认
 // /v1/chat/completions,ResponsesPath 覆盖为 /responses;启用 StreamUsage
@@ -94,9 +94,9 @@ func newOpenAI(cfg provider.ProviderConfig, regName string) (provider.Provider, 
 			Name:          regName,
 			Endpoint:      cfg.Endpoint,
 			Timeout:       cfg.Timeout,
-			ChatPath:      "",          // 端点已含 /v1 → 默认 /v1/chat/completions
+			ChatPath:      "",            // 端点已含 /v1 → 默认 /v1/chat/completions
 			ResponsesPath: responsesPath, // 原生支持 Responses API,端点已含 /v1 → /responses
-			StreamUsage:   true,        // 流式末尾带 usage,网关才能记账
+			StreamUsage:   true,          // 流式末尾带 usage,网关才能记账
 			Pool:          toPool(cfg.Pool),
 		}),
 		cfg: cfg,

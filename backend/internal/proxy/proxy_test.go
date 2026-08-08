@@ -562,9 +562,9 @@ func (exhaustedBalancer) FetchBalance(ctx context.Context, baseURL string, k *ke
 	return quotacheck.Balance{HasQuota: false}, nil
 }
 
-// 1) 网络类层内穷尽 → 失败返回,不降档(不变式)
-//    provider mm(token_plan) 2 把 key 都返回 connection 错误;
-//    provider ds(api) healthy → 最终必须 502/超时,请求不能到 ds
+//  1. 网络类层内穷尽 → 失败返回,不降档(不变式)
+//     provider mm(token_plan) 2 把 key 都返回 connection 错误;
+//     provider ds(api) healthy → 最终必须 502/超时,请求不能到 ds
 func TestProxy_NetworkExhaustedInTier_FailsWithoutDowngrade(t *testing.T) {
 	connErr := &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
@@ -588,8 +588,8 @@ func TestProxy_NetworkExhaustedInTier_FailsWithoutDowngrade(t *testing.T) {
 	}
 }
 
-// 2) 额度类全层穷尽 → 降档 api 层成功
-//    mm(token_plan) 返回 quota_exceeded;ds(api) healthy → 200,provider=ds
+//  2. 额度类全层穷尽 → 降档 api 层成功
+//     mm(token_plan) 返回 quota_exceeded;ds(api) healthy → 200,provider=ds
 func TestProxy_QuotaExhausted_DowngradesToApi(t *testing.T) {
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		err: &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusPaymentRequired, ErrorType: provider.ErrorTypeQuotaExceeded, Message: "quota exceeded"}}
@@ -612,11 +612,11 @@ func TestProxy_QuotaExhausted_DowngradesToApi(t *testing.T) {
 	}
 }
 
-// 3) 换 key 重试:key-1 connection 失败 → 同 provider key-2 成功(不走 failover)
-//    mm 2 把 key:key-1 connection 错误,key-2 healthy → 200,provider=mm
+//  3. 换 key 重试:key-1 connection 失败 → 同 provider key-2 成功(不走 failover)
+//     mm 2 把 key:key-1 connection 错误,key-2 healthy → 200,provider=mm
 func TestProxy_RetryWithSecondKey(t *testing.T) {
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
-		errByKey: map[string]error{"1": &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}},
+		errByKey:   map[string]error{"1": &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}},
 		respStatus: 200, respBody: `{"id":"mm-ok"}`}
 	e, _ := buildEngineMulti(t, []*fakeProvider{mm}, map[string]*keypool.Pool{
 		"mm": mkPool("mm", []string{"1", "2"}, "token_plan"),
@@ -638,9 +638,9 @@ func TestProxy_RetryWithSecondKey(t *testing.T) {
 	}
 }
 
-// 4) 主动查询失败 → 按未耗尽:继续层内尝试(不降档)
-//    mm(token_plan, 1 把 key connection 失败,CheckQuota 返回 error)
-//    ds(api) healthy → 请求失败返回,不进 ds
+//  4. 主动查询失败 → 按未耗尽:继续层内尝试(不降档)
+//     mm(token_plan, 1 把 key connection 失败,CheckQuota 返回 error)
+//     ds(api) healthy → 请求失败返回,不进 ds
 func TestProxy_CheckQuotaError_StaysInTier(t *testing.T) {
 	// 注册一个 balance 查询必失败的 balancer(查询失败 = 未知 → 按未耗尽处理)
 	quotacheck.RegisterBalancer("mm-qerr", errBalancer{})
@@ -671,8 +671,8 @@ func TestProxy_CheckQuotaError_StaysInTier(t *testing.T) {
 	}
 }
 
-// 5) 同层换 provider:mm 全网络失败 → 同层 kimi(token_plan) 成功
-//    两个 token_plan provider + 一个 api provider → 200,provider=kimi
+//  5. 同层换 provider:mm 全网络失败 → 同层 kimi(token_plan) 成功
+//     两个 token_plan provider + 一个 api provider → 200,provider=kimi
 func TestProxy_SameTierNextProvider(t *testing.T) {
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		err: &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}}
@@ -704,8 +704,8 @@ func TestProxy_SameTierNextProvider(t *testing.T) {
 	}
 }
 
-// 6) 不可重试错误直接失败:invalid_request 不重试不降档(现有语义回归)
-//    mm 返 400 invalid_request;ds(api) healthy → 400 透传,请求不能到 ds
+//  6. 不可重试错误直接失败:invalid_request 不重试不降档(现有语义回归)
+//     mm 返 400 invalid_request;ds(api) healthy → 400 透传,请求不能到 ds
 func TestProxy_InvalidRequest_NoRetry(t *testing.T) {
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		err: &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusBadRequest, ErrorType: provider.ErrorTypeInvalidRequest, Message: "bad model"}}
@@ -728,8 +728,8 @@ func TestProxy_InvalidRequest_NoRetry(t *testing.T) {
 	}
 }
 
-// 7) 审阅修复 FIX 4:主动查询确认耗尽(has=false)→ 额度证据 → 降档 api 成功
-//    mm(token_plan) 网络类失败 + balancer 返回 HasQuota=false;ds(api) healthy → 200
+//  7. 审阅修复 FIX 4:主动查询确认耗尽(has=false)→ 额度证据 → 降档 api 成功
+//     mm(token_plan) 网络类失败 + balancer 返回 HasQuota=false;ds(api) healthy → 200
 func TestProxy_CheckQuotaConfirmedExhausted_DowngradesToApi(t *testing.T) {
 	quotacheck.RegisterBalancer("mm-exhausted", exhaustedBalancer{})
 
@@ -759,11 +759,11 @@ func TestProxy_CheckQuotaConfirmedExhausted_DowngradesToApi(t *testing.T) {
 	}
 }
 
-// 8) 审阅修复 FIX 1:auth(403)错误也走换 key 重试(决策表 row 3)
-//    mm 2 把 key:key-1 auth 403,key-2 healthy → 200 经 key-2,不走 failover
+//  8. 审阅修复 FIX 1:auth(403)错误也走换 key 重试(决策表 row 3)
+//     mm 2 把 key:key-1 auth 403,key-2 healthy → 200 经 key-2,不走 failover
 func TestProxy_AuthError_SwapsKey(t *testing.T) {
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
-		errByKey: map[string]error{"1": &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusForbidden, ErrorType: provider.ErrorTypeAuth, Message: "invalid api key"}},
+		errByKey:   map[string]error{"1": &provider.ProviderError{ProviderName: "mm", StatusCode: http.StatusForbidden, ErrorType: provider.ErrorTypeAuth, Message: "invalid api key"}},
 		respStatus: 200, respBody: `{"id":"mm-ok"}`}
 	ds := &fakeProvider{name: "ds", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		respStatus: 200, respBody: `{"id":"ds-ok"}`}
@@ -790,8 +790,8 @@ func TestProxy_AuthError_SwapsKey(t *testing.T) {
 	}
 }
 
-// 9) 审阅修复 FIX 2:maxRetry 封顶不截断层内降档(每层安全阀)
-//    3 个 token_plan provider 全 quota_exceeded + api healthy,maxRetry=3 → 200 降档
+//  9. 审阅修复 FIX 2:maxRetry 封顶不截断层内降档(每层安全阀)
+//     3 个 token_plan provider 全 quota_exceeded + api healthy,maxRetry=3 → 200 降档
 func TestProxy_MaxRetryDoesNotBlockQuotaDowngrade(t *testing.T) {
 	mkQuotaProvider := func(name string) *fakeProvider {
 		return &fakeProvider{name: name, proto: provider.ProtocolOpenAI, models: []string{"m"},
@@ -833,7 +833,7 @@ func TestProxy_MaxRetryDoesNotBlockQuotaDowngrade(t *testing.T) {
 	}
 }
 
-// 10) 审阅修复 FIX 3:白名单 skip 不阻断层推进(旧语义回归)
+//  10. 审阅修复 FIX 3:白名单 skip 不阻断层推进(旧语义回归)
 //     token_plan 候选被白名单跳过、api 候选在白名单内 → 200(不能 403 整层判死)
 func TestProxy_WhitelistSkip_AdvancesTier(t *testing.T) {
 	gin.SetMode(gin.ReleaseMode)
@@ -876,7 +876,7 @@ func TestProxy_WhitelistSkip_AdvancesTier(t *testing.T) {
 	}
 }
 
-// 11) 第二轮审阅 I-1:换 key 后二次尝试返回额度类错误 → 证据不能丢(网络源)
+//  11. 第二轮审阅 I-1:换 key 后二次尝试返回额度类错误 → 证据不能丢(网络源)
 //     mm(token_plan) key-1 connection 错 → 换 key-2 → key-2 quota_exceeded;
 //     ds(api) healthy → 200 经 ds(swap 尝试的额度证据驱动降档)
 func TestProxy_SwapQuotaError_DowngradesToApi(t *testing.T) {
@@ -907,7 +907,7 @@ func TestProxy_SwapQuotaError_DowngradesToApi(t *testing.T) {
 	}
 }
 
-// 12) 第二轮审阅 I-2:降档后每层重置 maxRetry 预算(自然切换路径)
+//  12. 第二轮审阅 I-2:降档后每层重置 maxRetry 预算(自然切换路径)
 //     tp 2 候选全 quota_exceeded(消耗 2 次 < maxRetry=3,经自然路径跨层)+
 //     api 2 候选(api-a 错、api-b healthy)→ 200 经 api-b
 //     (不重置时 api 层只剩 maxRetry-2=1 次机会,api-b 永远轮不到)
@@ -953,14 +953,14 @@ func TestProxy_DowngradeResetsRetryBudget(t *testing.T) {
 	}
 }
 
-// 13) 第二轮审阅 I-3:换 key 重试不跨出 GatewayKey 绑定的 ProviderKeyIDs(P34)
+//  13. 第二轮审阅 I-3:换 key 重试不跨出 GatewayKey 绑定的 ProviderKeyIDs(P34)
 //     mm 2 把 key:key-1 connection 错且在集合内,key-2 healthy 但不在集合
 //     (gk.ProviderKeyIDs=[1])→ 502,mm.callCount==1(换 key 未跨出集合)
 func TestProxy_SwapToOtherKey_RespectsProviderKeyIDs(t *testing.T) {
 	gin.SetMode(gin.ReleaseMode)
 
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
-		errByKey: map[string]error{"1": &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}},
+		errByKey:   map[string]error{"1": &provider.ProviderError{ProviderName: "mm", ErrorType: provider.ErrorTypeConnection, Message: "conn refused"}},
 		respStatus: 200, respBody: `{"id":"mm-ok"}`}
 	gk := &auth.GatewayKey{ID: "k1", Name: "test-key", ProviderKeyIDs: []uint{1}}
 	e, _ := buildEngineMulti(t, []*fakeProvider{mm}, map[string]*keypool.Pool{
@@ -1248,7 +1248,6 @@ func TestStripResponsesReasoning(t *testing.T) {
 		t.Errorf("no-tool-rounds strip = %s, want 不注入 reasoning", out2)
 	}
 }
-
 
 // TestProxy_CatchAll_ModelNotFoundFailsOver P-catch-all-mismatch:
 // catch_all 场景(客户端模型名是标签,候选目标模型 ≠ 客户端名)下,候选返回

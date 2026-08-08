@@ -146,7 +146,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		QuotaChecker: proxy.CheckQuotaFunc(func(ctx context.Context, providerName, baseURL string, k *keypool.Key) (bool, error) {
 			return quotacheck.CheckQuota(ctx, providerName, baseURL, k)
 		}),
-		MaxRetry:      cfg.Retry.MaxAttempts,
+		MaxRetry: cfg.Retry.MaxAttempts,
 		// 流式写 deadline 续期预算 — 与 http.Server.WriteTimeout 同源,
 		// 流式场景下按 chunk 续期成空闲超时(非流式仍是绝对上限)
 		WriteTimeout: cfg.Server.WriteTimeout,
@@ -694,8 +694,8 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		s.usageR,
 		toRouterAliases(s.cfg.Routing.Aliases, s.cfg.Routing.Chains),
 		gkInfos,
-		s.accessR, // P67: 接入日志 Recorder(可能为 no-op)
-		s.quotaM,  // P68 / P-quota-balance: quota 恢复 worker(可能为 nil)
+		s.accessR,                          // P67: 接入日志 Recorder(可能为 no-op)
+		s.quotaM,                           // P68 / P-quota-balance: quota 恢复 worker(可能为 nil)
 		auth.NewMimoQuotaCookieStore(s.db), // P-mimo-quota: cookie 持久化(单行)
 		// P-mimo-quota 解耦:处理器不 import provider/mimo,由 server(顶层编排者)
 		// 把 vendor 专属校验/注入闭包传入 — 与 keyStatusLookup/quotaMarkFunc 同模式

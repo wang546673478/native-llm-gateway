@@ -78,15 +78,15 @@ func TestPostgresIntegration(t *testing.T) {
 	now := time.Now().UTC()
 	store := accesslog.NewStore(db)
 	entry := &accesslog.AccessEntry{
-		TraceID:      "pg-trace-1",
-		CreatedAt:    now,
-		GatewayKeyID: "1",
+		TraceID:       "pg-trace-1",
+		CreatedAt:     now,
+		GatewayKeyID:  "1",
 		ProviderKeyID: "1",
-		Method:       "POST",
-		Path:         "/v1/messages",
-		StatusCode:   200,
-		ErrorType:    "ok",
-		LatencyMs:    12,
+		Method:        "POST",
+		Path:          "/v1/messages",
+		StatusCode:    200,
+		ErrorType:     "ok",
+		LatencyMs:     12,
 	}
 	if err := store.Insert(ctx, entry); err != nil {
 		t.Fatalf("insert access log on postgres: %v", err)

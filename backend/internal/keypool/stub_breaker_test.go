@@ -11,14 +11,14 @@ import (
 // 那个时代 Pool 还直接 import circuit。重构后 Pool 不再 import circuit,
 // 测试也用 BreakerFactory 注入。
 type stubBreaker struct {
-	mu              sync.Mutex
-	failures        int64
-	threshold       int
-	open            atomic.Bool
-	successCount    int64
-	failureCount    int64
-	allowReturn     bool
-	recordFailures  []string
+	mu             sync.Mutex
+	failures       int64
+	threshold      int
+	open           atomic.Bool
+	successCount   int64
+	failureCount   int64
+	allowReturn    bool
+	recordFailures []string
 }
 
 func newStubBreaker(threshold int) *stubBreaker {

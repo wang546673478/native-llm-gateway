@@ -48,7 +48,7 @@ type Admin struct {
 	// 层注入 vendor 专属的 cookie 校验/设置闭包 — 与 keyStatusLookup/quotaMarkFunc
 	// 等函数注入同模式。nil = 该特性不可用(返回明确错误而非 panic)。
 	MimoQuotaValidate func(ctx context.Context, cookie string) error // 打一次 usage 端点校验
-	MimoQuotaSet      func(cookie string)                           // 热注入到内存(影响路由配额判断)
+	MimoQuotaSet      func(cookie string)                            // 热注入到内存(影响路由配额判断)
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -77,16 +77,16 @@ func NewAdmin(
 	mimoSet func(cookie string), // 可 nil
 ) *Admin {
 	return &Admin{
-		Manager:         mgr,
-		Registry:        reg,
-		Pools:           pools,
-		Router:          r,
-		Usage:           usageRepo,
-		Aliases:         aliases,
-		Keys:            keys,
-		AccessLog:       accessLogR,
-		QuotaMgr:        quotaMgr,
-		MimoCookieStore: mimoCookieStore,
+		Manager:           mgr,
+		Registry:          reg,
+		Pools:             pools,
+		Router:            r,
+		Usage:             usageRepo,
+		Aliases:           aliases,
+		Keys:              keys,
+		AccessLog:         accessLogR,
+		QuotaMgr:          quotaMgr,
+		MimoCookieStore:   mimoCookieStore,
 		MimoQuotaValidate: mimoValidate,
 		MimoQuotaSet:      mimoSet,
 	}

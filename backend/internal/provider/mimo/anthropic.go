@@ -33,8 +33,8 @@ import (
 )
 
 const (
-	anthropicName           = "mimo-anthropic"
-	tokenPlanAnthropicName  = "mimo-token-plan-anthropic"
+	anthropicName          = "mimo-anthropic"
+	tokenPlanAnthropicName = "mimo-token-plan-anthropic"
 	// anthropic 默认端点由 config.yaml 的 endpoint 提供(api.xiaomimimo.com/anthropic /
 	// token-plan-cn.xiaomimimo.com/anthropic)
 )
