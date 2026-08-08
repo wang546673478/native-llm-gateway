@@ -551,12 +551,10 @@ keypool:
   quota_user_agent: "native-llm-gateway/quota-restore-1.0"
 
 # 超时与重试(P5 阶段真正生效)
+# HTTP server 真正生效的超时见 server.read_timeout/write_timeout/idle_timeout
+# (Server.ReadTimeout/WriteTimeout/IdleTimeout);timeouts 仅剩 provider_default
 timeouts:
-  server_read: 30s
-  server_write: 120s
-  server_idle: 120s
   provider_default: 60s
-  request_total: 300s
 
 retry:
   enabled: true

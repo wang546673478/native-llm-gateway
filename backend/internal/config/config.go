@@ -232,12 +232,12 @@ type KeyPoolConfig struct {
 }
 
 // TimeoutsConfig 超时配置
+// P-配置孤岛:server_read/server_write/server_idle/request_total 四个字段曾零消费
+// —— HTTP server 真实超时由 Server.ReadTimeout/WriteTimeout/IdleTimeout(mapstructure
+// server.read_timeout 等)生效,这里是 falese affordance,已删。仅保留真正读取的
+// ProviderDefault(provider.timeout==0 时兜底)。
 type TimeoutsConfig struct {
-	ServerRead      time.Duration `mapstructure:"server_read"`
-	ServerWrite     time.Duration `mapstructure:"server_write"`
-	ServerIdle      time.Duration `mapstructure:"server_idle"`
 	ProviderDefault time.Duration `mapstructure:"provider_default"`
-	RequestTotal    time.Duration `mapstructure:"request_total"`
 }
 
 // RetryConfig 重试配置
