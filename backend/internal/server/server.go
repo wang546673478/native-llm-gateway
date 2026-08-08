@@ -386,6 +386,8 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 	mcfg := &provider.ManagerConfig{
 		Providers: make(map[string]provider.ManagerProviderConfig, len(cfg.Providers)),
 		Pools:     make(map[string]any, len(pools)),
+		// P-provider-timeout: 热重载同频带全局默认(provider.timeout==0 时兜底)
+		DefaultTimeout: cfg.Timeouts.ProviderDefault,
 	}
 	for name, pool := range pools {
 		mcfg.Pools[name] = pool

@@ -139,6 +139,8 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 	mcfg := &provider.ManagerConfig{
 		Providers: make(map[string]provider.ManagerProviderConfig, len(cfg.Providers)),
 		Pools:     make(map[string]any, len(pools)),
+		// P-provider-timeout: 全局 provider 请求超时兜底(provider.timeout==0 时用)
+		DefaultTimeout: cfg.Timeouts.ProviderDefault,
 	}
 	for name, pool := range pools {
 		mcfg.Pools[name] = pool

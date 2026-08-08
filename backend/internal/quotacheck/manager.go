@@ -454,7 +454,16 @@ func (m *Manager) drainDueProbes(ctx context.Context) {
 	// 每次 pop 后更新 pending gauge(注意:这里是 pop 后的剩余值)
 	defer m.metricsSetPending(m.sched.pendingCount())
 	for _, it := range items {
-		m.runProbe(ctx, it)
+		// 探针超时用配置的 quota_http_timeout(m.cfg.HTTPTimeout)包一层 ctx。
+		// 此前 prober 内部 http.Client 硬编码 10s(DefaultProbeTimeout),operator 改
+		// quota_http_timeout 不生效 → 探针始终 10s 断(孤岛)。现在配置值真正bound。
+		if m.cfg.HTTPTimeout > 0 {
+			pctx, cancel := context.WithTimeout(ctx, m.cfg.HTTPTimeout)
+			m.runProbe(pctx, it)
+			cancel()
+		} else {
+			m.runProbe(ctx, it)
+		}
 	}
 }
 

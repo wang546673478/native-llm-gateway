@@ -16,6 +16,10 @@ type ManagerConfig struct {
 	Providers map[string]ManagerProviderConfig
 	// Pools 预先构造好的 Pool 映射,LoadFromConfig 会注入到 ProviderConfig.Pool
 	Pools map[string]any // name → *keypool.Pool(用 any 避免循环依赖)
+	// DefaultTimeout 全局 provider 请求超时兜底(来自 config.timeouts.provider_default)。
+	// 某 provider 未显式设 timeout(0)时用它;仍为 0 则落到各协议 base 的 60/90s 默认。
+	// 修复:config 的 provider_default 字段此前无任何消费方(silent no-op)。
+	DefaultTimeout time.Duration
 }
 
 // ManagerProviderConfig 单个 Provider 的配置(对应 config.yaml 中 providers.<name>.*)
@@ -127,7 +131,7 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			Name:             name,
 			Endpoint:         pcfg.Endpoint,
 			Protocol:         pcfg.Protocol,
-			Timeout:          pcfg.Timeout,
+			Timeout:          resolveProviderTimeout(pcfg.Timeout, cfg.DefaultTimeout),
 			Models:           pcfg.Models,
 			APIKeys:          pcfg.APIKeys,
 			Pool:             cfg.Pools[name],
