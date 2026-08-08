@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
+	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
 // Result 单次探测的归类结果
@@ -96,48 +97,11 @@ func CheckQuota(ctx context.Context, providerName, baseURL string, k *keypool.Ke
 	return balResult.HasQuota, nil
 }
 
-// hasQuotaKeyword 检查 status code + body 是否含 quota_exceeded 信号
-// 用于把 HTTP 响应归类到 Result
-// 关键字列表与 provider.ClassifyErrorWithBody 保持一致
-var quotaKeywords = []string{
-	"insufficient_quota",
-	"quota_exceeded",
-	"insufficient_balance",
-	"insufficient credits",
-	"insufficient credit",
-	"exceeded_current_quota",
-	"余额不足",
-	"quota exceeded",
-	"rate_limit_reached",
-	"billing_not_active",
-	"payment_required",
-	"plan required",
-	"plan_required",
-}
-
+// hasQuotaKeyword 检查 body 是否含 quota_exceeded 信号,用于把 HTTP 响应归类到 Result。
+// 单一来源:委托 provider.LooksLikeQuotaError(两套关键词表曾在两处各自硬编码且已漂移,
+// MiniMax 套餐耗尽词只在 provider 侧,这里会漏判 → probe 把未恢复 key 误判)。
 func hasQuotaKeyword(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	s := string(body)
-	for _, kw := range quotaKeywords {
-		if contains(s, kw) {
-			return true
-		}
-	}
-	return false
-}
-
-func contains(s, sub string) bool {
-	if len(sub) == 0 {
-		return true
-	}
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return provider.LooksLikeQuotaError(body)
 }
 
 // isAuthLikeStatus 401/403 不带 quota 关键字 → key 废了

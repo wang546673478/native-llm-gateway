@@ -14,6 +14,15 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
+// GatewayKeyContextField / GatewayKeyContextIDField:auth 中间件往 gin context 写入的
+// magic key 字段名。单一来源 —— 生产(中间件 AuthMiddleware c.Set)与消费
+// (proxy.GatewayKeyContext)都引用本常量,避免跨包裸字符串契约漂移(改一处漏一处
+// → proxy 读 nil,白名单/绑定静默失效)。
+const (
+	GatewayKeyContextField   = "gateway_key"
+	GatewayKeyContextIDField = "gateway_key_id"
+)
+
 // GatewayKey 是客户端可以使用的 Gateway 凭证
 type GatewayKey struct {
 	ID      string

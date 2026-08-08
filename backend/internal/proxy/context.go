@@ -24,7 +24,7 @@ func NewGatewayKeyContext(keyField, idField string) GatewayKeyContext {
 	return &gatewayKeyContext{keyField: keyField, idField: idField}
 }
 
-var defaultGatewayKeyContext = NewGatewayKeyContext("gateway_key", "gateway_key_id")
+var defaultGatewayKeyContext = NewGatewayKeyContext(auth.GatewayKeyContextField, auth.GatewayKeyContextIDField)
 
 func (g *gatewayKeyContext) Get(c *gin.Context) *auth.GatewayKey {
 	if c == nil {

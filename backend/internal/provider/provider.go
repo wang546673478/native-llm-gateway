@@ -270,7 +270,7 @@ func ClassifyError(statusCode int) ErrorType {
 // ClassifyErrorWithBody P49: 带 body 的错误分类(检测 quota 关键字)
 // body 是上游响应的原始字节,可能为 nil(未知)
 func ClassifyErrorWithBody(statusCode int, body []byte) ErrorType {
-	isQuotaBody := looksLikeQuotaError(body)
+	isQuotaBody := LooksLikeQuotaError(body)
 
 	switch {
 	case statusCode == http.StatusPaymentRequired: // 402
@@ -301,7 +301,9 @@ func ClassifyErrorWithBody(statusCode int, body []byte) ErrorType {
 	}
 }
 
-// looksLikeQuotaError 检测 body 是否含 quota/usage limit 相关关键字
+// LooksLikeQuotaError 检测 body 是否含 quota/usage limit 相关关键字。
+// 单一来源:prober.go 的 quotaKeywords 两套关键字表与这里本来就该一致(其注释
+// "保持一致"),直接合并无冗余,prober 也走这同一个函数。
 // 兼容各 provider 的英文/中文错误信息
 //
 // P-quota-minimax-429-fix: 只保留「强配额标记」,去掉 rate limit / exceeded
@@ -310,19 +312,29 @@ func ClassifyErrorWithBody(statusCode int, body []byte) ErrorType {
 // 期间 token_plan 桶空 → 整链掉到 api 层。
 // MiniMax 真套餐耗尽 429 的 message 是 "已达到 Token Plan 用量上限 (2056)",
 // 靠 "token plan" / "用量上限" 仍能命中,不依赖通用词。
-func looksLikeQuotaError(body []byte) bool {
+func LooksLikeQuotaError(body []byte) bool {
 	if len(body) == 0 {
 		return false
 	}
 	// 转小写匹配,避免大小写差异
 	lower := toLowerASCII(body)
+	// 含 prober.go quotaKeywords 的关键词(insufficient_* / quota_exceeded / billing /
+	// plan required 等),与 provider 的 MiniMax 中文关键词并集。
 	keywords := []string{
 		"quota",
 		"usage limit",
 		"insufficient",
-		"余额", "额度", "配额",
+		"余额", "额度", "配额", "余额不足",
 		"balance",
 		"out of quota",
+		"quota exceeded",
+		"exceeded_current_quota",
+		"quota_exceeded",
+		"rate_limit_reached",
+		"billing_not_active",
+		"payment_required",
+		"plan required",
+		"plan_required",
 		// P-quota-minimax-429: MiniMax anthropic 面把套餐耗尽报成
 		// HTTP 429 + {"error":{"type":"rate_limit_error","message":"已达到
 		// Token Plan 用量上限:请升级 Token Plan 套餐或购买积分补充用量。(2056)"}}

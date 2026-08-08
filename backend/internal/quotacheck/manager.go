@@ -496,15 +496,15 @@ func (m *Manager) runProbe(ctx context.Context, it *probeItem) {
 		bal, err := balancer.FetchBalance(ctx, baseURL, k)
 		if err != nil {
 			m.logger.Warn("balance fetch err", zap.String("provider", it.keyProvider), zap.Error(err))
-			m.metricsPollInc(it.keyProvider, "transport_error")
+			m.metricsProbeInc(it.keyProvider, "transport_error")
 			m.handleProbeResult(it.keyProvider, it.keyID, ResultTransportError)
 			return
 		}
 		if bal.HasQuota {
-			m.metricsPollInc(it.keyProvider, "restored")
+			m.metricsProbeInc(it.keyProvider, "restored")
 			m.handleProbeResult(it.keyProvider, it.keyID, ResultRestored)
 		} else {
-			m.metricsPollInc(it.keyProvider, "still_exhausted")
+			m.metricsProbeInc(it.keyProvider, "still_exhausted")
 			m.handleProbeResult(it.keyProvider, it.keyID, ResultStillExhausted)
 		}
 		return

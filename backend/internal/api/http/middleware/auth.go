@@ -22,8 +22,8 @@ func AuthMiddleware(a *auth.Authenticator) gin.HandlerFunc {
 			})
 			return
 		}
-		c.Set("gateway_key", key)
-		c.Set("gateway_key_id", key.ID)
+		c.Set(auth.GatewayKeyContextField, key)
+		c.Set(auth.GatewayKeyContextIDField, key.ID)
 		c.Next()
 	}
 }
@@ -31,13 +31,13 @@ func AuthMiddleware(a *auth.Authenticator) gin.HandlerFunc {
 // RateLimitMiddleware 按 gateway key 做 RPM 限流
 func RateLimitMiddleware(a *auth.Authenticator) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		keyID := c.GetString("gateway_key_id")
+		keyID := c.GetString(auth.GatewayKeyContextIDField)
 		if keyID == "" {
 			c.Next()
 			return
 		}
 		// 拿到 key 查 RPM
-		v, ok := c.Get("gateway_key")
+		v, ok := c.Get(auth.GatewayKeyContextField)
 		if !ok {
 			c.Next()
 			return
