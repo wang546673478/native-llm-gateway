@@ -120,17 +120,21 @@ func (b *Buffer) run(ctx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		// best-effort:重试 3 次
-		for i := 0; i < 3; i++ {
-			if err := b.insertBatch(ctx, batch); err == nil {
-				break
-			} else if i == 2 {
-				b.log.Error("accesslog batch insert failed",
-					zap.Int("rows", len(batch)),
-					zap.Error(err),
-				)
+		// M1 修复:best-effort 重试 3 次,但每次从成功偏移量继续——避免已插入的
+		// 前 N 条在重试时被再次 Insert(auto-ID)造成重复日志行。
+		offset := 0
+		for i := 0; i < 3 && offset < len(batch); i++ {
+			n, err := b.insertBatch(ctx, batch[offset:])
+			if err != nil {
+				if i == 2 {
+					b.log.Error("accesslog batch insert failed",
+						zap.Int("rows", len(batch[offset:])),
+						zap.Error(err),
+					)
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
-			time.Sleep(50 * time.Millisecond)
+			offset += n
 		}
 		batch = batch[:0]
 	}
@@ -157,12 +161,13 @@ func (b *Buffer) run(ctx context.Context) {
 }
 
 // insertBatch 调 Store.Insert,逐条插入(简单可靠);
-// 如要更高吞吐可改成 GROUP INSERT,但当前 batch=100 已够用
-func (b *Buffer) insertBatch(ctx context.Context, batch []*AccessEntry) error {
-	for _, e := range batch {
+// 如要更高吞吐可改成 GROUP INSERT,但当前 batch=100 已够用。
+// 返回成功插入的条数(供 M1 重试从 offset 继续,避免已提交行被再插成重复)。
+func (b *Buffer) insertBatch(ctx context.Context, batch []*AccessEntry) (int, error) {
+	for i, e := range batch {
 		if err := b.store.Insert(ctx, e); err != nil {
-			return err
+			return i, err
 		}
 	}
-	return nil
+	return len(batch), nil
 }

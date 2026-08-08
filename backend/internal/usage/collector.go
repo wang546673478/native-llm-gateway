@@ -91,7 +91,16 @@ func (c *Collector) run(ctx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		c.flush(batch)
+		// H1 修复:瞬时 DB 错误(SQLite lock / 断连)重试 3 次,避免静默丢整批
+		// usage/billing 数据。仍失败才丢(比静默一次性丢有实质改善)。
+		for attempt := 1; attempt <= 3; attempt++ {
+			err := c.flush(batch)
+			if err == nil {
+				break
+			}
+			log.Printf("usage: flush attempt %d/3 failed (%v), retrying", attempt, err)
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+		}
 		batch = batch[:0]
 	}
 
@@ -123,8 +132,8 @@ func (c *Collector) Stop() {
 	<-c.doneCh
 }
 
-// flush 把 batch 转换为 GORM 模型并批量写入
-func (c *Collector) flush(batch []*Record) {
+// flush 把 batch 转换为 GORM 模型并批量写入。返回错误给 caller 重试。
+func (c *Collector) flush(batch []*Record) error {
 	models := make([]dbpkg.UsageRecord, len(batch))
 	now := time.Now().UTC()
 	for i, r := range batch {
@@ -146,9 +155,7 @@ func (c *Collector) flush(batch []*Record) {
 			CreatedAt:     now,
 		}
 	}
-	if err := c.db.CreateInBatches(models, c.batchSize).Error; err != nil {
-		log.Printf("usage: flush failed: %v", err)
-	}
+	return c.db.CreateInBatches(models, c.batchSize).Error
 }
 
 // Pending 返回 channel 中积压的待写入记录数(调试用)

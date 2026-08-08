@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -249,7 +251,11 @@ func (h *KeysHandler) create(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "create_failed", "detail": err.Error()})
 		return
 	}
-	h.reloadAll(c.Request.Context())
+	if err := h.reloadAll(c.Request.Context()); err != nil {
+		// M2: DB 写已提交,reload 失败只日志不返回错(写确实发生;operator 需知
+		// key 在 DB 但内存未同步,重启前不可用)
+		log.Printf("gateway keys: db write ok but reload failed (key live only after restart): %v", err)
+	}
 	// P32-B: 直接返回 KeyView,key 在 list 里也能看到
 	c.JSON(http.StatusCreated, toView(*k))
 }
@@ -293,7 +299,11 @@ func (h *KeysHandler) update(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update_failed", "detail": err.Error()})
 		return
 	}
-	h.reloadAll(c.Request.Context())
+	if err := h.reloadAll(c.Request.Context()); err != nil {
+		// M2: DB 写已提交,reload 失败只日志不返回错(写确实发生;operator 需知
+		// key 在 DB 但内存未同步,重启前不可用)
+		log.Printf("gateway keys: db write ok but reload failed (key live only after restart): %v", err)
+	}
 	c.JSON(http.StatusOK, toView(*existing))
 }
 
@@ -308,17 +318,24 @@ func (h *KeysHandler) delete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete_failed", "detail": err.Error()})
 		return
 	}
-	h.reloadAll(c.Request.Context())
+	if err := h.reloadAll(c.Request.Context()); err != nil {
+		// M2: DB 写已提交,reload 失败只日志不返回错(写确实发生;operator 需知
+		// key 在 DB 但内存未同步,重启前不可用)
+		log.Printf("gateway keys: db write ok but reload failed (key live only after restart): %v", err)
+	}
 	c.JSON(http.StatusOK, gin.H{"deleted": name})
 }
 
-func (h *KeysHandler) reloadAll(ctx context.Context) {
+// reloadAll 从 DB 重新加载全部 gateway keys 并同步内存 Authenticator。
+// M2 修复:返回 error,让 caller 记录 —— 此前 DB 写成功但这里 List/reload 失败
+// 被静默吞,key 在 DB 但内存未同步,重启前不可用,operator 无从知晓。
+func (h *KeysHandler) reloadAll(ctx context.Context) error {
 	if h.reload == nil {
-		return
+		return nil
 	}
 	rows, err := h.store.List(ctx)
 	if err != nil {
-		return
+		return fmt.Errorf("reload gateway keys: list: %w", err)
 	}
 	keys := make([]GatewayKey, 0, len(rows))
 	for _, k := range rows {
@@ -333,6 +350,7 @@ func (h *KeysHandler) reloadAll(ctx context.Context) {
 		})
 	}
 	h.reload(keys)
+	return nil
 }
 
 // serializeAllowedModels 把 []string 序列化成 JSON 字符串存 DB
