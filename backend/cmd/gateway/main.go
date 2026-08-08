@@ -147,10 +147,6 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 	}
 	for name, p := range cfg.Providers {
 		proto, _ := provider.ParseProtocol(p.Protocol) // config.validate() 已确保合法
-		keys := make([]string, 0, len(p.Keys))
-		for _, k := range p.Keys {
-			keys = append(keys, k.Key)
-		}
 		models := make([]string, 0, len(p.Models))
 		modelCosts := make(map[string]provider.ModelCost, len(p.Models))
 		for _, m := range p.Models {
@@ -170,7 +166,6 @@ func toManagerConfig(cfg *config.Config, pools map[string]*keypool.Pool) *provid
 			Timeout:    p.Timeout,
 			Models:     models,
 			ModelCosts: modelCosts, // P37
-			APIKeys:    keys,
 			// P47: 计费来源,默认 api(没标就当 api)
 			BillingSource: defaultStr(p.BillingSource, "api"),
 			// P-catch-all: 默认模型(catch_all 自动模式用)

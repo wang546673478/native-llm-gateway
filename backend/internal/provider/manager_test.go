@@ -46,7 +46,6 @@ func TestManager_EndpointFor(t *testing.T) {
 				Endpoint: "https://fake.example/v1",
 				Protocol: ProtocolOpenAI,
 				Models:   []string{"m1"},
-				APIKeys:  []string{"sk-test"},
 			},
 		},
 	}

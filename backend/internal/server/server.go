@@ -416,7 +416,6 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 			Timeout:    p.Timeout,
 			Models:     models, // P-catch-all: ReloadPricing 需要 models 列表算默认模型
 			ModelCosts: modelCosts,
-			APIKeys:    nil,
 			// P47: 计费来源 — 热重载时也带上
 			BillingSource: defaultBillingSource(p.BillingSource),
 			// P-catch-all: 默认模型 — 热重载时同步

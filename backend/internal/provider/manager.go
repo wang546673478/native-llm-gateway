@@ -29,7 +29,6 @@ type ManagerProviderConfig struct {
 	Protocol Protocol
 	Timeout  time.Duration
 	Models   []string
-	APIKeys  []string
 	Circuit  ManagerCircuitConfig
 	// P37: 模型定价表(对应 config.yaml 中 providers.<name>.models[].cost_per_1k_input/output)
 	// 索引:model id → (cost_per_1k_input, cost_per_1k_output),单位 USD
@@ -133,7 +132,6 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			Protocol:         pcfg.Protocol,
 			Timeout:          resolveProviderTimeout(pcfg.Timeout, cfg.DefaultTimeout),
 			Models:           pcfg.Models,
-			APIKeys:          pcfg.APIKeys,
 			Pool:             cfg.Pools[name],
 			FailureThreshold: pcfg.Circuit.FailureThreshold,
 			FailureWindow:    pcfg.Circuit.FailureWindow,

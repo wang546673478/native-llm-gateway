@@ -53,7 +53,6 @@ func newFakeManager(t *testing.T, ps ...provider.Provider) *provider.Manager {
 			Endpoint: "http://example.com",
 			Protocol: p.Protocol(),
 			Models:   p.Models(),
-			APIKeys:  []string{"sk-test"},
 		}
 	}
 	if err := mgr.LoadFromConfig(context.Background(), cfg); err != nil {
@@ -758,8 +757,8 @@ func TestRouter_CatchAllAuto_ResponsesFilter(t *testing.T) {
 	// 标记能力:deepseek 支持,qwen 不支持
 	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
 		Providers: map[string]provider.ManagerProviderConfig{
-			"deepseek": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"deepseek-v4-flash"}, APIKeys: []string{"sk"}, ResponsesAPI: true},
-			"qwen":     {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"qwen-plus"}, APIKeys: []string{"sk"}},
+			"deepseek": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"deepseek-v4-flash"}, ResponsesAPI: true},
+			"qwen":     {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"qwen-plus"}},
 		},
 	}); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)

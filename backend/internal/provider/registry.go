@@ -21,7 +21,6 @@ type ProviderConfig struct {
 	Protocol         Protocol
 	Timeout          time.Duration
 	Models           []string
-	APIKeys          []string    // 明文,内部会加密传给 KeyPool
 	Pool             interface{} // *keypool.Pool — 用 interface{} 避免循环依赖
 	FailureThreshold int
 	FailureWindow    time.Duration

@@ -136,7 +136,7 @@ func buildEngine(t *testing.T, p *fakeProvider, aliases map[string]router.AliasC
 	mgr := provider.NewManager(reg, zap.NewNop())
 	mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
 		Providers: map[string]provider.ManagerProviderConfig{
-			p.Name(): {Enabled: true, Protocol: p.Protocol(), Models: p.models, APIKeys: []string{"sk-test"}},
+			p.Name(): {Enabled: true, Protocol: p.Protocol(), Models: p.models},
 		},
 	})
 
@@ -499,7 +499,7 @@ func buildEngineMulti(t *testing.T, providers []*fakeProvider, pools map[string]
 	cfg := provider.ManagerConfig{Providers: map[string]provider.ManagerProviderConfig{}}
 	for _, p := range providers {
 		cfg.Providers[p.Name()] = provider.ManagerProviderConfig{
-			Enabled: true, Protocol: p.Protocol(), Models: p.models, APIKeys: []string{"sk-test"},
+			Enabled: true, Protocol: p.Protocol(), Models: p.models,
 		}
 	}
 	if err := mgr.LoadFromConfig(context.Background(), &cfg); err != nil {
@@ -1123,8 +1123,8 @@ func TestProxy_WhitelistSkipsCandidates(t *testing.T) {
 	mgr := provider.NewManager(reg, zap.NewNop())
 	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
 		Providers: map[string]provider.ManagerProviderConfig{
-			"pa": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-a"}, APIKeys: []string{"sk"}},
-			"pb": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-b"}, APIKeys: []string{"sk"}},
+			"pa": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-a"}},
+			"pb": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-b"}},
 		},
 	}); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)
@@ -1281,8 +1281,8 @@ func TestProxy_CatchAll_ModelNotFoundFailsOver(t *testing.T) {
 	}
 	mgr := provider.NewManager(reg, zap.NewNop())
 	provCfg := map[string]provider.ManagerProviderConfig{
-		"mimo-token-plan-anthropic": {Enabled: true, Protocol: strict.Protocol(), Models: strict.models, APIKeys: []string{"sk-test"}},
-		"minimax":                   {Enabled: true, Protocol: lenient.Protocol(), Models: lenient.models, APIKeys: []string{"sk-test"}},
+		"mimo-token-plan-anthropic": {Enabled: true, Protocol: strict.Protocol(), Models: strict.models},
+		"minimax":                   {Enabled: true, Protocol: lenient.Protocol(), Models: lenient.models},
 	}
 	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{Providers: provCfg}); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)
