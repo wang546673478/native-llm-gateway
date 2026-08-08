@@ -141,24 +141,13 @@ import {
   NH3, NText, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns, SelectOption } from 'naive-ui'
-import axios from 'axios'
+import { api, type ProviderKeyView } from '../api/client'
 
 interface ProviderInfo {
   name: string
   protocol: string
   loaded: boolean
   models: string[]
-}
-
-// P34: ProviderKey(后端返回的脱敏 view)
-interface ProviderKeyView {
-  id: number
-  provider_name: string
-  name: string
-  key_masked: string
-  enabled: boolean
-  remaining: number
-  last_polled_at: string | null
 }
 
 // P34: KeyView 含 provider_key_ids + 明文 key(用户要求 list 也能直接复制)
@@ -278,11 +267,11 @@ async function load() {
     // P-provider-vendor: 绑定 Provider 按厂商 — 用 /providers(vendor 聚合)
     // 而非 /providers/registered(注册名);同时建注册名→厂商映射供旧数据归一
     const [keysResp, provResp] = await Promise.all([
-      axios.get('/api/v1/keys'),
-      axios.get('/api/v1/providers'),
+      api.keys.list().catch(() => ({ keys: [], count: 0 })),
+      api.providers(),
     ])
-    keys.value = keysResp.data.keys
-    const vendors: any[] = provResp.data.vendors ?? []
+    keys.value = keysResp.keys
+    const vendors: any[] = (provResp as any).vendors ?? []
     regToVendor.value = {}
     for (const v of vendors) {
       for (const n of v.names ?? []) regToVendor.value[n.name] = v.vendor
@@ -299,8 +288,8 @@ async function load() {
     await Promise.all(
       providers.value.map(async p => {
         try {
-          const r = await axios.get<{ keys: ProviderKeyView[] }>(`/api/v1/providers/${encodeURIComponent(p.name)}/api-keys`)
-          map[p.name] = r.data.keys ?? []
+          const r = await api.providerKeys.list(p.name)
+          map[p.name] = r.keys ?? []
         } catch {
           map[p.name] = []
         }
@@ -371,16 +360,16 @@ async function save() {
       enabled: form.value.enabled,
     }
     if (editing.value) {
-      await axios.put(`/api/v1/keys/${encodeURIComponent(form.value.name)}`, body)
+      await api.keys.update(form.value.name, body)
       message.success('已更新')
       modalVisible.value = false
     } else {
       body.name = form.value.name
       // 创建响应包含明文 key(KeyView 不含,用 any 临时接住)
-      const resp = await axios.post<{ key?: string }>('/api/v1/keys', body)
+      const resp = await api.keys.create(body)
       // SECURITY: 创建后明文仅此一次返回,弹窗展示给用户复制保存
       modalVisible.value = false
-      newKeySecret.value = resp.data?.key ?? ''
+      newKeySecret.value = resp.key ?? ''
       newKeyName.value = form.value.name
       newKeyModalVisible.value = true
     }
@@ -431,7 +420,7 @@ async function copyKey(row: KeyView) {
 async function confirmDelete(row: KeyView) {
   if (!confirm(`确认删除 Key "${row.name}" ?此操作不可撤销`)) return
   try {
-    await axios.delete(`/api/v1/keys/${encodeURIComponent(row.name)}`)
+    await api.keys.delete(row.name)
     message.success('已删除')
     await load()
   } catch (e: any) {

@@ -71,11 +71,46 @@ export interface GatewayKeyInfo {
   allowed_models: string[]
   rpm: number
   tpm: number
+  // 以下字段 /keys list 实际也返回(见 backend auth/keys_handler.go)——
+  // 之前 GatewayKeyInfo 太窄,view 用 KeyView 强转;这里补全为唯一真实契约
+  key: string
+  providers: string[]
+  provider_key_ids: number[]
+  default_model?: string
+  enabled: boolean
+  id?: number
+  created_at?: string
 }
 
 export interface KeysResp {
   keys: GatewayKeyInfo[]
   count: number
+}
+
+// ProviderKeyView provider API-key 视图 —— 单一类型源。
+// 之前 Keys.vue / ProviderKeys.vue 各定义一份(Keys.vue 的还是旧版缺字段子集),
+// 后端改字段只改这处理应、两端 UI 同步。须与 backend ProviderKeyView 对齐。
+export interface ProviderKeyView {
+  id: number
+  provider_name: string
+  name: string
+  key_masked: string
+  enabled: boolean
+  // 运行时状态 — "ACTIVE" / "COOLING" / "QUOTA_EXCEEDED"(P-no-disabled:无 DISABLED)
+  status: string
+  // 计费来源 — "token_plan" / "api" / "free"
+  billing_source: string
+  created_at: string
+  updated_at: string
+  remaining: number
+  last_polled_at: string | null
+  // 数值类型 — "percent" / "currency" / ""(空按 currency)
+  quota_kind: 'percent' | 'currency' | ''
+  // 该 key 允许的协议面(逗号分隔,空 = 全部)
+  protocols: string
+  // per-key 熔断状态
+  circuit_open: boolean
+  circuit_state: string
 }
 
 export interface AccessLog {
@@ -212,6 +247,30 @@ export const api = {
   routing: () => client.get<RoutingResp>('/routing').then(r => r.data),
   keys: {
     list: () => client.get<KeysResp>('/keys').then(r => r.data),
+    // 以下 CRUD 从 Keys.vue 的 raw axios 收编到 client.ts(单一 endpoint 源)
+    create: (body: { name: string; key?: string; enabled?: boolean; allowed_models?: string[]; rpm?: number; tpm?: number }) =>
+      client.post<{ key?: string }>('/keys', body).then(r => r.data),
+    update: (name: string, body: Record<string, unknown>) =>
+      client.put(`/keys/${encodeURIComponent(name)}`, body).then(r => r.data),
+    delete: (name: string) => client.delete(`/keys/${encodeURIComponent(name)}`).then(r => r.data),
+    // GatewayKeyInfo 目前缺 key 明文;create 返回的 key 由调用方处理
+  },
+  // P30: provider api-keys CRUD(从 ProviderKeys.vue / Keys.vue 的 raw axios 收编)
+  providerKeys: {
+    list: (providerName: string) =>
+      client
+        .get<{ keys: ProviderKeyView[]; count: number; provider: string }>(
+          `/providers/${encodeURIComponent(providerName)}/api-keys`,
+        )
+        .then(r => r.data),
+    create: (providerName: string, body: { name?: string; key: string; enabled?: boolean; billing_source?: string; protocols?: string }) =>
+      client
+        .post<ProviderKeyView>(`/providers/${encodeURIComponent(providerName)}/api-keys`, body)
+        .then(r => r.data),
+    delete: (providerName: string, id: number | string) =>
+      client
+        .delete(`/providers/${encodeURIComponent(providerName)}/api-keys/${id}`)
+        .then(r => r.data),
   },
   dashboard: () => client.get<DashboardResp>('/dashboard').then(r => r.data),
   aggregateUsage: (params?: { start?: string; end?: string }) =>
@@ -232,6 +291,17 @@ export const api = {
       client.get<AccessLogDetailResp>(`/access-logs/${id}/detail`).then(r => r.data),
     stats: () =>
       client.get<AccessLogStatsResp>('/access-logs/stats').then(r => r.data),
+    // export URL —— 单一 endpoint 源(AccessLogs.vue 原 window.open('/api/v1/access-logs/export?...'))
+    exportUrl: (params?: Record<string, string | number>) => {
+      const qs = new URLSearchParams()
+      if (params) {
+        for (const [k, v] of Object.entries(params)) {
+          if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+        }
+      }
+      const q = qs.toString()
+      return q ? `/access-logs/export?${q}` : '/access-logs/export'
+    },
   },
   // P-quota-balance: 后端 quota runtime config(目前只含 warn_threshold_pct)
   // ProviderKeys.vue 用它做余额颜色阈值,避免硬编码。

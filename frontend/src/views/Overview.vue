@@ -78,7 +78,7 @@
               <div class="bs-row big">
                 <span class="bs-key">可用额度</span>
                 <span class="bs-val">
-                  {{ row.quota_kind === 'percent' ? '—' : `¥${row.quota_known_sum.toFixed(2)}` }}
+                  {{ row.quota_kind === QUOTA_KIND.PERCENT ? '—' : `¥${row.quota_known_sum.toFixed(2)}` }}
                 </span>
               </div>
             </div>
@@ -95,6 +95,7 @@ import {
   NCard, NDataTable, NGi, NGrid, NSpin,
 } from 'naive-ui'
 import { api, type DashboardResp } from '../api/client'
+import { QUOTA_KIND } from '../api/constants'
 
 const data = ref<DashboardResp | null>(null)
 const loading = ref(true)

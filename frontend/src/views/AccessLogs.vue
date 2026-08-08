@@ -255,6 +255,7 @@ const statusOptions = [
   { label: '上游 5xx', value: 'upstream_5xx' },
   { label: '连接错误', value: 'connection_error' },
   { label: '超时', value: 'timeout' },
+  { label: '客户端断开', value: 'client_disconnected' },
   { label: '未知错误', value: 'unknown' },
 ]
 
@@ -430,12 +431,15 @@ function buildParams(extra: Record<string, string | number> = {}): Record<string
 }
 
 // exportJsonl P-training: 用当前过滤条件导出 JSONL 训练数据(新标签页下载)
+// URL 由 client.ts 的 api.accessLogs.exportUrl 提供(单一 endpoint 源,防路径漂移)
 function exportJsonl() {
-  const params = new URLSearchParams()
+  const params: Record<string, string | number> = {}
   for (const [k, v] of Object.entries(buildParams({ limit: 10000 }))) {
-    params.set(k, String(v))
+    params[k] = String(v)
   }
-  window.open(`/api/v1/access-logs/export?${params.toString()}`, '_blank')
+  const url = api.accessLogs.exportUrl(params)
+  // url 不含 /api/v1 前缀,export 端点不在 axios client(需新标签页,直接拼前缀)
+  window.open(`/api/v1${url}`, '_blank')
 }
 
 async function load() {

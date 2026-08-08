@@ -77,32 +77,9 @@ import {
   NH3, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import axios from 'axios'
-import { api, type VendorInfo } from '../api/client'
+import { api, type ProviderKeyView, type VendorInfo } from '../api/client'
+import { BILLING_SOURCE, BILLING_SOURCE_DEFAULT, KEY_STATUS, KEY_STATUS_DISABLED_UI, QUOTA_KIND } from '../api/constants'
 import { fmtDateTime } from '../utils/time'
-
-interface ProviderKeyView {
-  id: number
-  provider_name: string
-  name: string
-  key_masked: string
-  enabled: boolean
-  // P68: 运行时状态 — ACTIVE / COOLING / QUOTA_EXCEEDED(P-no-disabled:无 DISABLED)
-  status: string
-  // P48: 计费来源 — token_plan / api / free
-  billing_source: string
-  created_at: string
-  updated_at: string
-  remaining: number
-  last_polled_at: string | null
-  // P-quota-display: 数值类型 — "percent" / "currency" / ""(空按 currency)
-  quota_kind: 'percent' | 'currency' | ''
-  // P-provider-vendor: 该 key 允许的协议面(逗号分隔,空 = 全部)
-  protocols: string
-  // P-per-key-circuit: per-key 熔断状态(circuit_open 时该 key 暂时不参与调度)
-  circuit_open: boolean
-  circuit_state: string
-}
 
 const keys = ref<ProviderKeyView[]>([])
 const providers = ref<VendorInfo[]>([])
@@ -120,8 +97,8 @@ const form = ref({
   name: '',
   key: '',
   enabled: true,
-  // P48: 计费来源 — token_plan / api / free,默认 api
-  billing_source: 'api',
+  // P48: 计费来源 — token_plan / api / free,默认 api(常量来自 constants.ts)
+  billing_source: BILLING_SOURCE_DEFAULT,
 })
 
 const rules = {
@@ -147,9 +124,9 @@ const targetProviderName = computed(() => {
 })
 
 const billingSourceOptions = [
-  { label: '💰 按量计费 (api)', value: 'api' },
-  { label: '📦 Token Plan (token_plan)', value: 'token_plan' },
-  { label: '🎁 免费层 (free)', value: 'free' },
+  { label: '💰 按量计费 (api)', value: BILLING_SOURCE.API },
+  { label: '📦 Token Plan (token_plan)', value: BILLING_SOURCE.TOKEN_PLAN },
+  { label: '🎁 免费层 (free)', value: BILLING_SOURCE.FREE },
 ]
 
 // Task 10: balance column — tier-relative colour tier.
@@ -182,7 +159,7 @@ function balanceColour(
   // P-quota-display: percent 行用绝对阈值(百分比本身是绝对值,tier-relative 会双重归一化);
   // currency 行保持 tier-relative 阈值(与既有行为一致)
   const threshold =
-    row.quota_kind === 'percent' ? warnPct : (warnPct / 100) * tierMax
+    row.quota_kind === QUOTA_KIND.PERCENT ? warnPct : (warnPct / 100) * tierMax
   if (row.remaining >= threshold) return 'green'
   return 'yellow'
 }
@@ -205,9 +182,9 @@ const columns: DataTableColumns<ProviderKeyView> = [
     width: 160,
     render: (row) => {
       const map: Record<string, { color: string; label: string }> = {
-        token_plan: { color: '#2080f0', label: '📦 token_plan' },
-        api:        { color: '#f0a020', label: '💰 api' },
-        free:       { color: '#18a058', label: '🎁 free' },
+        [BILLING_SOURCE.TOKEN_PLAN]: { color: '#2080f0', label: '📦 token_plan' },
+        [BILLING_SOURCE.API]:        { color: '#f0a020', label: '💰 api' },
+        [BILLING_SOURCE.FREE]:       { color: '#18a058', label: '🎁 free' },
       }
       const m = map[row.billing_source] ?? { color: '#999', label: row.billing_source }
       return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)
@@ -226,12 +203,12 @@ const columns: DataTableColumns<ProviderKeyView> = [
       if (row.circuit_open) {
         return h('span', { style: { color: '#d03050', fontWeight: 500 } }, '⚡ 熔断中')
       }
-      const status = (row.status || (row.enabled ? 'ACTIVE' : 'DISABLED')).toUpperCase()
+      const status = (row.status || (row.enabled ? KEY_STATUS.ACTIVE : KEY_STATUS_DISABLED_UI)).toUpperCase()
       const map: Record<string, { color: string; label: string }> = {
-        ACTIVE:          { color: '#18a058', label: '● 启用' },
-        COOLING:         { color: '#2080f0', label: '⏱ 冷却中' },
-        QUOTA_EXCEEDED:  { color: '#f0a020', label: '⚠ 配额耗尽' },
-        DISABLED:        { color: '#999',    label: '○ 已关闭' },
+        [KEY_STATUS.ACTIVE]:          { color: '#18a058', label: '● 启用' },
+        [KEY_STATUS.COOLING]:         { color: '#2080f0', label: '⏱ 冷却中' },
+        [KEY_STATUS.QUOTA_EXCEEDED]:  { color: '#f0a020', label: '⚠ 配额耗尽' },
+        [KEY_STATUS_DISABLED_UI]:     { color: '#999',    label: '○ 已关闭' },
       }
       const m = map[status] ?? { color: '#999', label: status }
       return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)
@@ -258,7 +235,7 @@ const columns: DataTableColumns<ProviderKeyView> = [
         gray:   '#999',
       }
       const text =
-        row.quota_kind === 'percent'
+        row.quota_kind === QUOTA_KIND.PERCENT
           ? `${Math.floor(row.remaining)}%`
           : `¥${row.remaining.toFixed(2)}`
       return h(
@@ -294,8 +271,8 @@ async function load() {
     const allKeys = await Promise.all(
       allNames.map(async name => {
         try {
-          const r = await axios.get<{ keys: ProviderKeyView[] }>(`/api/v1/providers/${encodeURIComponent(name)}/api-keys`)
-          return r.data.keys || []
+          const r = await api.providerKeys.list(name)
+          return r.keys || []
         } catch (e) {
           return []
         }
@@ -327,7 +304,7 @@ function openCreate() {
     name: '',
     key: '',
     enabled: true,
-    billing_source: 'api',
+    billing_source: BILLING_SOURCE_DEFAULT,
   }
   modalVisible.value = true
 }
@@ -354,16 +331,13 @@ async function save() {
     const isAll =
       form.value.protocols.length === allProtocols.length &&
       allProtocols.every(p => form.value.protocols.includes(p))
-    await axios.post(
-      `/api/v1/providers/${encodeURIComponent(target)}/api-keys`,
-      {
-        name: form.value.name,
-        key: form.value.key,
-        enabled: form.value.enabled,
-        billing_source: form.value.billing_source,
-        protocols: isAll ? '' : form.value.protocols.join(','),
-      },
-    )
+    await api.providerKeys.create(target, {
+      name: form.value.name,
+      key: form.value.key,
+      enabled: form.value.enabled,
+      billing_source: form.value.billing_source,
+      protocols: isAll ? '' : form.value.protocols.join(','),
+    })
     message.success('已添加')
     modalVisible.value = false
     await load()
@@ -377,9 +351,7 @@ async function save() {
 async function confirmDelete(row: ProviderKeyView) {
   if (!confirm(`确认删除 ${row.provider_name} 的 Key "${row.name}" (${row.key_masked})?`)) return
   try {
-    await axios.delete(
-      `/api/v1/providers/${encodeURIComponent(row.provider_name)}/api-keys/${row.id}`,
-    )
+    await api.providerKeys.delete(row.provider_name, row.id)
     message.success('已删除')
     await load()
   } catch (e: any) {
