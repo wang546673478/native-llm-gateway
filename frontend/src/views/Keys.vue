@@ -172,6 +172,8 @@ interface KeyView {
 const keys = ref<KeyView[]>([])
 const providers = ref<ProviderInfo[]>([])
 const providerKeysMap = ref<Record<string, ProviderKeyView[]>>({}) // P34: provider_name → ProviderKey[]
+// P-provider-vendor: store 持 vendors 单一来源;load() 内填充 providers
+const provStore = useProvidersStore()
 // P-provider-vendor: 注册名(deepseek-anthropic)→ 厂商(deepseek)映射 —
 // 编辑/展示旧数据(绑定仍存注册名)时归一,保存后后端统一存厂商名
 const regToVendor = ref<Record<string, string>>({})
@@ -199,9 +201,7 @@ const rules = {
   name: { required: true, message: '名称必填', trigger: 'blur' },
 }
 
-const providerOptions = computed<SelectOption[]>(() =>
-  providers.value.map(p => ({ label: p.name, value: p.name })),
-)
+const providerOptions = computed<SelectOption[]>(() => provStore.vendorOptions)
 
 // P34: 当前可选的 ProviderKey(根据已绑定的 providers 过滤)
 // form.providers 为空时显示所有;否则只显示绑定 provider 的 keys
@@ -268,17 +268,14 @@ async function load() {
     // 1. 拿 keys + providers
     // P-provider-vendor: 绑定 Provider 按厂商 — 用 /providers(vendor 聚合,
     // 经共享 store 拉取)而非 /providers/registered(注册名);同时建注册名→厂商映射
-    const provStore = useProvidersStore()
     const [keysResp] = await Promise.all([
       api.keys.list().catch(() => ({ keys: [], count: 0 })),
       provStore.load(),
     ])
     keys.value = keysResp.keys
+    // reg-name → vendor 映射来自 store getter(单一来源,不再本地手撸循环)
+    regToVendor.value = provStore.regToVendor
     const vendors: any[] = provStore.vendors ?? []
-    regToVendor.value = {}
-    for (const v of vendors) {
-      for (const n of v.names ?? []) regToVendor.value[n.name] = v.vendor
-    }
     providers.value = vendors.map((v: any) => ({
       name: v.vendor,
       protocol: v.names?.[0]?.protocol ?? '',

@@ -111,9 +111,8 @@ const rules = {
 }
 
 // P-provider-vendor: 两级下拉 — 厂商 → 协议面
-const vendorOptions = computed(() =>
-  providers.value.map(v => ({ label: v.vendor, value: v.vendor }))
-)
+// vendor 选项来自共享 store 的 vendorOptions getter(单一来源)
+const vendorOptions = computed(() => provStore.vendorOptions)
 const protocolOptions = computed(() => {
   const v = providers.value.find(p => p.vendor === form.value.vendor)
   if (!v) return []
@@ -264,7 +263,6 @@ async function load() {
     // P-provider-vendor: 厂商聚合列表来自共享 store → 按 vendor.names 展开,
     // 循环拉每个注册名的 api-keys
     // (同 vendor 的多注册名共享同一 key 池,列表天然按 provider_name 相邻)
-    const provStore = useProvidersStore()
     await provStore.load()
     providers.value = provStore.vendors
     const allNames = provStore.vendors.flatMap(v => v.names.map(n => n.name))

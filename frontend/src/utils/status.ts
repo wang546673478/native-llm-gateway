@@ -18,9 +18,12 @@ export const STATUS_PALETTE = {
 // quotaDisplay 按 quota_kind(percent/currency/空)渲染余额值。
 // ProviderKeys.vue 余额列 与 Overview.vue 用量汇总 用同一套语义:
 //   percent → 显示 '—'(避免把 e.g. 63% 当金额);非 percent(currency) → ¥N。
+// percent 用 QUOTA_KIND.PERCENT 常量(单一来源,防裸串漂移)。
+import { QUOTA_KIND } from '../api/constants'
+
 export function quotaDisplay(quotaKind: string | undefined, amount: number | null | undefined): string {
   if (amount === null || amount === undefined || Number.isNaN(amount)) return '—'
-  if (quotaKind === 'percent') return '—'
+  if (quotaKind === QUOTA_KIND.PERCENT) return '—'
   return `¥${amount.toFixed(2)}`
 }
 
