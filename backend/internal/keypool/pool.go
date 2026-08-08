@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// authErrorCooling auth 错误(401/403)时 key 进入 COOLING 的时长。
+// 独立于 rate-limit 的 CoolingDuration 配置 — auth 说明 key 本身有问题,冷却更久
+// 等换 key/修 key,不给 config 表面(业务固定值)。单命名源,消除裸字面量。
+const authErrorCooling = 5 * time.Minute
+
 // QuotaRecoveryMode 配额耗尽的恢复策略
 type QuotaRecoveryMode string
 
@@ -417,7 +422,7 @@ func (p *Pool) ReportError(k *Key, errType string) {
 		// P-no-disabled: 上游 401/403-auth:key 本身有问题 → 冷却 5 分钟而非禁用。
 		// 冷却期间不参与调度,到期自动重试 — 换 key/修 key 后自动恢复
 		k.Status = KeyStatusCooling
-		k.CoolingUntil = now.Add(5 * time.Minute)
+		k.CoolingUntil = now.Add(authErrorCooling)
 	case ErrorTypeInvalidRequest:
 		// P-invalid-req: 上游 400 通常是「这个请求内容它不支持」(agent 回带的
 		// 其他厂商 thinking 块、tool 格式差异等),不是 key 有问题 —

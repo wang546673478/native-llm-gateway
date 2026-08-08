@@ -61,6 +61,11 @@ const (
 	DefaultAccessLogBatchSize     = 100
 	DefaultAccessLogFlushInterval = time.Second
 	DefaultAccessLogRetention     = 24 * time.Hour
+
+	// Usage 异步批写入默认值 — 消除 collector 里硬编码 100/10s 与 config 模板
+	// 的"双份真相"(operator 改 config 只局部生效的孤岛隐患)。
+	DefaultUsageBatchSize     = 100
+	DefaultUsageFlushInterval = 10 * time.Second
 )
 
 // DatabaseConfig 数据库配置

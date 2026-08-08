@@ -122,29 +122,33 @@ type Manager struct {
 // prov 用 StaticProviderLookup 包一下传入
 // metricsC 可传 nil(测试 / 单测场景),nil 时不 emit
 func NewManager(logger *zap.Logger, pools *PoolsRef, prov providerLookup, metricsC *metrics.Collector, cfg ManagerConfig) *Manager {
+	// 低耦合修复:defaults 从 DefaultManagerConfig() 单一来源取(此前 NewManager 里
+	// 又各硬编码一份,导致改 DefaultManagerConfig 对 NewManager 零效果 —— 孤岛)。
+	// 零值时从 def 兜底;显式传的负值(PollJitterPct 等)压到 0 仍保留。
+	def := DefaultManagerConfig()
 	if cfg.ProbeInitialDelay <= 0 {
-		cfg.ProbeInitialDelay = 5 * time.Minute
+		cfg.ProbeInitialDelay = def.ProbeInitialDelay
 	}
 	if cfg.ProbeMaxBackoff <= 0 {
-		cfg.ProbeMaxBackoff = 30 * time.Minute
+		cfg.ProbeMaxBackoff = def.ProbeMaxBackoff
 	}
 	if cfg.ProbeJitterPct < 0 {
 		cfg.ProbeJitterPct = 0
 	}
 	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = 60 * time.Second
+		cfg.PollInterval = def.PollInterval
 	}
 	if cfg.PollJitterPct < 0 {
 		cfg.PollJitterPct = 0
 	}
 	if cfg.WarnThresholdPct <= 0 {
-		cfg.WarnThresholdPct = 10
+		cfg.WarnThresholdPct = def.WarnThresholdPct
 	}
 	if cfg.HTTPTimeout <= 0 {
-		cfg.HTTPTimeout = 10 * time.Second
+		cfg.HTTPTimeout = def.HTTPTimeout
 	}
 	if cfg.UserAgent == "" {
-		cfg.UserAgent = "native-llm-gateway/quota-restore-1.0"
+		cfg.UserAgent = def.UserAgent
 	}
 	m := &Manager{
 		logger:   logger,

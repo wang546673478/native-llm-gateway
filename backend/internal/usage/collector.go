@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/wang546673478/native-llm-gateway/internal/config"
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 )
 
@@ -48,10 +49,10 @@ type Collector struct {
 // flushInterval: 多久强制 flush 一次
 func NewCollector(db *gorm.DB, batchSize, flushIntervalMs int) *Collector {
 	if batchSize <= 0 {
-		batchSize = 100
+		batchSize = config.DefaultUsageBatchSize
 	}
 	if flushIntervalMs <= 0 {
-		flushIntervalMs = 10_000 // 10s
+		flushIntervalMs = int(config.DefaultUsageFlushInterval.Milliseconds()) // 10s
 	}
 	return &Collector{
 		db:        db,
