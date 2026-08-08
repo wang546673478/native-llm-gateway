@@ -142,6 +142,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns, SelectOption } from 'naive-ui'
 import { api, type ProviderKeyView } from '../api/client'
+import { copyText } from '../utils/clipboard'
 
 interface ProviderInfo {
   name: string
@@ -383,18 +384,8 @@ async function save() {
 
 async function copyNewKeySecret() {
   if (!newKeySecret.value) return
-  try {
-    await navigator.clipboard.writeText(newKeySecret.value)
-    message.success('已复制到剪贴板')
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = newKeySecret.value
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    message.success('已复制')
-  }
+  const ok = await copyText(newKeySecret.value)
+  message.success(ok ? '已复制到剪贴板' : '复制失败')
 }
 
 // 复制密钥到剪贴板
@@ -403,18 +394,8 @@ async function copyKey(row: KeyView) {
     message.error('密钥为空,无法复制')
     return
   }
-  try {
-    await navigator.clipboard.writeText(row.key)
-    message.success(`已复制 ${row.name} 的密钥`)
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = row.key
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    message.success('已复制')
-  }
+  const ok = await copyText(row.key)
+  message.success(ok ? `已复制 ${row.name} 的密钥` : '复制失败')
 }
 
 async function confirmDelete(row: KeyView) {

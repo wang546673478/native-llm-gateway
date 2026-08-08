@@ -58,9 +58,12 @@ func (ModelAlias) TableName() string { return "model_aliases" }
 // Gateway 调上游时由 Authenticator 从这里构建 KeyPool 取 key
 // P48: 每把 key 独立标注 billing_source — 支持同 provider 同时有 token_plan + api key
 type ProviderAPIKey struct {
-	ID           uint   `gorm:"primaryKey;autoIncrement" json:"id"`
-	ProviderName string `gorm:"column:provider_name;index;not null" json:"provider_name"`
-	Name         string `gorm:"column:name;not null" json:"name"`
+	ID uint `gorm:"primaryKey;autoIncrement" json:"id"`
+	// ProviderName+Name 复合唯一 — 消除重复 key 可被插入的 DB 不变量缺失
+	// (migration 002 曾声明 UNIQUE(provider_name,name),AutoMigrate 此前漏了)。
+	// 同 provider 内 key 名唯一,避免重复行导致调度歧义。
+	ProviderName string `gorm:"column:provider_name;not null;uniqueIndex:idx_provider_key_name" json:"provider_name"`
+	Name         string `gorm:"column:name;not null;uniqueIndex:idx_provider_key_name" json:"name"`
 	// KeyHash 存明文(P30 暂不上加密,跟 GatewayKey 一样,生产可加)
 	KeyHash string `gorm:"column:key_hash;not null" json:"-"`
 	Enabled bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`

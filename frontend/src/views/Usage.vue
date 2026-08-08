@@ -30,14 +30,11 @@ import { h, onMounted, reactive, ref } from 'vue'
 import { NButton, NCard, NDataTable, NInput, NSpace, NSpin, NText, NTag } from 'naive-ui'
 import { api, type AggregateRow, type ModelProviderRow } from '../api/client'
 import { fmtDateTime } from '../utils/time'
+import { fmtNum } from '../utils/status'
 
 const rows = ref<AggregateRow[]>([])
 const records = ref<any[]>([])
 const loading = ref(true)
-
-function fmtNum(n: number): string {
-  return n.toLocaleString()
-}
 
 // P65: provider 分布缓存(model_id → providers 列表)
 const providerMap = ref<Record<string, ModelProviderRow[]>>({})

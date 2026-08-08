@@ -96,6 +96,7 @@ import {
 } from 'naive-ui'
 import { api, type DashboardResp } from '../api/client'
 import { QUOTA_KIND } from '../api/constants'
+import { fmtNum } from '../utils/status'
 
 const data = ref<DashboardResp | null>(null)
 const loading = ref(true)
@@ -110,11 +111,6 @@ const poolColumns = [
   { title: 'Cooling', key: 'cooling_keys' },
   { title: 'Disabled', key: 'disabled_keys' },
 ]
-
-function fmtNum(n: number | undefined): string {
-  if (n === undefined || n === null) return '—'
-  return n.toLocaleString()
-}
 
 // P47 helper removed in P48 — billing_source 已不在 dashboard 顶层展示
 // billing_source 现在是 key 级别的,可以在 Provider Keys 页面看每把 key 的 tier

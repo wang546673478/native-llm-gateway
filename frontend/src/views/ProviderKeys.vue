@@ -79,6 +79,7 @@ import {
 import type { DataTableColumns } from 'naive-ui'
 import { api, type ProviderKeyView, type VendorInfo } from '../api/client'
 import { BILLING_SOURCE, BILLING_SOURCE_DEFAULT, KEY_STATUS, KEY_STATUS_DISABLED_UI, QUOTA_KIND } from '../api/constants'
+import { STATUS_PALETTE } from '../utils/status'
 import { fmtDateTime } from '../utils/time'
 
 const keys = ref<ProviderKeyView[]>([])
@@ -182,11 +183,11 @@ const columns: DataTableColumns<ProviderKeyView> = [
     width: 160,
     render: (row) => {
       const map: Record<string, { color: string; label: string }> = {
-        [BILLING_SOURCE.TOKEN_PLAN]: { color: '#2080f0', label: '📦 token_plan' },
-        [BILLING_SOURCE.API]:        { color: '#f0a020', label: '💰 api' },
-        [BILLING_SOURCE.FREE]:       { color: '#18a058', label: '🎁 free' },
+        [BILLING_SOURCE.TOKEN_PLAN]: { color: STATUS_PALETTE.blue.color, label: '📦 token_plan' },
+        [BILLING_SOURCE.API]:        { color: STATUS_PALETTE.yellow.color, label: '💰 api' },
+        [BILLING_SOURCE.FREE]:       { color: STATUS_PALETTE.green.color, label: '🎁 free' },
       }
-      const m = map[row.billing_source] ?? { color: '#999', label: row.billing_source }
+      const m = map[row.billing_source] ?? { color: STATUS_PALETTE.gray.color, label: row.billing_source }
       return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)
     },
   },
@@ -201,16 +202,16 @@ const columns: DataTableColumns<ProviderKeyView> = [
       // P-per-key-circuit: 熔断状态优先显示(熔断 = 该 key 暂时不参与调度,
       // 30s 后半开放行自动恢复;只影响这一把 key,不影响同 provider 其他 key)
       if (row.circuit_open) {
-        return h('span', { style: { color: '#d03050', fontWeight: 500 } }, '⚡ 熔断中')
+        return h('span', { style: { color: STATUS_PALETTE.red.color, fontWeight: 500 } }, '⚡ 熔断中')
       }
       const status = (row.status || (row.enabled ? KEY_STATUS.ACTIVE : KEY_STATUS_DISABLED_UI)).toUpperCase()
       const map: Record<string, { color: string; label: string }> = {
-        [KEY_STATUS.ACTIVE]:          { color: '#18a058', label: '● 启用' },
-        [KEY_STATUS.COOLING]:         { color: '#2080f0', label: '⏱ 冷却中' },
-        [KEY_STATUS.QUOTA_EXCEEDED]:  { color: '#f0a020', label: '⚠ 配额耗尽' },
-        [KEY_STATUS_DISABLED_UI]:     { color: '#999',    label: '○ 已关闭' },
+        [KEY_STATUS.ACTIVE]:          { color: STATUS_PALETTE.green.color, label: '● 启用' },
+        [KEY_STATUS.COOLING]:         { color: STATUS_PALETTE.blue.color, label: '⏱ 冷却中' },
+        [KEY_STATUS.QUOTA_EXCEEDED]:  { color: STATUS_PALETTE.yellow.color, label: '⚠ 配额耗尽' },
+        [KEY_STATUS_DISABLED_UI]:     { color: STATUS_PALETTE.gray.color, label: '○ 已关闭' },
       }
-      const m = map[status] ?? { color: '#999', label: status }
+      const m = map[status] ?? { color: STATUS_PALETTE.gray.color, label: status }
       return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)
     },
   },
@@ -225,22 +226,16 @@ const columns: DataTableColumns<ProviderKeyView> = [
     width: 130,
     render: (row) => {
       if (!row.last_polled_at) {
-        return h('span', { style: { color: '#999' } }, '未轮询')
+        return h('span', { style: { color: STATUS_PALETTE.gray.color } }, '未轮询')
       }
       const colour = balanceColour(row, tierMaxForRow(row), warnThresholdPct.value)
-      const map: Record<string, string> = {
-        green:  '#18a058',
-        yellow: '#f0a020',
-        red:    '#d03050',
-        gray:   '#999',
-      }
       const text =
         row.quota_kind === QUOTA_KIND.PERCENT
           ? `${Math.floor(row.remaining)}%`
           : `¥${row.remaining.toFixed(2)}`
       return h(
         'span',
-        { style: { color: map[colour] ?? '#999', fontWeight: 500 } },
+        { style: { color: STATUS_PALETTE[colour as keyof typeof STATUS_PALETTE]?.color ?? '#999', fontWeight: 500 } },
         text,
       )
     },

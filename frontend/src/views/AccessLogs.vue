@@ -219,6 +219,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns, DataTableCreateRowProps } from 'naive-ui'
 import { api, type AccessLog, type AccessLogDetailResp } from '../api/client'
+import { copyText } from '../utils/clipboard'
 import { fmtDateTime, fmtTime } from '../utils/time'
 
 const message = useMessage()
@@ -531,12 +532,9 @@ const rowProps: DataTableCreateRowProps<AccessLog> = row => ({
 
 async function copy(text: string) {
   if (!text) return
-  try {
-    await navigator.clipboard.writeText(text)
-    message.success('已复制')
-  } catch {
-    message.error('复制失败')
-  }
+  const ok = await copyText(text)
+  if (ok) message.success('已复制')
+  else message.error('复制失败')
 }
 
 function errorMessage(error: unknown) {
