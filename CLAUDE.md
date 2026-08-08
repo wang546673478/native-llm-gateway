@@ -195,22 +195,41 @@ sudo systemctl start llm-gateway # systemd 托管
 
 ### 已完成(通过全部测试,网关稳定)
 
+**耦合解耦(七轮 20+ commit):**
+
+| 类别 | 改动 | 效果 |
+|---|---|---|
+| 死代码 | 删 `AcquireWithFilter` filter chain(半成品) | 消除 keypool 双实现漂移,单一真相源 |
+| 裸串魔数 | keypool.ErrorType + BillingSource 常量 + 守卫测试 | 消除 error type / billing source "改一处改多处"漂移 |
+| 复制粘贴 | provider.ToPool(六合一)/ClassifyTransportError/NewError/ParseRetryAfter/pickAllowedModel | 协议 base + vendor 复制逻辑收敛单源 |
+| 前后端契约 | client.ts 收编 raw axios + constants.ts 集中枚举 + ProviderKeyView 单类型 | 前后端路径/类型/枚举单一真相 |
+| 行为类(用户决断) | StreamTimeoutFloor 可配置 / 429 核心单源各家分叉 / Manager 改 ProviderLookup 窄接口 | 流式超时可调、429 共享语义、router/proxy 依赖窄接口 |
+| 并发 | ReloadProviderPool 整表原子替换(修崩溃)、keypool.MutateKey(修竞态)、shutdownCtx+Stop(修泄漏)、SendOrAbort(修流阻塞泄漏) | 消除进程崩溃 + 数据竞争 + goroutine/流泄漏 |
+| DB | ProviderAPIKey(ProviderName+Name) 复合唯一索引 | 修复重复 key 可插入 |
+| 配置孤岛 | DefaultUsageXxx / quotacheck DefaultManagerConfig 单源 / authErrorCooling 命名 / provider_default 消费 / probe 用 HTTPTimeout | 配置默认单一来源,operator 改配置全生效 |
+
+**单点修复:**
+
 | 改动 | 效果 |
 |---|---|
-| `acquireFromTierLocked` 拆分 → **已收敛为单一实现** | filter chain 曾作为半成品死代码(零生产调用),现**已删除**(filter.go/filter_test.go)。生产唯一路径 `acquireFromTierLocked`(pool.go)承担全部 key 采集;单一真相源,无双实现漂移 |
+| `acquireFromTierLocked` 拆分 → **已收敛为单一实现** | filter chain 曾是死代码,已删;`acquireFromTierLocked` 为唯一路径 |
 | `swapToOtherKey` 拆分 | `poolForFailover` / `allowedIDSetFromRequest` / `swapToOtherKey` 3 个职责 |
-| `routing.model` fallback | `filterCandidates` 里 model 为空自动用 `default_model`,允许省略字段 |
+| `routing.model` fallback | `filterCandidates` model 空自动用 `default_model` |
 | Pool 解耦 circuit | `BreakerFactory` 接口注入,`keypool` 不再 import `circuit` |
 | magic key 抽象 | `GatewayKeyContext`(context.go),消除 5 处 `c.Get("gateway_key")` 散布 |
 | Provider 自动注册 | 新增 `provider/builtin/`,main.go 6 个 blank import → 1 个 |
-| Bug: weige QE 死循环 | `ReportSuccess` + `CheckQuota` 才恢复 QE,`poll` 不再直接 restore |
+| Bug: weige QE 死循环 | `ReportSuccess` + `CheckQuota` 才恢复 QE |
 | Bug: COOLING 卡死 | `ReportRateLimit` token_plan 连续冷却升级 QE |
+| handler→mimo 解耦 | 管理 API handler 不再直连厂商包,闭包注入(bda7ad0) |
+| magic key→gkCtx | proxy 5 处 `c.Get("gateway_key")` 统一走接口(a75ea23) |
 
-### 剩余已知耦合(修复风险 > 收益,保网关稳定 — 暂缓)
+### 剩余耦合(评估为合理保留,保网关稳定)
 
-| 耦合 | 位置 | 建议 |
+| 耦合 | 位置 | 判断 |
 |---|---|---|
-| `provider/provider.go` import `keypool` | provider 依赖 keypool | Pool 用 interface{} 已规避循环,`Request.Key *keypool.Key` 为合理类型依赖,保留 |
-| `router` 依赖 `*provider.Manager` 具体类型 | router/router.go:83 | 用窄接口(Get/GetAll/Models/DefaultModelFor/…)对外,具体 Manager 只做协调器持有;CLAUDE.md 注释已说明合法依赖,暂缓接口化 |
-| `proxy.Engine` 持 3 个具体跨包引用 | proxy.Engine: `*router.Router`/`*auth.Authenticator`/`*accesslog.Recorder` | 均为注入的窄方法协作方(方法面小:Route/CheckAllowed/RecordAsync 等),接口化收益 < 复杂度,保留 |
-| `provider/{deepseek,glm,mimo,minimax} → quotacheck` | 厂商 balancer.go 实现 quotacheck.Balancer | 依赖倒置:消费者 quotacheck 定义接口,实现方注册。无循环,方向正确,保留 |
+| `provider` import `keypool` | provider/registry.go `Pool interface{}` + `Request.Key` | 合理类型依赖(pool 注入,非构造),保留 |
+| `proxy.Engine` 持 3 个具体跨包引用 | `*router.Router`/`*auth.Authenticator`/`*accesslog.Recorder` | 窄方法协作方,接口化收益<复杂度,保留 |
+| `provider/{deepseek,glm,mimo,minimax}→quotacheck` | 厂商 balancer 实现 quotacheck.Balancer | 依赖倒置(消费者定接口,实现方注册),保留 |
+| circuit 内建默认(5/60s/30s/1) | circuit.New 硬编码 | 合法包内单源;不为集中去 import config,保留 |
+| write_timeout 双语义 | http.Server 原始值 vs 引擎 2m 流式兜底 | 有意设计差异(socket 绝对上限 vs chunk 续期),保留 |
+| `mimo.quotaCookie` 全局单例 | provider/mimo/balancer.go | 通过 MimoQuotaSet 闭包注入隔离,proxy 不直接碰,保留 |
