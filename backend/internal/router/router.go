@@ -169,13 +169,7 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		model := r.manager.DefaultModelFor(name)
 		// P-whitelist-select: 白名单参与选择(非空且非通配)
 		if len(o.AllowedModels) > 0 && !sliceContains(o.AllowedModels, "*") {
-			picked := ""
-			for _, am := range o.AllowedModels {
-				if sliceContains(p.Models(), am) {
-					picked = am
-					break
-				}
-			}
+			picked := pickAllowedModel(p.Models(), o.AllowedModels)
 			if picked == "" {
 				continue // 该 provider 声明的模型都不在白名单 → 不参与
 			}
@@ -216,6 +210,20 @@ func sliceContains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// pickAllowedModel 在 provider 声明的模型里按白名单顺序挑第一个命中的。
+// 单一职责:routeCatchAllAuto 与 filterCandidates 两处都实现了同一段
+// "按白名单拍序的候选选中" 循环(filter 语义:白名单里第一个 provider 声明过的
+// 模型胜出)。抽出单源,消除复制粘贴型耦合 —— 改选择规则(如"精确匹配优先")
+// 只需改这一处。
+func pickAllowedModel(models, allowed []string) string {
+	for _, am := range allowed {
+		if sliceContains(models, am) {
+			return am
+		}
+	}
+	return ""
 }
 
 // routeAliasRule 走一条 alias 规则(长格式显式 providers 或短格式 TargetModel)。
@@ -340,14 +348,7 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		// 白名单校验逐个跳过,全部跳过时 handleAllFailed 返 403 model_not_allowed
 		// (删候选会让 proxy 无候选 → 503 no_route,语义错误)
 		if whitelistSelect {
-			picked := ""
-			for _, am := range o.AllowedModels {
-				if sliceContains(pv.Models(), am) {
-					picked = am
-					break
-				}
-			}
-			if picked != "" {
+			if picked := pickAllowedModel(pv.Models(), o.AllowedModels); picked != "" {
 				p.Model = picked
 			}
 		}

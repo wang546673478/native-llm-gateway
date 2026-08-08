@@ -55,7 +55,7 @@ func NewBase(cfg Config) *Base {
 // body 原样透传(Gateway 已经抽出了 model,这里直接从 body 找 model)
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	if b.cfg.Pool == nil {
-		return nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 优先用路由层已 acquire 的 key(双 acquire 会标错冷却 key)
 	key := req.Key
@@ -63,7 +63,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	if key == nil {
 		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolGoogle))
 		if err != nil {
-			return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
 	}
 
@@ -72,7 +72,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(req.Body))
 	if err != nil {
-		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	// 官方推荐用 header 而不是 ?key= query
@@ -83,19 +83,16 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 
 	httpResp, err := b.client.Do(httpReq)
 	if err != nil {
-		errType := provider.ErrorTypeConnection
-		if ctx.Err() == context.DeadlineExceeded {
-			errType = provider.ErrorTypeTimeout
-		}
+		errType := provider.ClassifyTransportError(ctx, err)
 		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, b.newError(0, errType, err.Error())
+		return nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		b.cfg.Pool.ReportError(key, "io_error")
-		return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -106,7 +103,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		} else {
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
-		return nil, b.newError(httpResp.StatusCode, errType,
+		return nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
 			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
 	}
 
@@ -124,7 +121,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 // SendStreamRequest 流式 Google 请求
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	if b.cfg.Pool == nil {
-		return nil, nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
 	key := req.Key
@@ -132,7 +129,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if key == nil {
 		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolGoogle))
 		if err != nil {
-			return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
 	}
 
@@ -145,7 +142,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	endpoint := b.buildEndpoint(req.Model, true)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(req.Body))
 	if err != nil {
-		return nil, nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-goog-api-key", key.Key)
@@ -155,12 +152,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		errType := provider.ErrorTypeConnection
-		if ctx.Err() == context.DeadlineExceeded {
-			errType = provider.ErrorTypeTimeout
-		}
+		errType := provider.ClassifyTransportError(ctx, err)
 		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, b.newError(0, errType, err.Error())
+		return nil, nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -173,7 +167,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		} else {
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
-		return nil, nil, b.newError(httpResp.StatusCode, errType,
+		return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
 			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
 	}
 
@@ -266,18 +260,6 @@ func (b *Base) buildEndpoint(model string, stream bool) string {
 }
 
 // newError helper
-func (b *Base) newError(status int, errType provider.ErrorType, msg string, rawErr ...[]byte) *provider.ProviderError {
-	pe := &provider.ProviderError{
-		ProviderName: b.cfg.Name,
-		StatusCode:   status,
-		ErrorType:    errType,
-		Message:      msg,
-	}
-	if len(rawErr) > 0 {
-		pe.RawError = rawErr[0]
-	}
-	return pe
-}
 
 // parseGoogleUsage 从 Google 响应抽 usage
 // 格式: {"usageMetadata": {"promptTokenCount": N, "candidatesTokenCount": M, "totalTokenCount": T}}

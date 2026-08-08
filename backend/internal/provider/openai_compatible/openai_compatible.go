@@ -137,10 +137,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 
 	httpResp, err := b.client.Do(httpReq)
 	if err != nil {
-		errType := provider.ErrorTypeConnection
-		if ctx.Err() == context.DeadlineExceeded {
-			errType = provider.ErrorTypeTimeout
-		}
+		errType := provider.ClassifyTransportError(ctx, err)
 		b.cfg.Pool.ReportError(key, string(errType))
 		return nil, &provider.ProviderError{
 			ProviderName: b.cfg.Name, ErrorType: errType,
@@ -276,10 +273,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		errType := provider.ErrorTypeConnection
-		if ctx.Err() == context.DeadlineExceeded {
-			errType = provider.ErrorTypeTimeout
-		}
+		errType := provider.ClassifyTransportError(ctx, err)
 		b.cfg.Pool.ReportError(key, string(errType))
 		return nil, nil, &provider.ProviderError{
 			ProviderName: b.cfg.Name, ErrorType: errType,

@@ -137,7 +137,7 @@ func (b *Base) classifyUpstream(status int, header http.Header, body []byte, key
 //	Body 原样透传
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	if b.cfg.Pool == nil {
-		return nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 优先用路由层已 acquire 的 key — 否则双 acquire 可能
 	// 拿到不同 key,429 时冷却标到没发过请求的 key 上(2026-08-06 实测)
@@ -146,7 +146,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	if key == nil {
 		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
 		if err != nil {
-			return nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
 	}
 
@@ -159,7 +159,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
 			bytes.NewReader(body))
 		if err != nil {
-			return nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 		}
 		httpReq.Header.Set("x-api-key", key.Key)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
@@ -169,18 +169,15 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		}
 		httpResp, err := b.client.Do(httpReq)
 		if err != nil {
-			errType := provider.ErrorTypeConnection
-			if ctx.Err() == context.DeadlineExceeded {
-				errType = provider.ErrorTypeTimeout
-			}
+			errType := provider.ClassifyTransportError(ctx, err)
 			b.cfg.Pool.ReportError(key, string(errType))
-			return nil, b.newError(0, errType, err.Error())
+			return nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
 		}
 		respBody, readErr := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
 		if readErr != nil {
 			b.cfg.Pool.ReportError(key, "io_error")
-			return nil, b.newError(0, provider.ErrorTypeConnection, readErr.Error())
+			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, readErr.Error())
 		}
 		// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
 		// 1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded;P-quota-guard 见 classifyUpstream
@@ -193,7 +190,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 				select {
 				case <-time.After(rateLimitRetryDelay(retryAfter)):
 				case <-ctx.Done():
-					return nil, b.newError(0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+					return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
 				}
 				continue
 			}
@@ -201,7 +198,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
 		if errType != "" {
-			return nil, b.newError(httpResp.StatusCode, errType, msg, respBody)
+			return nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
 		}
 
 		b.cfg.Pool.ReportSuccess(key)
@@ -232,7 +229,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 //	data: {"type":"message_stop"}
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	if b.cfg.Pool == nil {
-		return nil, nil, b.newError(0, provider.ErrorTypeConnection, "keypool not configured")
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
 	key := req.Key
@@ -240,7 +237,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if key == nil {
 		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
 		if err != nil {
-			return nil, nil, b.newError(0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
+			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
 	}
 
@@ -266,7 +263,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
 			bytes.NewReader(body))
 		if err != nil {
-			return nil, nil, b.newError(0, provider.ErrorTypeConnection, err.Error())
+			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 		}
 		httpReq.Header.Set("x-api-key", key.Key)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
@@ -278,12 +275,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 
 		httpResp, err := client.Do(httpReq)
 		if err != nil {
-			errType := provider.ErrorTypeConnection
-			if ctx.Err() == context.DeadlineExceeded {
-				errType = provider.ErrorTypeTimeout
-			}
+			errType := provider.ClassifyTransportError(ctx, err)
 			b.cfg.Pool.ReportError(key, string(errType))
-			return nil, nil, b.newError(0, errType, err.Error())
+			return nil, nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
 		}
 
 		if httpResp.StatusCode >= 400 {
@@ -299,14 +293,14 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 					select {
 					case <-time.After(rateLimitRetryDelay(retryAfter)):
 					case <-ctx.Done():
-						return nil, nil, b.newError(0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+						return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
 					}
 					continue
 				}
 			} else if errType != "" {
 				b.cfg.Pool.ReportError(key, string(errType))
 			}
-			return nil, nil, b.newError(httpResp.StatusCode, errType, msg, respBody)
+			return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
 		}
 
 		// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
@@ -337,14 +331,14 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 					select {
 					case <-time.After(rateLimitRetryDelay(0)):
 					case <-ctx.Done():
-						return nil, nil, b.newError(0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+						return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
 					}
 					continue
 				}
 			} else {
 				b.cfg.Pool.ReportError(key, string(errType))
 			}
-			return nil, nil, b.newError(httpResp.StatusCode, errType,
+			return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
 				fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
 		}
 		// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
@@ -542,18 +536,6 @@ func (b *Base) SetPool(p *keypool.Pool) {
 }
 
 // newError helper
-func (b *Base) newError(status int, errType provider.ErrorType, msg string, rawErr ...[]byte) *provider.ProviderError {
-	pe := &provider.ProviderError{
-		ProviderName: b.cfg.Name,
-		StatusCode:   status,
-		ErrorType:    errType,
-		Message:      msg,
-	}
-	if len(rawErr) > 0 {
-		pe.RawError = rawErr[0]
-	}
-	return pe
-}
 
 // parseAnthropicUsage 从 Anthropic 响应抽取 usage
 // 格式: {"usage": {"input_tokens": N, "output_tokens": M, "cache_creation_input_tokens": ?, "cache_read_input_tokens": ?}}
