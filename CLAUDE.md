@@ -84,7 +84,7 @@ backend/
 │   ├── router/                ← 路由(catch_all / alias / tier 拉平)
 │   ├── proxy/                 ← 代理引擎(failover / 白名单逐候选 / swapToOtherKey)
 │   ├── keypool/               ← key 池(tier 桶 / 额度状态机 / per-key 熔断 / 调度器)
-│   │   ├── scheduler.go        ← RoundRobin / LeastUsed / Random
+│   │   ├── scheduler.go        ← Sticky(顺序黏性,默认) / RoundRobin / LeastUsed / Random
 │   │   ├── pool.go             ← acquireFromTierLocked(核心,待拆分)
 │   │   └── key.go              ← IsUsable / IsPolledAndExhausted
 │   ├── circuit/               ← per-key 熔断器(CLOSED → OPEN → HALF_OPEN)
@@ -214,6 +214,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | 重大重构(十四轮) | timeouts 死配置孤岛删除(server_read/write/idle+request_total) / openai 13 处 NewError 单源 + io_error 归类分歧消除 / Pool interface{}→*keypool.Pool + 删 main.go buildPools / 前端 vendorOptions/regToVendor/quotaDisplay 单源 | DB 是 config key 唯一权威;三协议 base 构造收敛 NewError;per-key 熔断对 io 失败一致生效;config keys[] dual-path 彻底消除(009236a+o069cbc+2ff6d3e+afb5e83) |
 | 深度审计(十五轮) | 数据竞态 F1/F2/F4 / DB 数据完整性 H1/M1/M2 / 热重载 s.cfg 分歧 / 前端过滤契约补漏 / 文档漂移 | 锁边界 + 熔断热路径竞态(3 subagent:并发/DB/热载审计)全修 → -race 0 race;usage/accesslog/gateway-key 静默丢数据+重复插+reload 误吞全修(ef9308d+e2f163d+c0d12dc+93e929e+545cc72) |
 | HTTP/balancer/常量(十六轮) | status 白名单单源破坏(修自引 bug) / ClassifyErrorWithBody 400 quota 盲区 / gemini+qwen probe fallback 误路由 / glm Bearer 统一 / 低危契约规范化 | 前端过滤加项漏后端白名单(全坏)修复+守卫测试;400 quota→failover;QE 永不复原修;死端点/错误 token/doc 漂移清理(7b00819+dac1ddf+8492123) |
+| Key 调度树状模型(十七轮) | 同 provider key 顺序黏性(sticky 先用尽一把再切) / 候选名单天然化(catch_all `{}`) / 429 同 key 重试10次 / route_order 排序改写(方案B,表+GET/PUT+热生效) / 前端拖拽树状图 | 加 priority 无需字段;层内 provider 按最早 key 时间;route_order 改写覆盖(Level2 provider/Level3 key);保存→重进保持;低耦合:StickyScheduler current 私有、顺序覆盖接口注入、枚举单源(8893971+769a927+d9341a2+5674a5a+994a710+682dd62+b23ea78+0a234c8+0682a6d+0ba9b49+13f07c1) |
 
 **单点修复:**
 
@@ -247,3 +248,4 @@ sudo systemctl start llm-gateway # systemd 托管
 | admin list 锁外读 *Key(F3) | server SetKeyStatusLookup/SetPoolLookup + auth handler 读 k.Status | admin 频次 + amd64 不撕裂;为低危竞态在热路径加锁风险>收益,保留 |
 | **/api/v1+/admin 管理面无鉴权(3.1)** | mark-quota-exceeded/create key 等敏感突变端点无 auth | **安全风险,用户决断**:keys CRUD 设计上证 auth-free(trusted network),但整个管理面无鉴权有成真实暴露风险——待用户决定加 admin auth/网络绑定,不擅自锁死 |
 | Logging.output/file_path + usage.retention_days + keypool.health_check_interval(#140) | 零消费 config 字段 | 疑似"拟建未接"功能(文件日志/用量保留)非意外孤岛,移除是产品决定,暂缓评估 |
+| 前端树聚合粒度 ≠ 路由候选单元 | Routing 树按 vendor 折叠(minimax 一面显 weige/key-1);路由把 minimax/anthropic vs minimax-openai 当独立候选 | 展示简化非耦合错误:树拖拽命中 vendor key 序(scope=key provider=minimax)共享两协议面 pool。若想让树反映真实候选需改聚合粒度(产品决策,非耦合问题),保留 |

@@ -35,6 +35,23 @@
 | **tier 计费** | `billing_source: token_plan / api / free` 决定层级;token plan 额度耗尽自动切 api 层,恢复自动切回(实测双向验证) |
 | **白名单 = 链上模型选择** | key 的「允许的模型」直接决定链上服务哪些真实模型(provider 声明过白名单模型就用白名单模型),UI 改即生效 |
 | **alias 表已退役** | 不再需要为探测名配映射;fallback model 已移除 |
+| **key 顺序黏性(sticky)** | 同 provider 多 key 默认按加入时间「先用尽一把再切下一把」(round_robin 轮换已下线);纯 429 同 key 重试 10 次仍 429 才 COOLING 切换 |
+| **优先级改写** | Routing 页拖拽调 provider/key 顺序 → `PUT /routing/order` 写 route_order 表,热生效 |
+
+### Key 调度:树状模型(2026-08-10)
+
+调度是一棵树,**天然排序、先来先用**,两层可改:
+
+```
+Level 0 候选名单    = 所有有可用 key 的 provider,自动进链(UI 不展示)
+Level 1 分层        = key 的 billing_source → token_plan / api 付费层
+Level 2 层内 provider 顺序 = 默认按最早 key 加入时间；可拖拽改写
+Level 3 provider 内 key 顺序 = 默认按加入时间，先用尽一把再切；可拖拽改写
+```
+
+- **天然**:加 provider = 加一把 key 即自动进链;加 key = 自动排到队尾;零配置。
+- **sticky**:同一 provider 内先用最早的 key,额度耗尽/故障(COOLING/熔断/429×10)才推进到下一把;额度探测恢复自动切回高位 key。
+- **改写**:Routing 页拖拽 provider/key 顺序 → 写 `route_order` 表(token_plan/api 各层独立),保存即热生效;不改写时用加入时间兜底。
 
 ## 客户端接入(三种全通)
 
@@ -89,6 +106,7 @@ wire_api = "responses"
 | `GET /providers` | 按厂商聚合的 Provider 列表(共享 pool、每把 key 的熔断/额度状态) |
 | `GET /providers/registered` | Registry 注册名列表(轻量,过滤下拉用) |
 | `GET /routing` | catch_all 状态(自动模式 / 显式列表) |
+| `GET/PUT /routing/order` | Level 2/3 优先级改写:provider 顺序 / 某 provider 内 key 顺序(路由页拖拽落库,热生效) |
 | `GET /keys` | Gateway Key 管理(CRUD;白名单在此配置) |
 | `GET /providers/:name/api-keys` | 厂商 key 池管理(CRUD) |
 | `GET /access-logs` / `/:id/detail` / `/stats` | 接入日志(详情人类可读) |
@@ -218,7 +236,7 @@ backend/internal/
 │   └── registry.go manager.go
 ├── router/                   # catch_all 自动模式 + 白名单选择 + tier 拉平
 ├── proxy/                    # 代理引擎(failover / 白名单逐候选 / Responses 剥离)
-├── keypool/                  # 厂商级 key 池(tier 桶 + 额度状态机 + per-key 熔断)
+├── keypool/                  # 厂商级 key 池(tier 桶 + 额度状态机 + per-key 熔断 + sticky 顺序黏性)
 ├── circuit/                  # per-key 熔断器(5xx/timeout/connection 只熔断该 key)
 ├── quotacheck/               # 余额轮询(标记 QUOTA_EXCEEDED / 恢复)
 ├── accesslog/                # 接入日志(body 文件 + 30 天保留 + 导出)
@@ -229,7 +247,7 @@ backend/internal/
 
 ## 已知边界
 
-- 同 tier 内多个 provider 时顺序随机(api 层有 deepseek/glm/qwen/gemini,多厂商时顺序随机)
+- 同 tier 内多个 provider 顺序 = 默认按该 provider 最早 key 加入时间(先来优先),可用 Routing 页拖拽改写(route_order);无 key/provider 按名字兜底确定性
 - **无终端禁用状态**:上游 auth 错误 → 该 key COOLING 5 分钟自动重试;400 invalid_request 只计数;5xx/timeout/connection → per-key 熔断器(只熔断这一把 key,不连坐同 provider 其他 key)
 - 配额耗尽标记按厂商分两档:poll(有余额接口:deepseek/minimax/glm)→ 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;probe(无接口:qwen/gemini)→ 不永久标记,每次请求重新探测,恢复后自动可用
 - 跨厂商切换时客户端回带的推理块会被网关剥离 + 强制 `effort=none`(DeepSeek 校验)
