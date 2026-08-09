@@ -421,7 +421,7 @@ func loadKeyOrder(db *gorm.DB, provider string) map[string]int {
 	if db == nil {
 		return nil
 	}
-	rows, err := database.NewRouteOrderStore(db).ListByScope(context.Background(), "key", provider)
+	rows, err := database.NewRouteOrderStore(db).ListByScope(context.Background(), "key", provider, "")
 	if err != nil {
 		return nil
 	}
@@ -443,7 +443,7 @@ func (s *Server) reloadProviderOrder() {
 		return
 	}
 	store := database.NewRouteOrderStore(s.db)
-	rows, err := store.ListByScope(context.Background(), "provider", "")
+	rows, err := store.ListByScope(context.Background(), "provider", "", "")
 	if err != nil {
 		s.logger.Warn("load provider order failed, keep default",
 			zap.Error(err), zap.String("scope", "provider"))

@@ -247,10 +247,10 @@ export const api = {
   routing: () => client.get<RoutingResp>('/routing').then(r => r.data),
   // P-route-order: Level 2/3 priority 改写(GET 读改写,PUT 整体替换 → 热生效)
   routeOrder: {
-    get: (scope: 'provider' | 'key', provider?: string) =>
+    get: (scope: 'provider' | 'key', provider?: string, billingSource?: string) =>
       client
         .get<{ scope: string; provider: string; order: string[] }>('/routing/order', {
-          params: { scope, provider: provider ?? '' },
+          params: { scope, provider: provider ?? '', billing_source: billingSource ?? '' },
         })
         .then(r => r.data),
     put: (scope: 'provider' | 'key', provider: string, billingSource: string, order: string[]) =>

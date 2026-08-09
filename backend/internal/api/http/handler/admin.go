@@ -456,7 +456,7 @@ func (a *Admin) getRouteOrder(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"scope": scope, "provider": providerName, "order": []string{}})
 		return
 	}
-	rows, err := a.RouteOrderStore.ListByScope(c.Request.Context(), scope, providerName)
+	rows, err := a.RouteOrderStore.ListByScope(c.Request.Context(), scope, providerName, c.Query("billing_source"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "list_route_order_failed", "detail": err.Error()})
 		return

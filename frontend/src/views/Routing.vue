@@ -218,6 +218,27 @@ async function buildTree() {
     l.providers = m ? Array.from(m.values()) : []
     return l
   })
+  // 应用 route_order 改写序(否则重进页面会用默认序,白保存):
+  //   Level 2 provider 按该层改写序重排;Level 3 每个 provider 的 key 按改写序重排
+  for (const l of layers.value) {
+    try {
+      const po = await api.routeOrder.get('provider', '', l.key)
+      if (po.order.length) {
+        const rank = new Map(po.order.map((name, i) => [name, i]))
+        // 无改写项的 provider 排后(999 兜底,保持默认序在改写项之后)
+        l.providers.sort((a, b) => (rank.get(a.provider) ?? 999) - (rank.get(b.provider) ?? 999))
+      }
+    } catch { /* 无改写 → 默认序 */ }
+    for (const p of l.providers) {
+      try {
+        const ko = await api.routeOrder.get('key', p.provider, l.key)
+        if (ko.order.length) {
+          const krank = new Map(ko.order.map((name, i) => [name, i]))
+          p.keys.sort((a, b) => (krank.get(a.name) ?? 999) - (krank.get(b.name) ?? 999))
+        }
+      } catch { /* 无改写 → 默认序 */ }
+    }
+  }
   dirty.value = false
   dirtyCount.value = 0
 }
