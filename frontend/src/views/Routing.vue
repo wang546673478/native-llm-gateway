@@ -55,7 +55,7 @@
                     <div class="provider-main">
                       <div class="provider-title">
                         <span class="provider-name">{{ prov.provider }}</span>
-                        <n-tag v-if="prov.billing_source === 'token_plan'" size="small" :bordered="false">📦</n-tag>
+                        <n-tag v-if="prov.billing_source === BILLING_SOURCE.TOKEN_PLAN" size="small" :bordered="false">📦</n-tag>
                       </div>
 
                       <!-- Level 3: key 拖拽列表 -->
@@ -74,8 +74,8 @@
                             <div class="key-chip" :data-idx="ki">
                               <span class="key-handle">⋮⋮</span>
                               <span class="key-name">{{ k.name }}</span>
-                              <n-tag size="small" :bordered="false" :type="k.billing_source === 'token_plan' ? 'success' : 'info'">
-                                {{ k.billing_source === 'token_plan' ? 'token_plan' : 'api' }}
+                              <n-tag size="small" :bordered="false" :type="k.billing_source === BILLING_SOURCE.TOKEN_PLAN ? 'success' : 'info'">
+                                {{ k.billing_source === BILLING_SOURCE.TOKEN_PLAN ? BILLING_SOURCE.TOKEN_PLAN : BILLING_SOURCE.API }}
                               </n-tag>
                             </div>
                           </template>
@@ -117,6 +117,7 @@ import { computed, onMounted, ref } from 'vue'
 import draggable from 'vuedraggable'
 import { NCard, NButton, NDataTable, NEmpty, NGrid, NGi, NSpace, NSpin, NTag, NText } from 'naive-ui'
 import { api, type RoutingResp } from '../api/client'
+import { BILLING_SOURCE } from '../api/constants'
 import { useProvidersStore } from '../stores/providers'
 
 const data = ref<RoutingResp | null>(null)
@@ -142,8 +143,8 @@ interface TreeLayer {
 }
 
 const layers = ref<TreeLayer[]>([
-  { key: 'token_plan', label: 'token_plan', color: '#18a058', providers: [] },
-  { key: 'api', label: 'api 付费', color: '#2080f0', providers: [] },
+  { key: BILLING_SOURCE.TOKEN_PLAN, label: 'token_plan', color: '#18a058', providers: [] },
+  { key: BILLING_SOURCE.API, label: 'api 付费', color: '#2080f0', providers: [] },
 ])
 const dirty = ref(false)
 const dirtyCount = ref(0)
@@ -196,7 +197,7 @@ async function buildTree() {
       const res = await api.providerKeys.list(vendor)
       const kws = (res.keys ?? []).filter(k => k.enabled !== false)
       for (const k of kws) {
-        const bs = k.billing_source || 'api'
+        const bs = k.billing_source || BILLING_SOURCE.API
         if (!byLayer[bs]) byLayer[bs] = new Map()
         const node = byLayer[bs].get(vendor) || {
           provider: vendor,
