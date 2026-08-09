@@ -641,6 +641,8 @@ var validStatusTokens = map[string]bool{
 	"upstream_5xx":          true,
 	"connection_error":      true,
 	"timeout":               true,
+	"invalid_request":       true, // proxy.classifyError 回这个(clients request 400)
+	"stream_interrupted":    true, // proxy stream mid-error(上游断流),前端过滤 UI 有
 	"client_disconnected":   true,
 	"unknown":               true,
 }
