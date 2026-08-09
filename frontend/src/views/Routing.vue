@@ -5,15 +5,15 @@
       <template v-if="(data.catch_all.Providers ?? []).length === 0">
         <n-space align="center" style="margin-bottom: 8px">
           <n-tag type="success">自动模式</n-tag>
-          <n-text depth="3" style="font-size: 12px">
+          <n-text depth="3" style="font-size: 13px">
             无路由表:所有 enabled provider 自动参与(按请求路径选协议面) · token_plan → api →
             free 计费 · 加 provider + key 即自动进链。下面拖拽可改写优先级(默认按加入时间)。
           </n-text>
         </n-space>
 
         <!-- 保存/取消条 -->
-        <n-space justify="space-between" align="center" style="margin: 8px 0">
-          <n-text depth="2" style="font-size: 13px; font-weight: 600">
+        <n-space justify="space-between" align="center" style="margin: 12px 0">
+          <n-text depth="2" style="font-size: 15px; font-weight: 600">
             🗂 调度顺序树<span style="font-weight: 400; color: #888"> — 拖拽 provider / key 调整优先级,点保存落库并即时生效</span>
           </n-text>
           <n-space>
@@ -33,7 +33,7 @@
                 <n-tag :bordered="false" :color="{ color: layer.color, textColor: '#fff' }" size="small">
                   {{ layer.label }}
                 </n-tag>
-                <n-text depth="3" style="font-size: 12px">
+                <n-text depth="3" style="font-size: 13px">
                   {{ layer.providers.length }} provider · 拖拽排序
                 </n-text>
               </div>
@@ -55,8 +55,8 @@
                     <div class="provider-main">
                       <div class="provider-title">
                         <span class="provider-name">{{ prov.provider }}</span>
-                        <n-tag v-if="prov.billing_source === 'token_plan'" size="tiny" :bordered="false">📦</n-tag>
-                        <n-text depth="3" size="tiny">{{ prov.protocol || '' }} · {{ prov.defaultModel || '' }}</n-text>
+                        <n-tag v-if="prov.billing_source === 'token_plan'" size="small" :bordered="false">📦</n-tag>
+                        <n-text depth="3" size="small">{{ prov.protocol || '' }} · {{ prov.defaultModel || '' }}</n-text>
                       </div>
 
                       <!-- Level 3: key 拖拽列表 -->
@@ -75,7 +75,7 @@
                             <div class="key-chip" :data-idx="ki">
                               <span class="key-handle">⋮⋮</span>
                               <span class="key-name">{{ k.name }}</span>
-                              <n-tag size="tiny" :bordered="false" :type="k.billing_source === 'token_plan' ? 'success' : 'info'">
+                              <n-tag size="small" :bordered="false" :type="k.billing_source === 'token_plan' ? 'success' : 'info'">
                                 {{ k.billing_source === 'token_plan' ? 'token_plan' : 'api' }}
                               </n-tag>
                             </div>
@@ -86,7 +86,7 @@
                   </div>
                 </template>
               </draggable>
-              <n-text v-if="layer.providers.length === 0" depth="3" style="font-size: 12px; padding: 8px 12px; display:block">
+              <n-text v-if="layer.providers.length === 0" depth="3" style="font-size: 13px; padding: 12px 16px; display:block">
                 (该层暂无 provider)
               </n-text>
             </div>
@@ -247,39 +247,39 @@ onMounted(async () => {
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   background: #fafafa;
-  padding-bottom: 8px;
-  min-height: 120px;
+  padding-bottom: 12px;
+  min-height: 140px;
 }
 .layer-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
+  padding: 12px 16px;
   border-bottom: 1px dashed #e5e7eb;
 }
 .provider-sortable {
-  padding: 6px;
+  padding: 12px;
 }
 .provider-card {
   display: flex;
-  gap: 6px;
+  gap: 10px;
   background: #fff;
   border: 1px solid #ececec;
-  border-radius: 8px;
-  padding: 6px 8px;
-  margin-bottom: 6px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   transition: box-shadow 0.15s;
 }
 .provider-card:hover {
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
 }
 .drag-handle {
   cursor: grab;
   color: #bbb;
   user-select: none;
   padding-top: 2px;
-  font-size: 14px;
+  font-size: 18px;
 }
 .drag-handle:active {
   cursor: grabbing;
@@ -290,35 +290,36 @@ onMounted(async () => {
 .provider-title {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
+  gap: 10px;
+  font-size: 16px;
 }
 .provider-name {
   font-weight: 600;
+  font-size: 16px;
 }
 .key-lane {
-  margin-top: 4px;
+  margin-top: 8px;
 }
 .key-sortable {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 2px 0;
+  gap: 6px;
+  padding: 4px 0;
 }
 .key-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   background: #f5f5f7;
   border-radius: 999px;
-  padding: 2px 8px;
-  font-size: 12px;
+  padding: 5px 14px;
+  font-size: 14px;
   cursor: default;
 }
 .key-handle {
   cursor: grab;
   color: #bbb;
-  font-size: 10px;
+  font-size: 12px;
   user-select: none;
 }
 .key-handle:active {
