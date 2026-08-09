@@ -90,7 +90,7 @@ type AccessEntry struct {
 |---|---|---|---|
 | `gateway_requests_total` | Counter | `provider, status, is_stream, error_type` | 总请求数 |
 | `gateway_tokens_total` | Counter | `provider, type` | token 数(type=input/output) |
-| `gateway_request_duration_seconds` | Histogram | `provider, status` | 请求延迟 |
+| `gateway_request_duration_seconds` | Histogram | `provider, is_stream` | 请求延迟 |
 | `gateway_quota_probe_total` | Counter | `provider, result` | 探测配额(由 quotacheck emit) |
 | `gateway_quota_poll_total` | Counter | `provider, result` | 轮询配额 |
 | `gateway_quota_key_status_transitions_total` | Counter | `provider, from, to` | key 状态转移(如 ACTIVE → QUOTA_EXCEEDED) |

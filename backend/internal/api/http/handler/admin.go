@@ -532,7 +532,7 @@ func (a *Admin) dashboard(c *gin.Context) {
 func (a *Admin) modelProviders(c *gin.Context) {
 	modelID := c.Param("model_id")
 	if modelID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "model_id required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model_id_required"})
 		return
 	}
 	f := usage.QueryFilter{

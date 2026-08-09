@@ -698,22 +698,6 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
 
-	r.GET("/admin/providers", func(c *gin.Context) {
-		all := s.manager.GetAll()
-		out := make([]gin.H, 0, len(all))
-		for name, p := range all {
-			out = append(out, gin.H{
-				"name":     name,
-				"protocol": string(p.Protocol()),
-				"models":   p.Models(),
-			})
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"count":     len(out),
-			"providers": out,
-		})
-	})
-
 	// P8: /metrics(Prometheus 格式)
 	r.GET("/metrics", gin.WrapH(s.metricsC.Handler()))
 
