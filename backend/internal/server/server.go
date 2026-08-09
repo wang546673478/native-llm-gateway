@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -251,7 +252,8 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		pool, ok := vendorPools[vendor]
 		if !ok {
 			poolCfg := toPoolCfg(cfg, vendor, logger)
-			pool = buildOnePool(context.Background(), vendor, sched, poolCfg, store, logger)
+			pool = buildOnePool(context.Background(), vendor, sched, poolCfg, store, logger,
+				loadKeyOrder(db, vendor))
 			vendorPools[vendor] = pool
 		}
 		out[name] = pool
@@ -353,7 +355,9 @@ func vendorHasBalancer(vendor string) bool {
 
 // buildOnePool P35: 给单个 provider 从 DB 构造 Pool
 // 启动时全量构造、运行时热更新都用它
-func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poolCfg keypool.Config, store auth.ProviderKeyStore, logger *zap.Logger) *keypool.Pool {
+// keyOrder P-route-order(2026-08-10,Level 3):key 名 → 改写位次(小在前),nil/空 = 用默认
+// (created_at/id 顺序)。非空时按改写序稳定排序,未列出的 key 保持默认序排后。
+func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poolCfg keypool.Config, store auth.ProviderKeyStore, logger *zap.Logger, keyOrder map[string]int) *keypool.Pool {
 	rows, err := store.List(ctx, name)
 	if err != nil {
 		logger.Warn("read provider keys from DB failed",
@@ -388,11 +392,47 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 			UpdatedAt: row.UpdatedAt,
 		})
 	}
+	// P-route-order(Level 3):有改写时按改写序稳定排;未列出的 key 按原(创建)序排后。
+	if len(keyOrder) > 0 {
+		rank := func(name string) (int, bool) { v, ok := keyOrder[name]; return v, ok }
+		sort.SliceStable(keys, func(i, j int) bool {
+			si, oki := rank(keys[i].Name)
+			sj, okj := rank(keys[j].Name)
+			switch {
+			case oki && okj:
+				return si < sj
+			case oki:
+				return true // 有改写者在前
+			default:
+				return false // 无改写者保持原序(排后)
+			}
+		})
+	}
 	logger.Info("keypool built from DB",
 		zap.String("provider", name),
 		zap.Int("keys", len(keys)),
 	)
 	return keypool.NewPool(name, keys, sched, poolCfg)
+}
+
+// loadKeyOrder P-route-order(2026-08-10,Level 3):从 route_order 表读某 provider 内
+// key 排序改写,name → seq。无 db / 读失败 → 空 map(用默认创建序)。keypool 无用例级错误。
+func loadKeyOrder(db *gorm.DB, provider string) map[string]int {
+	if db == nil {
+		return nil
+	}
+	rows, err := database.NewRouteOrderStore(db).ListByScope(context.Background(), "key", provider)
+	if err != nil {
+		return nil
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	m := make(map[string]int, len(rows))
+	for _, r := range rows {
+		m[r.Name] = r.Seq
+	}
+	return m
 }
 
 // reloadProviderOrder P-route-order(2026-08-10):从 route_order 表读 scope=provider 的
@@ -756,6 +796,9 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		func() { // P-route-order: PUT provider 顺序后热更新 router 的 Level 2 排序
 			s.reloadProviderOrder()
 		},
+		func(provider string) { // P-route-order: PUT key 顺序后重载该 provider 的 pool(Level 3)
+			s.ReloadProviderPool(provider)
+		},
 	)
 	admin.Register(r.Group("/api/v1"))
 
@@ -995,7 +1038,7 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		// poolCfg 与 startup 同一来源(toPoolCfg)—— 保留 BreakerFactory + probe
 		// 配额模式,不让重载丢失熔断/回退成 poll 永久死 key
 		poolCfg := toPoolCfg(s.cfg, vendor, s.logger)
-		pool := buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger)
+		pool := buildOnePool(ctx, vendor, sched, poolCfg, store, s.logger, loadKeyOrder(s.db, vendor))
 		// 低耦合修复:构建新 map(copy + 该 vendor 更新)后整表原子替换,
 		// 不再就地写 s.pools —— 消除与 quotacheck poll 的 Get()(RLock 拷贝)
 		// 并发 map 读写的进程崩溃。旧 map 永不就地变,读方持旧快照也安全。
@@ -1042,7 +1085,7 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		pool, ok := vendorPools[vendor]
 		if !ok {
 			// 与 startup 同一配置来源(toPoolCfg)—— 保留熔断 + probe 配额模式
-			pool = buildOnePool(ctx, vendor, sched, toPoolCfg(s.cfg, vendor, s.logger), store, s.logger)
+			pool = buildOnePool(ctx, vendor, sched, toPoolCfg(s.cfg, vendor, s.logger), store, s.logger, loadKeyOrder(s.db, vendor))
 			vendorPools[vendor] = pool
 		}
 		newPools[name] = pool

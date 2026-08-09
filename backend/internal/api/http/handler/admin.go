@@ -54,6 +54,9 @@ type Admin struct {
 	// P-route-order: PUT /routing/order(scope=provider)成功后由 server 调用来热更新
 	// router 的 ProviderOrder(把 route_order 读回内存生效)。nil = 不热更新。
 	ProviderOrderReload func()
+	// P-route-order: PUT /routing/order(scope=key)成功后由 server 调用来重载该 provider
+	// 的 pool(把 route_order 的 key 序接进 keypool)。nil = 不热更新。
+	KeyOrderReload func(provider string)
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -82,6 +85,7 @@ func NewAdmin(
 	mimoSet func(cookie string), // 可 nil
 	routeOrderStore dbpkg.RouteOrderStore, // 可 nil(改写不可用)
 	providerOrderReload func(), // 可 nil(PUT provider 顺序后热更新 router)
+	keyOrderReload func(provider string), // 可 nil(PUT key 顺序后重载 pool)
 ) *Admin {
 	return &Admin{
 		Manager:             mgr,
@@ -98,6 +102,7 @@ func NewAdmin(
 		MimoQuotaSet:        mimoSet,
 		RouteOrderStore:     routeOrderStore,
 		ProviderOrderReload: providerOrderReload,
+		KeyOrderReload:      keyOrderReload,
 	}
 }
 
@@ -490,9 +495,14 @@ func (a *Admin) putRouteOrder(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "put_route_order_failed", "detail": err.Error()})
 		return
 	}
-	// P-route-order: scope=provider 改写落库后,热更新 router 的 Level 2 排序(立即生效)
-	if req.Scope == "provider" && a.ProviderOrderReload != nil {
+	// P-route-order: 改写落库后按作用域热更新
+	//   scope=provider → 热更新 router 的 Level 2 排序
+	//   scope=key       → 重载该 provider 的 pool(接进 keypool 的 Level 3 排序)
+	if a.ProviderOrderReload != nil && req.Scope == "provider" {
 		a.ProviderOrderReload()
+	}
+	if a.KeyOrderReload != nil && req.Scope == "key" {
+		a.KeyOrderReload(req.Provider)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "scope": req.Scope, "provider": req.Provider, "order": req.Order})
 }
