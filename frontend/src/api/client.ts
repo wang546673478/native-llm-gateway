@@ -245,6 +245,24 @@ export const api = {
       }>(`/providers/${name}`)
       .then(r => r.data),
   routing: () => client.get<RoutingResp>('/routing').then(r => r.data),
+  // P-route-order: Level 2/3 priority 改写(GET 读改写,PUT 整体替换 → 热生效)
+  routeOrder: {
+    get: (scope: 'provider' | 'key', provider?: string) =>
+      client
+        .get<{ scope: string; provider: string; order: string[] }>('/routing/order', {
+          params: { scope, provider: provider ?? '' },
+        })
+        .then(r => r.data),
+    put: (scope: 'provider' | 'key', provider: string, billingSource: string, order: string[]) =>
+      client
+        .put<{ ok: boolean; scope: string; provider: string; order: string[] }>('/routing/order', {
+          scope,
+          provider,
+          billing_source: billingSource,
+          order,
+        })
+        .then(r => r.data),
+  },
   keys: {
     list: () => client.get<KeysResp>('/keys').then(r => r.data),
     // 以下 CRUD 从 Keys.vue 的 raw axios 收编到 client.ts(单一 endpoint 源)
