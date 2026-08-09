@@ -200,3 +200,21 @@ type MimoQuotaCookie struct {
 
 // TableName
 func (MimoQuotaCookie) TableName() string { return "mimo_quota_cookie" }
+
+// RouteOrder 层级排序改写(2026-08-10,Level 2/3)。
+// 只存「用户改写」的排序;默认排序(未改写)由 created_at 派生,route_order 无行 = 零代价。
+// Scope=provider → Provider 是 provider 名,Name 空,Seq 是层内 provider 位次;
+// Scope=key       → Provider 是所属 provider 名,Name 是 key 名,Seq 是 provider 内 key 位次。
+// BillingSource 可选:按层隔离顺序(token_plan/api 各自一段)。
+type RouteOrder struct {
+	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Scope         string    `gorm:"column:scope;not null" json:"scope"` // "provider" | "key"
+	Provider      string    `gorm:"column:provider;not null" json:"provider"`
+	Name          string    `gorm:"column:name;not null;default:''" json:"name"`
+	BillingSource string    `gorm:"column:billing_source;not null;default:''" json:"billing_source"`
+	Seq           int       `gorm:"column:seq;not null;default:0" json:"seq"`
+	UpdatedAt     time.Time `gorm:"column:updated_at" json:"updated_at"`
+}
+
+// TableName
+func (RouteOrder) TableName() string { return "route_order" }
