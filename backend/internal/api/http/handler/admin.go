@@ -49,6 +49,8 @@ type Admin struct {
 	// 等函数注入同模式。nil = 该特性不可用(返回明确错误而非 panic)。
 	MimoQuotaValidate func(ctx context.Context, cookie string) error // 打一次 usage 端点校验
 	MimoQuotaSet      func(cookie string)                            // 热注入到内存(影响路由配额判断)
+	// P-route-order: Level 2/3 优先级改写仓库(nil = 改写功能不可用,GET 返回空、PUT 报错)
+	RouteOrderStore dbpkg.RouteOrderStore
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -75,6 +77,7 @@ func NewAdmin(
 	mimoCookieStore MimoQuotaCookieStore,
 	mimoValidate func(ctx context.Context, cookie string) error, // 可 nil
 	mimoSet func(cookie string), // 可 nil
+	routeOrderStore dbpkg.RouteOrderStore, // 可 nil(改写不可用)
 ) *Admin {
 	return &Admin{
 		Manager:           mgr,
@@ -89,6 +92,7 @@ func NewAdmin(
 		MimoCookieStore:   mimoCookieStore,
 		MimoQuotaValidate: mimoValidate,
 		MimoQuotaSet:      mimoSet,
+		RouteOrderStore:   routeOrderStore,
 	}
 }
 
@@ -112,6 +116,8 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/providers/mimo/quota-cookie", a.getMimoQuotaCookie)
 	r.POST("/providers/mimo/quota-cookie", a.postMimoQuotaCookie)
 	r.GET("/routing", a.listRouting)
+	r.GET("/routing/order", a.getRouteOrder)
+	r.PUT("/routing/order", a.putRouteOrder)
 	r.GET("/usage", a.queryUsage)
 	r.GET("/usage/aggregate", a.aggregateUsage)
 	r.GET("/usage/by_model/:model_id/providers", a.modelProviders) // P65
@@ -424,6 +430,62 @@ func (a *Admin) listRouting(c *gin.Context) {
 		"count":     len(aliases),
 		"catch_all": a.Router.CatchAllConfig(), // P-catch-all: 兜底规则(可能为 null)
 	})
+}
+
+// getRouteOrder GET /api/v1/routing/order?scope=provider|key&provider=<name>
+// 返回某作用域的改写排序(Level 2 层内 provider / Level 3 provider 内 key)。
+// 无 RouteOrderStore 或该作用域无改写 → 空列表(前端回退默认 created_at 排序)。
+func (a *Admin) getRouteOrder(c *gin.Context) {
+	scope := c.Query("scope")
+	providerName := c.Query("provider")
+	if scope != "provider" && scope != "key" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_scope", "detail": "scope=provider|key"})
+		return
+	}
+	if a.RouteOrderStore == nil {
+		c.JSON(http.StatusOK, gin.H{"scope": scope, "provider": providerName, "order": []string{}})
+		return
+	}
+	rows, err := a.RouteOrderStore.ListByScope(c.Request.Context(), scope, providerName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "list_route_order_failed", "detail": err.Error()})
+		return
+	}
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r.Name)
+	}
+	c.JSON(http.StatusOK, gin.H{"scope": scope, "provider": providerName, "order": names})
+}
+
+// putRouteOrder PUT /api/v1/routing/order
+// 整体替换某作用域的改写排序。body: {"scope":"provider|key","provider":"<name>",
+// "billing_source":"<token_plan|api>","order":["a","b","c"]}
+// 无 RouteOrderStore → 503(改写未启用)。
+func (a *Admin) putRouteOrder(c *gin.Context) {
+	if a.RouteOrderStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "route_order_disabled"})
+		return
+	}
+	var req struct {
+		Scope         string   `json:"scope"`
+		Provider      string   `json:"provider"`
+		BillingSource string   `json:"billing_source"`
+		Order         []string `json:"order"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad_request", "detail": err.Error()})
+		return
+	}
+	if req.Scope != "provider" && req.Scope != "key" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_scope", "detail": "scope=provider|key"})
+		return
+	}
+	if err := a.RouteOrderStore.Replace(c.Request.Context(), req.Scope, req.Provider, req.BillingSource, req.Order); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "put_route_order_failed", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "scope": req.Scope, "provider": req.Provider, "order": req.Order})
 }
 
 // queryUsage GET /api/v1/usage?start=&end=&provider=&model=&gateway_key=&limit=&offset=

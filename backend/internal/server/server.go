@@ -726,6 +726,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		// 把 vendor 专属校验/注入闭包传入 — 与 keyStatusLookup/quotaMarkFunc 同模式
 		mimo.ValidateQuotaCookie, // MimoQuotaValidate
 		mimo.SetQuotaCookie,      // MimoQuotaSet
+		database.NewRouteOrderStore(s.db), // P-route-order: Level 2/3 排序改写仓库(可 nil)
 	)
 	admin.Register(r.Group("/api/v1"))
 
