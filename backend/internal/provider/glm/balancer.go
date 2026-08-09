@@ -80,8 +80,10 @@ func (b *glmBalancer) FetchBalance(ctx context.Context, baseURL string, k *keypo
 	if err != nil {
 		return quotacheck.Balance{}, err
 	}
-	// 官方插件用法:Authorization 直接放原始 token(实测 Bearer 也可)
-	req.Header.Set("Authorization", k.Key)
+	// 官方插件用法:Authorization 直接放原始 token(实测 Bearer 也可)。
+	// 与请求路径(openai_compatible Bearer)及 deepseek/minimax balancer 对齐,统一 Bearer,
+	// 避免同一 k.Key 监控端点与请求面鉴权头不一致(上游收紧 auth 时 balancer 才不先挂)。
+	req.Header.Set("Authorization", "Bearer "+k.Key)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := b.client.Do(req)

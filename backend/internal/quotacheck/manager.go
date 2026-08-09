@@ -530,7 +530,9 @@ func (m *Manager) runProbe(ctx context.Context, it *probeItem) {
 	// 退到 Prober
 	prober := LookupProber(it.keyProvider)
 	if prober == nil {
-		// 协议族 fallback
+		// 协议族 fallback — 按 name 后缀(c 修复:gemini/其他 google 协议 provider
+		// 用了专用 prober(__google__/vendor 名),不会走到这里;B_probe 兼容 OpenAI base
+		// 已按 /v1 容忍)默认用 __openai__。
 		provLower := it.keyProvider
 		if endsWith(provLower, "-anthropic") {
 			prober = LookupProber("__anthropic__")

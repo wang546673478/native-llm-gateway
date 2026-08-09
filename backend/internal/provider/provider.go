@@ -291,6 +291,13 @@ func ClassifyErrorWithBody(statusCode int, body []byte) ErrorType {
 	case statusCode == http.StatusUnauthorized:
 		return ErrorTypeAuth
 	case statusCode == http.StatusBadRequest:
+		// D: GLM(1113 余额不足)/qwen(Throttling.RateQuota/QuotaExhausted)等把
+		// 配额错误落在 HTTP 400。body 含 quota 关键字 → 升级为 quota_exceeded
+		// (触发 failover 到下一 provider + key 标 QE),而非 invalid_request。
+		// 纯 400 无 quota 关键字仍是 invalid_request(请求内容问题)。
+		if isQuotaBody {
+			return ErrorTypeQuotaExceeded
+		}
 		return ErrorTypeInvalidRequest
 	case statusCode == http.StatusNotFound:
 		return ErrorTypeModelNotFound

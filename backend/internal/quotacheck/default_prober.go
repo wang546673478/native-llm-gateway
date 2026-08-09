@@ -26,7 +26,13 @@ func newModelsProberOpenAI() *modelsProberOpenAI {
 }
 
 func (p *modelsProberOpenAI) Probe(ctx context.Context, baseURL string, k *keypool.Key) Result {
-	url := strings.TrimRight(baseURL, "/") + "/v1/models"
+	// C 修复:base 若已以 /v1 结尾(如 qwen compatible-mode/v1)则直接 + /models,
+	// 否则 + /v1/models —— 避免双 /v1(v1/v1/models) 打 404 导致 QE 永不复原。
+	base := strings.TrimRight(baseURL, "/")
+	url := base + "/v1/models"
+	if strings.HasSuffix(base, "/v1") {
+		url = base + "/models"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ResultTransportError
@@ -103,6 +109,47 @@ func (p *modelsProberAnthropic) Probe(ctx context.Context, baseURL string, k *ke
 	}
 }
 
+// modelsProberGoogle: GET {base}/models 用 x-goog-api-key 调 probe。
+// C 修复:gemini 是 google 协议(端点 v1beta,鉴权 x-goog-api-key 而非 Bearer),
+// 之前被 name-suffix fallback 误路由到 __openai__(Bearer+/v1/models)→ 401 → QE key
+// 永不复原。现在按协议路由到 __google__,端点为 {base}/models(google.go:233 同款路径)。
+type modelsProberGoogle struct {
+	client *http.Client
+}
+
+func newModelsProberGoogle() *modelsProberGoogle {
+	return &modelsProberGoogle{client: &http.Client{Timeout: DefaultProbeTimeout}}
+}
+
+func (p *modelsProberGoogle) Probe(ctx context.Context, baseURL string, k *keypool.Key) Result {
+	url := strings.TrimRight(baseURL, "/") + "/models"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ResultTransportError
+	}
+	req.Header.Set("x-goog-api-key", k.Key) // Google 用 query/header key,非 Bearer
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return ResultTransportError
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return ResultRestored
+	case isAuthLikeStatus(resp.StatusCode) && !hasQuotaKeyword(body):
+		return ResultAuthFailed
+	case resp.StatusCode == 429, resp.StatusCode == 402, hasQuotaKeyword(body):
+		return ResultStillExhausted
+	case resp.StatusCode >= 500:
+		return ResultTransportError
+	default:
+		return ResultAuthFailed
+	}
+}
+
 func firstModelName(_ string) string {
 	// 探测不依赖具体 model — 大部分 provider 对 unknown model 返 400(非 401/402/429),
 	// 我们的分类里这就是 ResultAuthFailed。但 Anthropic 对 unknown model + 配额 OK 也可能返 200。
@@ -122,6 +169,10 @@ func RegisterDefaultProbers() {
 	openaiP := newModelsProberOpenAI()
 	RegisterProber("__openai__", openaiP)
 	RegisterProber("__anthropic__", newModelsProberAnthropic())
+	gp := newModelsProberGoogle()
+	RegisterProber("__google__", gp)   // C:google 协议族(供按协议引用)
+	RegisterProber("gemini", gp)       // C:gemini(google 协议)name-key 直注册,避免误路由 __openai__
+	RegisterProber("qwen", openaiP)    // C:qwen base 已带 /v1,openai prober 已按 /v1 容忍
 }
 
 // init 注册默认 Prober

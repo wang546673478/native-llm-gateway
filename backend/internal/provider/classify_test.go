@@ -49,3 +49,22 @@ func TestClassifyErrorWithBody_PlainRateLimit429StaysRateLimit(t *testing.T) {
 		t.Errorf("classify(429, plain rate-limit body) = %q, want rate_limit", got)
 	}
 }
+
+// D:GLM/qwen 把配额错误落在 HTTP 400 + body 含 quota 关键字 — 应识别为 quota_exceeded,
+// 触发 failover(而非 invalid_request,那样 key 不熔断、不停 failover)。
+func TestClassifyErrorWithBody_400QuotaBodyUpgradesQuota(t *testing.T) {
+	body := []byte(`{"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}`)
+	got := ClassifyErrorWithBody(http.StatusBadRequest, body)
+	if got != ErrorTypeQuotaExceeded {
+		t.Errorf("classify(400, GLM 1113 body) = %q, want quota_exceeded", got)
+	}
+}
+
+// 纯 400(无 quota 关键字)仍是 invalid_request — 请求内容问题,不误伤。
+func TestClassifyErrorWithBody_Plain400StaysInvalidRequest(t *testing.T) {
+	body := []byte(`{"error":{"message":"unsupported parameter: temperature=0"}}`)
+	got := ClassifyErrorWithBody(http.StatusBadRequest, body)
+	if got != ErrorTypeInvalidRequest {
+		t.Errorf("classify(400, plain body) = %q, want invalid_request", got)
+	}
+}
