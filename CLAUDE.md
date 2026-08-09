@@ -240,7 +240,6 @@ sudo systemctl start llm-gateway # systemd 托管
 | circuit 内建默认(5/60s/30s/1) | circuit.New 硬编码 | 合法包内单源;不为集中去 import config,保留 |
 | write_timeout 双语义 | http.Server 原始值 vs 引擎 2m 流式兜底 | 有意设计差异(socket 绝对上限 vs chunk 续期),保留 |
 | `mimo.quotaCookie` 全局单例 | provider/mimo/balancer.go | 通过 MimoQuotaSet 闭包注入隔离,proxy 不直接碰,保留 |
-| config providers[].keys[] dual-path | ~~main.go buildPools~~ 已删 + APIKeys 写链已删(afb5e83+3a1ede1) | **已彻底消除**:config key 零运行时读(仅 validate 的 _ = p.Keys no-op),DB provider_api_keys 唯一权威 |
 | 测试 fakeProvider ×5 | 各 test 包局部重复 | 抽共享 testutil 会过度耦合(rich behavior mock vs 最简 stub),保留 |
 | 前端每 view 依赖 VendorInfo shape | Providers/ProviderKeys/Keys/AccessLogs/Routing 经 store 消费 | store 只共享 fetch,不抽象后端契约;shape 解耦需契约层,暂缓 |
 | hot-reload 需重启字段 | database/server/usage/providers 等 | 已加 Warn 提示;彻底支持是大重构,字段明确需重启 |
