@@ -195,7 +195,7 @@ sudo systemctl start llm-gateway # systemd 托管
 
 ### 已完成(通过全部测试,网关稳定)
 
-**耦合解耦(十五轮 40+ commit):**
+**耦合解耦(十六轮 45+ commit):**
 
 | 类别 | 改动 | 效果 |
 |---|---|---|
@@ -213,6 +213,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | 重大重构(十三轮) | config keys dual-path 追查 + APIKeys 死写链删除 / Pinia providers store 接入 5 view | APIKeys 纯写死通道(删);5 view 厂商清单共享 fetch(3a1ede1+d1aba91) |
 | 重大重构(十四轮) | timeouts 死配置孤岛删除(server_read/write/idle+request_total) / openai 13 处 NewError 单源 + io_error 归类分歧消除 / Pool interface{}→*keypool.Pool + 删 main.go buildPools / 前端 vendorOptions/regToVendor/quotaDisplay 单源 | DB 是 config key 唯一权威;三协议 base 构造收敛 NewError;per-key 熔断对 io 失败一致生效;config keys[] dual-path 彻底消除(009236a+o069cbc+2ff6d3e+afb5e83) |
 | 深度审计(十五轮) | 数据竞态 F1/F2/F4 / DB 数据完整性 H1/M1/M2 / 热重载 s.cfg 分歧 / 前端过滤契约补漏 / 文档漂移 | 锁边界 + 熔断热路径竞态(3 subagent:并发/DB/热载审计)全修 → -race 0 race;usage/accesslog/gateway-key 静默丢数据+重复插+reload 误吞全修(ef9308d+e2f163d+c0d12dc+93e929e+545cc72) |
+| HTTP/balancer/常量(十六轮) | status 白名单单源破坏(修自引 bug) / ClassifyErrorWithBody 400 quota 盲区 / gemini+qwen probe fallback 误路由 / glm Bearer 统一 / 低危契约规范化 | 前端过滤加项漏后端白名单(全坏)修复+守卫测试;400 quota→failover;QE 永不复原修;死端点/错误 token/doc 漂移清理(7b00819+dac1ddf+8492123) |
 
 **单点修复:**
 
@@ -245,3 +246,5 @@ sudo systemctl start llm-gateway # systemd 托管
 | hot-reload 需重启字段 | database/server/usage/providers 等 | 已加 Warn 提示;彻底支持是大重构,字段明确需重启 |
 | PG role/DB 常量(pg-init vs docker) | 不同层、无 schema 影响 | AutoMigrate 自愈,schema 无风险,保留 |
 | admin list 锁外读 *Key(F3) | server SetKeyStatusLookup/SetPoolLookup + auth handler 读 k.Status | admin 频次 + amd64 不撕裂;为低危竞态在热路径加锁风险>收益,保留 |
+| **/api/v1+/admin 管理面无鉴权(3.1)** | mark-quota-exceeded/create key 等敏感突变端点无 auth | **安全风险,用户决断**:keys CRUD 设计上证 auth-free(trusted network),但整个管理面无鉴权有成真实暴露风险——待用户决定加 admin auth/网络绑定,不擅自锁死 |
+| Logging.output/file_path + usage.retention_days + keypool.health_check_interval(#140) | 零消费 config 字段 | 疑似"拟建未接"功能(文件日志/用量保留)非意外孤岛,移除是产品决定,暂缓评估 |
