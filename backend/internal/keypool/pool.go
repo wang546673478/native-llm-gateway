@@ -574,6 +574,22 @@ func (p *Pool) KeyPtrs() []*Key {
 	return out
 }
 
+// EarliestKeyTime Level 2(2026-08-10):返回该 provider 下最早加入的 key 的 created_at。
+// 用于「层内 provider 排序」的默认值(先来的 provider 优先)。无 key → time.Time{} 零值。
+// 池内 key 均已 enabled(disabled 在 buildOnePool 已滤),无需再判 Enabled。
+func (p *Pool) EarliestKeyTime() time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var t time.Time
+	for _, k := range p.keys {
+		if t.IsZero() || k.CreatedAt.Before(t) {
+			t = k.CreatedAt
+		}
+	}
+	return t
+}
+
+
 // MutateKey 在持有 p.mu(写锁)下安全改单把 key 的字段。
 // 低耦合修复:quotacheck 轮询此前直接写 k.Status/k.Remaining/k.QuotaZeroStreak
 // 等(不经锁),与请求路径 ReportSuccess/ReportError(在 p.mu 下写同一批字段)

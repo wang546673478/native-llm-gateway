@@ -459,6 +459,42 @@ func TestRouter_CatchAllAuto(t *testing.T) {
 	}
 }
 
+// TestRouter_CatchAllAuto_Level2OrderByEarliestKey 自动模式下,层内 provider 顺序 =
+// 该 provider 最早加入 key 的时间(先来的优先),而不是名字序(2026-08-10 Level 2)。
+func TestRouter_CatchAllAuto_Level2OrderByEarliestKey(t *testing.T) {
+	base := time.Now()
+	mkPool := func(bs string, created time.Time) *keypool.Pool {
+		return keypool.NewPool("p", []*keypool.Key{{
+			ID: "1", ProviderName: "p", Name: "k1", Key: "sk",
+			Status: keypool.KeyStatusActive, BillingSource: bs,
+			CreatedAt: created, UpdatedAt: created,
+		}}, nil, keypool.Config{})
+	}
+	// 两个 token_plan 面 provider:zulu 的 key 比 alpha 的 key 更早 → zulu 应排最前(尽管名字靠后)
+	zuluPool := mkPool("token_plan", base.Add(-time.Hour))
+	alphaPool := mkPool("token_plan", base)
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "alpha", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+		&fakeProvider{name: "zulu", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, map[string]*keypool.Pool{
+		"alpha": alphaPool, // 晚加入
+		"zulu":  zuluPool,  // 早加入
+	}, Config{Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"}})
+
+	it, err := r.Route(context.Background(), &provider.Request{Model: "x", Path: "/v1/messages"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "zulu" {
+		t.Errorf("first = %s, want zulu(最早 key 的 provider 优先,虽名字靠后)", res.ProviderName)
+	}
+}
+
 // silence unused if scheduler/test funcs trimmed
 
 // === P64 buildKeyCandidates 单元测试 ===

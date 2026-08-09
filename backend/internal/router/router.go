@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -186,13 +187,31 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 	if len(routes) == 0 {
 		return nil, ErrNoRoute
 	}
-	// P-catch-all-order: manager.GetAll() 是 Go map,迭代顺序随机 — 不排序则每次
-	// 请求候选顺序都不同,同层 provider 谁先被尝试不可复现(2026-08-07 实测:
-	// Claude Code 相邻两条相同请求一条先打 mimo、一条先打 minimax)。
-	// 按 name 确定性排序:同 tier 内稳定、可解释;想要自定义顺序配显式
-	// catch_all providers 列表(如 ["minimax", "mimo-token-plan"])
-	sort.Slice(routes, func(i, j int) bool { return routes[i].Name < routes[j].Name })
+	// P-catch-all-order / Level 2(2026-08-10):manager.GetAll() 是 Go map,迭代顺序随机 —
+	// 不排序则每次请求候选顺序都不同(2026-08-07 实测:相邻两条相同请求一条先打 mimo、
+	// 一条先打 minimax)。候选名单天然化后,层内 provider 顺序默认 = 该 provider 最早加入
+	// key 的时间(先来的优先);无 pool/无 key 的 provider 按 name 兜底,保证确定性。
 	pools := r.poolsSnapshot() // F4: RLock 快照,与 SetPools 写同步
+	earliest := func(name string) time.Time {
+		if pool, ok := pools[name]; ok && pool != nil {
+			return pool.EarliestKeyTime()
+		}
+		return time.Time{}
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		ti, tj := earliest(routes[i].Name), earliest(routes[j].Name)
+		if !ti.Equal(tj) {
+			// 有最早时间者优先;零值(无 key)排最后
+			if ti.IsZero() {
+				return false
+			}
+			if tj.IsZero() {
+				return true
+			}
+			return ti.Before(tj)
+		}
+		return routes[i].Name < routes[j].Name // 同时间按 name 兜底确定性
+	})
 	keyCandidates := buildKeyCandidates(routes, pools)
 	return &RouteIterator{
 		alias:          aliasName,
