@@ -544,7 +544,7 @@ routing:
 keypool:
   cooling_duration: 60s
   health_check_interval: 30s
-  key_rotation: "round_robin"
+  key_rotation: "sticky"   # sticky(默认,先用尽一把再切) | round_robin / least_used / random 可选
   # P68: quota polling / restore 全部 flat key(和 KeyPoolConfig struct 的
   # mapstructure tag 对齐)。不要嵌 quota: 子块,viper 不会自动展开。
   quota_enabled: true

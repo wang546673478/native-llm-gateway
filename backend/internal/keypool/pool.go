@@ -3,7 +3,6 @@
 package keypool
 
 import (
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -253,15 +252,9 @@ func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}
 		return nil, ErrNoAvailableKey
 	}
 
-	// P-quota-balance: token_plan tier 在进入 tier 过滤前按 Remaining 降序稳定排序
-	// 稳定排序保证 Remaining 相等时仍维持 RoundRobin 原始顺序
-	if tier == string(BillingSourceTokenPlan) {
-		sort.SliceStable(usable, func(i, j int) bool {
-			return usable[i].Remaining > usable[j].Remaining
-		})
-	}
-
 	// 3. P64: 只从指定 tier 桶里挑,不再做 tier 降级
+	// Level 3 顺序黏性(2026-08-10):由 scheduler(默认 sticky)决定顺序。
+	// 桶序 = 自然序(加入时间 / route_order 改写);不再按 Remaining 排序。
 	bucket := make([]*Key, 0, len(usable))
 	for _, k := range usable {
 		bs := k.BillingSource
@@ -269,9 +262,9 @@ func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}
 			bs = string(BillingSourceDefault) // 兜底
 		}
 		if bs == tier {
-			// P-quota-prefer: 跳过「已轮询且余额耗尽」的 key — 否则 round-robin
-			// 会把请求轮流分给已死的 key(如 MiniMax weige 1%),每轮 429 →
-			// failover deepseek,而 healthy key 在旁边空转(2026-08-06 实测)。
+			// P-quota-prefer: 跳过「已轮询且余额耗尽」的 key — 否则会把请求分给
+			// 已死的 key(如 MiniMax weige 1%),每轮 429 → failover 别家,
+			// 而 healthy key 在旁边空转(2026-08-06 实测)。
 			// 未轮询过的不跳过(启动窗口);余额回升后自动恢复参与
 			if k.IsPolledAndExhausted() {
 				continue
@@ -282,7 +275,18 @@ func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}
 	if len(bucket) == 0 {
 		return nil, ErrNoAvailableKey
 	}
+
+	// Level 3 顺序黏性:sticky scheduler 里"黏住当前可用 key,不可用自动推进到自然序第一把"。
+	// round_robin / least_used / random 走各自 Select 语义(保留)。
 	return p.scheduler.Select(bucket)
+}
+
+// rewindSticky 若池用的是 sticky 调度器,回卷黏性状态 —
+// 供「高位 key 额度恢复」事件调用,让下一次 Acquire 重新从自然序头部选,恢复的 key 自动回位。
+func (p *Pool) rewindSticky() {
+	if s, ok := p.scheduler.(*StickyScheduler); ok {
+		s.Rewind()
+	}
 }
 
 // containsProtocol 判断逗号分隔的协议列表是否包含指定协议
@@ -333,6 +337,8 @@ func (p *Pool) ReportSuccess(k *Key) {
 		k.QuotaExceededSince = time.Time{}
 		k.UpdatedAt = time.Now()
 		k.CoolingCount = 0 // reset 冷却计数,新窗口
+		// 顺序黏性(2026-08-10):额度恢复 → 回卷黏性状态,高位恢复的 key 自动回位。
+		p.rewindSticky()
 	}
 
 	// 如果是 LIMITED(配额受限但仍可用),成功不改变状态
@@ -459,6 +465,9 @@ func (p *Pool) RestoreQuota(k *Key) {
 	k.QuotaProbeAttempts = 0
 	k.QuotaExceededSince = time.Time{}
 	k.UpdatedAt = time.Now()
+	// 顺序黏性(2026-08-10):额度探测恢复 → 回卷黏性状态,让高位恢复的 key 回位。
+	// e.g. 当前黏在 B,A 被 probe 恢复 → rewind → 下次 Acquire 从 A 扫到 A → 回 A。
+	p.rewindSticky()
 	cb := p.OnKeyRestored
 	p.mu.Unlock()
 

@@ -485,26 +485,78 @@ func TestKey_RemainingAndLastPolledAt_DefaultZero(t *testing.T) {
 }
 
 // P-quota-balance: token_plan tier 在 tier 过滤前按 Remaining DESC 稳定排序
-func TestAcquireFromTier_TokenPlanSortsByRemainingDesc(t *testing.T) {
-	// 3 个 token_plan key,Remaining 不同 — 应按 Remaining 降序返回第一个
+func TestAcquireFromTier_StickySequential(t *testing.T) {
+	// 顺序黏性(2026-08-10,Level 3 默认 = sticky):
+	// - 默认按自然序第一把(key-1)黏住,不扫别的
+	// - 第一把被 QE 剔除后 → 推进到下一把(key-2)
+	// - 第一把恢复(probe RestoreQuota)→ rewind → 回第一把
 	now := time.Now()
-	mk := func(id string, remaining float64) *Key {
+	mk := func(id string) *Key {
 		return &Key{
 			ID: id, ProviderName: "test", Name: id, Key: "sk",
 			Status: KeyStatusActive, BillingSource: "token_plan",
-			Remaining: remaining,
 			CreatedAt: now, UpdatedAt: now,
 		}
 	}
-	keys := []*Key{mk("k-low", 0.3), mk("k-high", 12.5), mk("k-mid", 8.0)}
-	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})
+	keys := []*Key{mk("k1"), mk("k2"), mk("k3")}
+	pool := NewPool("test", keys, NewScheduler("sticky"), Config{})
 
+	// 1) 第一把 k1,黏住(连续取都是 k1,不是轮换)
+	for i := 0; i < 3; i++ {
+		k, err := pool.AcquireFromTier("token_plan", nil, "")
+		if err != nil {
+			t.Fatalf("AcquireFromTier #%d: %v", i, err)
+		}
+		if k.ID != "k1" {
+			t.Fatalf("call %d: got %q, want k1 (sticky)", i, k.ID)
+		}
+	}
+
+	// 2) k1 额度耗尽 → QE → 释放(等同被 usable 过滤剔除后的下一次推进)
+	pool.ReportQuotaExceeded(keys[0])
 	k, err := pool.AcquireFromTier("token_plan", nil, "")
 	if err != nil {
-		t.Fatalf("AcquireFromTier: %v", err)
+		t.Fatalf("Acquire after k1 QE: %v", err)
 	}
-	if k.ID != "k-high" {
-		t.Errorf("got %q, want k-high (Remaining=12.5)", k.ID)
+	if k.ID != "k2" {
+		t.Fatalf("after k1 QE: got %q, want k2 (advance to next usable)", k.ID)
+	}
+	// 仍黏住 k2
+	for i := 0; i < 2; i++ {
+		k, _ = pool.AcquireFromTier("token_plan", nil, "")
+		if k.ID != "k2" {
+			t.Fatalf("sticky k2: got %q", k.ID)
+		}
+	}
+
+	// 3) k1 被探测恢复(RestoreQuota)→ rewind → 回 k1
+	pool.RestoreQuota(keys[0])
+	k, err = pool.AcquireFromTier("token_plan", nil, "")
+	if err != nil {
+		t.Fatalf("Acquire after k1 restore: %v", err)
+	}
+	if k.ID != "k1" {
+		t.Fatalf("after k1 restore: got %q, want k1 (rewind to first usable)", k.ID)
+	}
+}
+
+func TestAcquireFromTier_AllExhaustedNoAvailable(t *testing.T) {
+	// 全部 key 耗尽 → ErrNoAvailableKey(降档交给上层)
+	now := time.Now()
+	mk := func(id string) *Key {
+		return &Key{
+			ID: id, ProviderName: "test", Name: id, Key: "sk",
+			Status: KeyStatusActive, BillingSource: "token_plan",
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	keys := []*Key{mk("k1"), mk("k2")}
+	pool := NewPool("test", keys, NewScheduler("sticky"), Config{})
+	for _, k := range keys {
+		pool.ReportQuotaExceeded(k)
+	}
+	if _, err := pool.AcquireFromTier("token_plan", nil, ""); err != ErrNoAvailableKey {
+		t.Fatalf("all QE: err = %v, want ErrNoAvailableKey", err)
 	}
 }
 

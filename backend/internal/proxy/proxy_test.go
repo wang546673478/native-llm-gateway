@@ -1323,9 +1323,8 @@ func TestProxy_CatchAll_ModelNotFoundFailsOver(t *testing.T) {
 }
 
 // TestProxy_RateLimit_SwapsKeyInProvider P-ratelimit-not-quota:
-// 429 纯限流(rate_limit,无额度 body)→ 同 provider 换 key 重试,不推进候选
-// (2026-08-07 实测:minimax key-8 限流被当额度类,跳过 key-7 直接走 mimo —
-// 用户质疑「额度没用完怎么用 mimo」,修正为与网络类同构:换 key 重试)
+// 429 纯限流(rate_limit,无额度 body)→ 同一把 key 重试到 10 次(2026-08-10),
+// 全 429 → COOLING → 同 provider 换 key 重试(key-2 成功),不推进候选
 func TestProxy_RateLimit_SwapsKeyInProvider(t *testing.T) {
 	mm := &fakeProvider{name: "mm", proto: provider.ProtocolOpenAI, models: []string{"m"},
 		errByKey: map[string]error{"1": &provider.ProviderError{
@@ -1338,13 +1337,14 @@ func TestProxy_RateLimit_SwapsKeyInProvider(t *testing.T) {
 
 	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200(换 key 重试成功); body = %s", w.Code, w.Body.String())
+		t.Fatalf("status = %d, want 200(同 key 10 次 429 后换 key-2 成功); body = %s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "mm-ok") {
 		t.Errorf("response = %s, want mm 的响应", w.Body.String())
 	}
-	if mm.callCount != 2 {
-		t.Errorf("callCount = %d, want 2 (key-1 限流 → key-2 重试,不跳 provider)", mm.callCount)
+	// key-1 重试 10 次全 429 → COOLING → key-2 成功 1 次
+	if want := rateLimitSameKeyRetries + 2; mm.callCount != want {
+		t.Errorf("callCount = %d, want %d (key-1 重试%d次 429 后换 key-2)", mm.callCount, want, rateLimitSameKeyRetries)
 	}
 }
 
@@ -1370,7 +1370,8 @@ func TestProxy_RateLimit_NoDowngradeEvidence(t *testing.T) {
 	if ds.callCount != 0 {
 		t.Errorf("ds called %d times, want 0 (限流不降档,api 层不应被用)", ds.callCount)
 	}
-	if mm.callCount != 2 {
-		t.Errorf("mm callCount = %d, want 2 (两把 key 各试一次)", mm.callCount)
+	// key-1 重试 10 次 → COOLING → key-2 试 1 次还是 429 → 穷尽不降档
+	if want := rateLimitSameKeyRetries + 2; mm.callCount != want {
+		t.Errorf("mm callCount = %d, want %d (key-1 重试%d次 + key-2 1次)", mm.callCount, want, rateLimitSameKeyRetries)
 	}
 }

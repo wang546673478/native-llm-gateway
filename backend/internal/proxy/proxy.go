@@ -883,6 +883,10 @@ const (
 	outcomeOK       candidateOutcome = iota // 请求已成功处理,调用方直接 return
 	outcomeFatal                            // 不可重试错误 — 调用方 handleAllFailed 收尾(透传原错误)
 	outcomeContinue                         // 继续下一候选(可携带额度证据)
+
+	// rateLimitSameKeyRetries 纯 429 限流时,同一把 key 的最大重试次数(2026-08-10)。
+	// 十次都 429 才认为这把 key 被限住 → COOLING 并推进下一把 key。
+	rateLimitSameKeyRetries = 10
 )
 
 // runCandidateLoop 候选循环 — Task 5 分层 failover 的唯一实现。
@@ -1128,11 +1132,41 @@ func (e *Engine) tryCandidate(
 		return outcomeFatal, false, true
 	}
 
-	// 需要换 key 重试的类:网络类 + auth + 限流(决策表 row 3;ModelNotAllowed 除外 —
-	// 白名单是 model 级,换 key 无用)。rate_limit(纯限流 429)与网络类同构:
-	// key 级瞬态,同 provider 换 key 重试(2026-08-07:minimax key-8 限流
-	// 应试 key-7,而不是跳 mimo)
-	if isNetworkClass(pe) || pe.ErrorType == provider.ErrorTypeAuth || pe.ErrorType == provider.ErrorTypeRateLimit {
+	// 纯 429 限流(2026-08-10):用「同一把 key」重试到 10 次,全 429 才标 COOLING
+	// 并推进下一把 key。之前是直接换 key — 现在先在同一把 key 上重试(限流是瞬态,
+	// 重试同一把大概率 429 消失),10 次还限流才认为是这把 key 被限住,冷却它并切换。
+	if pe.ErrorType == provider.ErrorTypeRateLimit {
+		if e.retrySameKeyRateLimit(c, ctx, req, result, outProviderName, lastErr, entry) {
+			return outcomeOK, false, true
+		}
+		// 10 次全 429 → 已 ReportRateLimit(COOLING),推进到下一把 key
+		pe = *lastErr
+		if pe == nil {
+			return outcomeContinue, false, true
+		}
+		if !errorIsRetryable(pe) {
+			return outcomeFatal, false, true
+		}
+		// 429 之后换 key 重试一次(同网络类语义)
+		if e.swapToOtherKey(c, req, result) {
+			if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+				return outcomeOK, false, true
+			}
+			pe3 := *lastErr
+			if pe3 == nil {
+				return outcomeContinue, false, true
+			}
+			if isQuotaClass(pe3) && result.Tier == string(keypool.BillingSourceTokenPlan) {
+				return outcomeContinue, true, true
+			}
+			return outcomeContinue, false, true
+		}
+		return outcomeContinue, false, true
+	}
+
+	// 需要换 key 重试的类:网络类 + auth(决策表 row 3;ModelNotAllowed 除外 —
+	// 白名单是 model 级,换 key 无用)。
+	if isNetworkClass(pe) || pe.ErrorType == provider.ErrorTypeAuth {
 		if e.swapToOtherKey(c, req, result) {
 			// 换 key 后重发 — result.Key 已更新为真正发请求的 key,
 			// 429 冷却/熔断上报都会标到这把新 key 上(踩坑 #15)
@@ -1266,6 +1300,43 @@ func (e *Engine) attemptOne(
 			zap.String("trace_id", req.TraceID))
 	}
 	return false
+}
+
+// retrySameKeyRateLimit 纯 429 限流:用「同一把 key」重试到 rateLimitSameKeyRetries 次。
+// 每次 success → return true。全部还是 429 → ReportRateLimit 标 COOLING(token_plan 连续冷却
+// 自动升级 QE,由 quotacheck poll 接管恢复),return false(调用方推进下一把 key)。
+// 同一把 key = result.Key 不变,429 冷却标到真正发请求的这把 key 上(踩坑 #15)。
+func (e *Engine) retrySameKeyRateLimit(
+	c *gin.Context,
+	ctx context.Context,
+	req *provider.Request,
+	result *router.RouteResult,
+	outProviderName *string,
+	lastErr **provider.ProviderError,
+	entry *accesslog.AccessEntry,
+) bool {
+	attempts := 0
+	for {
+		if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+			return true // 重试成功
+		}
+		pe := *lastErr
+		if pe == nil {
+			return false
+		}
+		attempts++
+		// 不是纯 429(额度类/不可重试等)→ 不再同 key 重试,返回 false 走统一处理
+		if pe.ErrorType != provider.ErrorTypeRateLimit {
+			return false
+		}
+		if attempts >= rateLimitSameKeyRetries {
+			// 10 次都 429 → 这把 key 被限住 → COOLING(result.Key 不变,标对 key)
+			if pool := e.router.Pool(result.ProviderName); pool != nil {
+				pool.ReportRateLimit(result.Key, pe.RetryAfter)
+			}
+			return false
+		}
+	}
 }
 
 // bindKey 把候选的 key 绑到请求上(P-key-mismatch:传已 acquire 的 key,
