@@ -948,3 +948,41 @@ func TestBuildKeyCandidates_BlockBillingNotInPool_FallsBackToPoolTiers(t *testin
 		t.Errorf("expected fallback (mm, token_plan), got %+v", out)
 	}
 }
+
+// TestRouter_CatchAllAuto_Level2OverrideByRouteOrder P-route-order:
+// ProviderOrder 改写优先于「最早 key 时间」默认序(2026-08-10 Level 2)。
+func TestRouter_CatchAllAuto_Level2OverrideByRouteOrder(t *testing.T) {
+	base := time.Now()
+	mkPool := func(bs string, created time.Time) *keypool.Pool {
+		return keypool.NewPool("p", []*keypool.Key{{
+			ID: "1", ProviderName: "p", Name: "k1", Key: "sk",
+			Status: keypool.KeyStatusActive, BillingSource: bs,
+			CreatedAt: created, UpdatedAt: created,
+		}}, nil, keypool.Config{})
+	}
+	zuluPool := mkPool("token_plan", base.Add(-time.Hour)) // zulu key 更早,默认应排最前
+	alphaPool := mkPool("token_plan", base)
+	mgr := newFakeManager(t,
+		&fakeProvider{name: "alpha", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+		&fakeProvider{name: "zulu", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, map[string]*keypool.Pool{
+		"alpha": alphaPool,
+		"zulu":  zuluPool,
+	}, Config{
+		Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"},
+		ProviderOrder: map[string]int{"alpha": 0, "zulu": 1}, // 改写:alpha 优先(覆盖默认 zulu)
+	})
+
+	it, err := r.Route(context.Background(), &provider.Request{Model: "x", Path: "/v1/messages"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "alpha" {
+		t.Errorf("first = %s, want alpha(ProviderOrder 改写覆盖默认最早 key 序)", res.ProviderName)
+	}
+}

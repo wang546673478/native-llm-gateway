@@ -176,7 +176,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	}
 	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
 
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
 		logger:   logger,
 		db:       db,
@@ -190,7 +190,10 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		metricsC: metricsC,
 		accessR:  accessR,
 		quotaM:   quotaM,
-	}, nil
+	}
+	// P-route-order: 启动时把 route_order 的 Level 2 provider 改写加载进 router
+	s.reloadProviderOrder()
+	return s, nil
 }
 
 // P30:把 buildKeyPools 读出来的 Pool 注入到每个 Provider
@@ -390,6 +393,29 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 		zap.Int("keys", len(keys)),
 	)
 	return keypool.NewPool(name, keys, sched, poolCfg)
+}
+
+// reloadProviderOrder P-route-order(2026-08-10):从 route_order 表读 scope=provider 的
+// Level 2 改写,热更新到 router 的 ProviderOrder。启动时 + PUT /routing/order 后调用。
+// 读失败(表未建等)→ 记日志但不崩溃,沿用默认排序(最早 key 时间)。
+func (s *Server) reloadProviderOrder() {
+	if s.router == nil || s.db == nil {
+		return
+	}
+	store := database.NewRouteOrderStore(s.db)
+	rows, err := store.ListByScope(context.Background(), "provider", "")
+	if err != nil {
+		s.logger.Warn("load provider order failed, keep default",
+			zap.Error(err), zap.String("scope", "provider"))
+		return
+	}
+	m := make(map[string]int, len(rows))
+	for _, r := range rows {
+		m[r.Name] = r.Seq
+	}
+	s.router.SetProviderOrder(m)
+	s.logger.Info("route_order: provider order updated",
+		zap.Int("providers", len(m)))
 }
 
 // toManagerConfigForReload 把 config 投影成 ManagerConfig(只用于 ReloadPricing,不需要 Pools)
@@ -727,6 +753,9 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		mimo.ValidateQuotaCookie, // MimoQuotaValidate
 		mimo.SetQuotaCookie,      // MimoQuotaSet
 		database.NewRouteOrderStore(s.db), // P-route-order: Level 2/3 排序改写仓库(可 nil)
+		func() { // P-route-order: PUT provider 顺序后热更新 router 的 Level 2 排序
+			s.reloadProviderOrder()
+		},
 	)
 	admin.Register(r.Group("/api/v1"))
 

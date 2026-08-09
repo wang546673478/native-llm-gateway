@@ -51,6 +51,9 @@ type Admin struct {
 	MimoQuotaSet      func(cookie string)                            // 热注入到内存(影响路由配额判断)
 	// P-route-order: Level 2/3 优先级改写仓库(nil = 改写功能不可用,GET 返回空、PUT 报错)
 	RouteOrderStore dbpkg.RouteOrderStore
+	// P-route-order: PUT /routing/order(scope=provider)成功后由 server 调用来热更新
+	// router 的 ProviderOrder(把 route_order 读回内存生效)。nil = 不热更新。
+	ProviderOrderReload func()
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -78,21 +81,23 @@ func NewAdmin(
 	mimoValidate func(ctx context.Context, cookie string) error, // 可 nil
 	mimoSet func(cookie string), // 可 nil
 	routeOrderStore dbpkg.RouteOrderStore, // 可 nil(改写不可用)
+	providerOrderReload func(), // 可 nil(PUT provider 顺序后热更新 router)
 ) *Admin {
 	return &Admin{
-		Manager:           mgr,
-		Registry:          reg,
-		Pools:             pools,
-		Router:            r,
-		Usage:             usageRepo,
-		Aliases:           aliases,
-		Keys:              keys,
-		AccessLog:         accessLogR,
-		QuotaMgr:          quotaMgr,
-		MimoCookieStore:   mimoCookieStore,
-		MimoQuotaValidate: mimoValidate,
-		MimoQuotaSet:      mimoSet,
-		RouteOrderStore:   routeOrderStore,
+		Manager:             mgr,
+		Registry:            reg,
+		Pools:               pools,
+		Router:              r,
+		Usage:               usageRepo,
+		Aliases:             aliases,
+		Keys:                keys,
+		AccessLog:           accessLogR,
+		QuotaMgr:            quotaMgr,
+		MimoCookieStore:     mimoCookieStore,
+		MimoQuotaValidate:   mimoValidate,
+		MimoQuotaSet:        mimoSet,
+		RouteOrderStore:     routeOrderStore,
+		ProviderOrderReload: providerOrderReload,
 	}
 }
 
@@ -484,6 +489,10 @@ func (a *Admin) putRouteOrder(c *gin.Context) {
 	if err := a.RouteOrderStore.Replace(c.Request.Context(), req.Scope, req.Provider, req.BillingSource, req.Order); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "put_route_order_failed", "detail": err.Error()})
 		return
+	}
+	// P-route-order: scope=provider 改写落库后,热更新 router 的 Level 2 排序(立即生效)
+	if req.Scope == "provider" && a.ProviderOrderReload != nil {
+		a.ProviderOrderReload()
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "scope": req.Scope, "provider": req.Provider, "order": req.Order})
 }

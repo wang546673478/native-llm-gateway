@@ -32,6 +32,11 @@ type Config struct {
 	// model 名(如 gpt-5 / 任意新探测名)时按此规则路由。nil = 不兜底。
 	// 任意 agent 任意模型名都能用,仍按 tier 计费(token_plan → api → free)
 	CatchAll *AliasConfig
+
+	// P-route-order(2026-08-10,Level 2):层内 provider 排序改写(provider 名 → 位次,
+	// 小在前)。非空则覆盖「最早 key 时间」默认序。由上层(server)从 route_order 表
+	// 加载注入,router 不 import DB(低耦合)。nil/空 = 用默认序。
+	ProviderOrder map[string]int
 }
 
 // RouteResult 路由结果:把一个请求锁定到具体的 Provider + Model + Key
@@ -198,10 +203,34 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		}
 		return time.Time{}
 	}
+	// Level 2 排序:改写序(ProviderOrder)优先;否则默认 = 最早 key 时间;同值按 name 兜底确定性
+	// ProviderOrder 由 SetProviderOrder 在 r.mu 写锁下更新,这里取一次快照避免 data race
+	r.mu.RLock()
+	providerOrder := r.cfg.ProviderOrder
+	r.mu.RUnlock()
+	seq := func(name string) (int, bool) {
+		if providerOrder != nil {
+			if v, ok := providerOrder[name]; ok {
+				return v, true
+			}
+		}
+		return 0, false
+	}
 	sort.Slice(routes, func(i, j int) bool {
-		ti, tj := earliest(routes[i].Name), earliest(routes[j].Name)
+		ni, nj := routes[i].Name, routes[j].Name
+		if si, oki := seq(ni); oki {
+			if sj, okj := seq(nj); okj {
+				if si != sj {
+					return si < sj
+				}
+			} else {
+				return true // 有改写者优于无改写者
+			}
+		} else if _, okj := seq(nj); okj {
+			return false // 无改写者劣于有改写者
+		}
+		ti, tj := earliest(ni), earliest(nj)
 		if !ti.Equal(tj) {
-			// 有最早时间者优先;零值(无 key)排最后
 			if ti.IsZero() {
 				return false
 			}
@@ -210,7 +239,7 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 			}
 			return ti.Before(tj)
 		}
-		return routes[i].Name < routes[j].Name // 同时间按 name 兜底确定性
+		return ni < nj
 	})
 	keyCandidates := buildKeyCandidates(routes, pools)
 	return &RouteIterator{
@@ -654,4 +683,13 @@ func (r *Router) SetPools(newMap map[string]*keypool.Pool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools = newMap
+}
+
+// SetProviderOrder P-route-order(2026-08-10):热更新 Level 2 层内 provider 排序改写。
+// 在 r.mu 写锁下替换 cfg.ProviderOrder(PUT /routing/order 后由 server 调用)。
+// routeCatchAllAuto 读时在同一锁下快照,避免 data race。
+func (r *Router) SetProviderOrder(m map[string]int) {
+	r.mu.Lock()
+	r.cfg.ProviderOrder = m
+	r.mu.Unlock()
 }
