@@ -42,11 +42,16 @@ func (s *gormRouteOrderStore) ListByScope(ctx context.Context, scope string, pro
 }
 
 func (s *gormRouteOrderStore) Replace(ctx context.Context, scope, provider, billingSource string, names []string) error {
-	// 一次事务:先删该作用域,再插入新顺序。
+	// 一次事务:先删「同一作用域(scope+provider+billing_source)」的旧行,再插入新顺序。
+	// 关键:必须按 billing_source 过滤 —— 否则删错层(如保存 token_plan 会误删 api 层),
+	// provider 改写跨层互相覆盖(2026-08-10 实测:token_plan 层 provider 顺序被 api 层清掉)。
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		q := tx.Where("scope = ?", scope)
 		if provider != "" {
 			q = q.Where("provider = ?", provider)
+		}
+		if billingSource != "" {
+			q = q.Where("billing_source = ?", billingSource)
 		}
 		if err := q.Delete(&RouteOrder{}).Error; err != nil {
 			return fmt.Errorf("clear route_order: %w", err)

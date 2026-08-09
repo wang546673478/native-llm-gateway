@@ -56,7 +56,6 @@
                       <div class="provider-title">
                         <span class="provider-name">{{ prov.provider }}</span>
                         <n-tag v-if="prov.billing_source === 'token_plan'" size="small" :bordered="false">📦</n-tag>
-                        <n-text depth="3" size="small">{{ prov.defaultModel || '' }}</n-text>
                       </div>
 
                       <!-- Level 3: key 拖拽列表 -->
@@ -132,7 +131,6 @@ interface TreeNodeKey {
 }
 interface TreeNodeProvider {
   provider: string
-  defaultModel: string
   billing_source: string
   keys: TreeNodeKey[]
 }
@@ -202,7 +200,6 @@ async function buildTree() {
         if (!byLayer[bs]) byLayer[bs] = new Map()
         const node = byLayer[bs].get(vendor) || {
           provider: vendor,
-          defaultModel: v.models?.[0] || '',
           billing_source: bs,
           keys: [],
         }
