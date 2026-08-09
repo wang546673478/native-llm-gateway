@@ -56,7 +56,7 @@
                       <div class="provider-title">
                         <span class="provider-name">{{ prov.provider }}</span>
                         <n-tag v-if="prov.billing_source === 'token_plan'" size="small" :bordered="false">📦</n-tag>
-                        <n-text depth="3" size="small">{{ prov.protocol || '' }} · {{ prov.defaultModel || '' }}</n-text>
+                        <n-text depth="3" size="small">{{ prov.defaultModel || '' }}</n-text>
                       </div>
 
                       <!-- Level 3: key 拖拽列表 -->
@@ -132,7 +132,6 @@ interface TreeNodeKey {
 }
 interface TreeNodeProvider {
   provider: string
-  protocol: string
   defaultModel: string
   billing_source: string
   keys: TreeNodeKey[]
@@ -184,33 +183,34 @@ async function saveOrders() {
 }
 
 async function buildTree() {
+  // 按 vendor 名聚合 provider(如 minimax / mimo),不渲染协议面注册名(minimax-anthropic 等)。
+  // provider 下直接列它的 provider key(如 weige / key-1),按 key 的 billing_source 归层:
+  //   token_plan: minimax(weige,key-1) + mimo(key-1)
+  //   api:        deepseek(key-1) + mimo(key-2)
   await store.load()
   const byLayer: Record<string, Map<string, TreeNodeProvider>> = {
     token_plan: new Map(),
     api: new Map(),
   }
   for (const v of store.vendors) {
-    for (const n of v.names ?? []) {
-      const faceName = n.name
-      try {
-        const res = await api.providerKeys.list(faceName)
-        const kws = (res.keys ?? []).filter(k => k.enabled !== false)
-        for (const k of kws) {
-          const bs = k.billing_source || 'api'
-          if (!byLayer[bs]) byLayer[bs] = new Map()
-          const node = byLayer[bs].get(faceName) || {
-            provider: faceName,
-            protocol: n.protocol || '',
-            defaultModel: v.models?.[0] || '',
-            billing_source: bs,
-            keys: [],
-          }
-          node.keys.push({ name: k.name, billing_source: bs })
-          byLayer[bs].set(faceName, node)
+    const vendor = v.vendor
+    try {
+      const res = await api.providerKeys.list(vendor)
+      const kws = (res.keys ?? []).filter(k => k.enabled !== false)
+      for (const k of kws) {
+        const bs = k.billing_source || 'api'
+        if (!byLayer[bs]) byLayer[bs] = new Map()
+        const node = byLayer[bs].get(vendor) || {
+          provider: vendor,
+          defaultModel: v.models?.[0] || '',
+          billing_source: bs,
+          keys: [],
         }
-      } catch {
-        // provider 无 key —— 自动模式下自然不参与
+        node.keys.push({ name: k.name, billing_source: bs })
+        byLayer[bs].set(vendor, node)
       }
+    } catch {
+      // provider 无 key —— 自动模式下自然不参与
     }
   }
   layers.value = layers.value.map(l => {
