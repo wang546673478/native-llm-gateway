@@ -63,39 +63,24 @@ func (s *RandomScheduler) Select(keys []*Key) (*Key, error) {
 	return keys[idx], nil
 }
 
-// StickyScheduler 顺序黏性(2026-08-10,Level 3):固定用「第一个可用 key」并黏住不换,
-// 除非它不可用(被 usable 过滤剔除)→ 推进到当前列表第一个可用。
-// 默认顺序 = 进池顺序(key 加入时间 / route_order 改写),第一个 = 最高优先级。
-// Rewind() 置空 current,让下一次 Select 重新从列表头扫 — 用于「高位 key 恢复后回位」。
-type StickyScheduler struct {
-	mu      sync.Mutex
-	current *Key
-}
+// StickyScheduler 顺序黏性(2026-08-10,Level 3):固定用「最高优先级可用 key」。
+// bucket 已按优先级序(加入时间 / route_order 改写),keys[0] = 当前最高优先级可用 key,
+// 始终选 keys[0]:
+//   - 高优先级 key 一直健康 → 一直用它(不轮换)。
+//   - 高优先级 key 不可用(QE / COOLING / 熔断 OPEN / 耗尽)→ filterBreakers + IsUsable
+//     把它剔除,keys[0] 变成下一把 → 自动推进。
+//   - 高优先级 key 恢复(额度 poll 回 ACTIVE / 熔断 HALF_OPEN→CLOSED)→ 重新进 bucket,
+//     keys[0] 又变回它 → 自动回位。
+// 这就是"先用尽高位再切低位、高位恢复自动回位"的状态机 — 无内部可变状态,无需锁,
+// 也无需 Rewind()(2026-08-10):旧实现把 current 黏死在末位,key-1 一次 connection
+// 错误把 sticky 推进到 weige 后,即使 key-1 恢复也不回位。
+type StickyScheduler struct{}
 
 func (s *StickyScheduler) Select(keys []*Key) (*Key, error) {
 	if len(keys) == 0 {
 		return nil, ErrNoAvailableKey
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// 当前 key 仍在可用列表里(未被 QE/COOLING/熔断/耗尽剔除)→ 黏住它(不扫)
-	if s.current != nil {
-		for _, k := range keys {
-			if k == s.current {
-				return k, nil
-			}
-		}
-	}
-	// 当前 key 不可用 → 推进到自然序第一把可用 key
-	s.current = keys[0]
-	return s.current, nil
-}
-
-// Rewind 置空当前黏住的 key — 额度恢复等「高位 key 回位」事件调用,让下次 Select 重新从头扫
-func (s *StickyScheduler) Rewind() {
-	s.mu.Lock()
-	s.current = nil
-	s.mu.Unlock()
+	return keys[0], nil
 }
 
 // NewScheduler 根据 strategy 字符串构造对应 Scheduler

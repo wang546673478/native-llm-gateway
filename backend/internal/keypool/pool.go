@@ -276,17 +276,10 @@ func (p *Pool) acquireFromTierLocked(tier string, allowedIDSet map[uint]struct{}
 		return nil, ErrNoAvailableKey
 	}
 
-	// Level 3 顺序黏性:sticky scheduler 里"黏住当前可用 key,不可用自动推进到自然序第一把"。
+	// Level 3 顺序黏性:sticky scheduler 里"固定选最高优先级可用 key(keys[0])",
+	// 不可用时 filterBreakers + IsUsable 剔除后自然推进;恢复后自动回位。
 	// round_robin / least_used / random 走各自 Select 语义(保留)。
 	return p.scheduler.Select(bucket)
-}
-
-// rewindSticky 若池用的是 sticky 调度器,回卷黏性状态 —
-// 供「高位 key 额度恢复」事件调用,让下一次 Acquire 重新从自然序头部选,恢复的 key 自动回位。
-func (p *Pool) rewindSticky() {
-	if s, ok := p.scheduler.(*StickyScheduler); ok {
-		s.Rewind()
-	}
 }
 
 // containsProtocol 判断逗号分隔的协议列表是否包含指定协议
@@ -323,7 +316,9 @@ func (p *Pool) ReportSuccess(k *Key) {
 	k.LastUsedAt = time.Now()
 	k.UpdatedAt = k.LastUsedAt
 
-	// P-per-key-circuit: 成功信号 → 熔断器(HALF_OPEN 试探成功 → CLOSED;CLOSED 清窗口)
+	// P-per-key-circuit: 成功信号 → 熔断器(HALF_OPEN 试探成功 → CLOSED;CLOSED 清窗口)。
+	// 熔断恢复后高位 key 自然回到队列头由 StickyScheduler.Select(始终选 keys[0])保证,
+	// 无需在这里额外 rewind — Select 不黏住末位,恢复的 key 重建 bucket 后即为 keys[0]。
 	if br := p.breakerFor(k); br != nil {
 		br.RecordSuccess()
 	}
@@ -337,8 +332,6 @@ func (p *Pool) ReportSuccess(k *Key) {
 		k.QuotaExceededSince = time.Time{}
 		k.UpdatedAt = time.Now()
 		k.CoolingCount = 0 // reset 冷却计数,新窗口
-		// 顺序黏性(2026-08-10):额度恢复 → 回卷黏性状态,高位恢复的 key 自动回位。
-		p.rewindSticky()
 	}
 
 	// 如果是 LIMITED(配额受限但仍可用),成功不改变状态
@@ -465,9 +458,8 @@ func (p *Pool) RestoreQuota(k *Key) {
 	k.QuotaProbeAttempts = 0
 	k.QuotaExceededSince = time.Time{}
 	k.UpdatedAt = time.Now()
-	// 顺序黏性(2026-08-10):额度探测恢复 → 回卷黏性状态,让高位恢复的 key 回位。
-	// e.g. 当前黏在 B,A 被 probe 恢复 → rewind → 下次 Acquire 从 A 扫到 A → 回 A。
-	p.rewindSticky()
+	// 恢复后高位 key 回位由 StickyScheduler.Select(始终选 keys[0])保证 —
+	// 该 key 重新进 bucket 后即 keys[0],无需单独 rewind。旧版本这里回卷黏性状态。
 	cb := p.OnKeyRestored
 	p.mu.Unlock()
 

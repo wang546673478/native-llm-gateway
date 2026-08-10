@@ -50,7 +50,7 @@ Level 3 provider 内 key 顺序 = 默认按加入时间，先用尽一把再切�
 ```
 
 - **天然**:加 provider = 加一把 key 即自动进链;加 key = 自动排到队尾;零配置。
-- **sticky**:同一 provider 内先用最早的 key,额度耗尽/故障(COOLING/熔断/429×10)才推进到下一把;额度探测恢复自动切回高位 key。
+- **sticky**:同一 provider 内固定用「最高优先级可用 key」(默认按加入时间/改写序)。高位 key 不可用(额度耗尽 / COOLING / 熔断 OPEN / 429×10)才推进到下一把;高位 key 一旦恢复(额度 poll 回 ACTIVE / 熔断 HALF_OPEN→CLOSED)自动回位到它。429 仍同 key 重试 10 次;connection/timeout/5xx 靠 per-key 熔断隔离+自愈(2026-08-10)。
 - **改写**:Routing 页拖拽 provider/key 顺序 → 写 `route_order` 表(token_plan/api 各层独立),保存即热生效;不改写时用加入时间兜底。
 
 ## 客户端接入(三种全通)

@@ -929,3 +929,52 @@ func TestPool_SnapshotApplyRestoresState(t *testing.T) {
 		t.Errorf("k3 status = %q, want ACTIVE (expired cooling must not restore)", byID["k3"].Status)
 	}
 }
+
+// TestStickyScheduler_CircuitRecoveryReturnsToHighKey 回归(2026-08-10):
+// 高优先级 key(k1)熔断 OPEN 后 sticky 推进到 k2;k1 熔断恢复(CLOSED)后必须回 k1。
+// 旧实现把 sticky 黏死在 current(k2)上,k1 恢复也不回位(根因:key-1 一次 connection
+// 错误推进到 weige 后永久占用)。修复后 StickyScheduler.Select 始终选 keys[0]
+// (最高优先级可用 key),k1 恢复重新进 bucket 后即为 keys[0],自动回位。
+func TestStickyScheduler_CircuitRecoveryReturnsToHighKey(t *testing.T) {
+	now := time.Now()
+	keys := []*Key{
+		{ID: "k1", ProviderName: "test", Name: "k1", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api", CreatedAt: now, UpdatedAt: now},
+		{ID: "k2", ProviderName: "test", Name: "k2", Key: "sk",
+			Status: KeyStatusActive, BillingSource: "api", CreatedAt: now.Add(time.Minute), UpdatedAt: now},
+	}
+	cfg := Config{BreakerFactory: stubBreakerFactory(2)}
+	pool := NewPool("test", keys, NewScheduler("sticky"), cfg)
+
+	// 1) 顺序黏性:key-1(最高优先级)一直用它
+	for i := 0; i < 3; i++ {
+		k, err := pool.AcquireFromTier("api", nil, "")
+		if err != nil {
+			t.Fatalf("AcquireFromTier #%d: %v", i, err)
+		}
+		if k.ID != "k1" {
+			t.Fatalf("call %d: got %q, want k1 (sticky high priority)", i, k.ID)
+		}
+	}
+
+	// 2) k1 熔断(2 次 server_error → stub 阈值 2 → OPEN)→ 剔除,k2 顶上
+	pool.ReportError(keys[0], "server_error")
+	pool.ReportError(keys[0], "server_error")
+	k, err := pool.AcquireFromTier("api", nil, "")
+	if err != nil {
+		t.Fatalf("Acquire after k1 trip: %v", err)
+	}
+	if k.ID != "k2" {
+		t.Fatalf("after k1 trip: got %q, want k2", k.ID)
+	}
+
+	// 3) k1 熔断恢复(成功信号 → RecordSuccess → CLOSED)→ 回 k1
+	pool.ReportSuccess(keys[0])
+	k, err = pool.AcquireFromTier("api", nil, "")
+	if err != nil {
+		t.Fatalf("Acquire after k1 recover: %v", err)
+	}
+	if k.ID != "k1" {
+		t.Fatalf("after k1 recover: got %q, want k1 (sticky rewind to high key)", k.ID)
+	}
+}
