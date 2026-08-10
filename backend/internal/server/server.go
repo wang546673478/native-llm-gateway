@@ -449,13 +449,22 @@ func (s *Server) reloadProviderOrder() {
 			zap.Error(err), zap.String("scope", "provider"))
 		return
 	}
-	m := make(map[string]int, len(rows))
+	// ProviderOrder 分两层存储:外层 key = 计费层(token_plan/api),内层 = vendor → seq。
+	// route_order 表的 provider 作用域本就按 billing_source 分层(同一 vendor 在
+	// token_plan 与 api 各自独立排序)。若平铺成 map[vendor]seq,后读的那层会覆盖另一层
+	// (mimo token_plan=0 被 api=1 覆盖 → token_plan 层 mimo 优先失效,2026-08-10 根因)。
+	// 必须保持分层,router 按候选面的 billing_source 查对应层。
+	m := make(map[string]map[string]int, 4)
 	for _, r := range rows {
-		m[r.Name] = r.Seq
+		bs := r.BillingSource
+		if m[bs] == nil {
+			m[bs] = make(map[string]int, len(rows))
+		}
+		m[bs][r.Name] = r.Seq
 	}
 	s.router.SetProviderOrder(m)
 	s.logger.Info("route_order: provider order updated",
-		zap.Int("providers", len(m)))
+		zap.Int("layers", len(m)))
 }
 
 // toManagerConfigForReload 把 config 投影成 ManagerConfig(只用于 ReloadPricing,不需要 Pools)

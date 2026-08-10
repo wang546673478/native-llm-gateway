@@ -61,6 +61,43 @@ func newFakeManager(t *testing.T, ps ...provider.Provider) *provider.Manager {
 	return mgr
 }
 
+// newFakeManagerWithVendors 构造带 vendor 元数据的 Manager(测试「面名 ≠ vendor」的排序)。
+// 与 newFakeManager 的区别:用 RegisterWithProtocolVendor 显式声明每个面的 vendor,
+// 模拟可多协议面共享 key 池的厂商(mimo-token-plan-anthropic → vendor mimio 等)。
+func newFakeManagerWithVendors(t *testing.T, vendors map[string]string, ps ...provider.Provider) *provider.Manager {
+	t.Helper()
+	reg := provider.NewRegistry()
+	for _, p := range ps {
+		p := p
+		v := vendors[p.Name()]
+		if v == "" {
+			v = p.Name()
+		}
+		name := p.Name()
+		reg.RegisterWithProtocolVendor(name, func(cfg provider.ProviderConfig) (provider.Provider, error) {
+			return p, nil
+		}, p.Protocol(), v)
+	}
+	mgr := provider.NewManager(reg, zap.NewNop())
+	cfg := &provider.ManagerConfig{
+		Providers: make(map[string]provider.ManagerProviderConfig),
+	}
+	for _, p := range ps {
+		// Level 2 排序:候选落在 token_plan 层,匹配改写层 ProviderOrder
+		cfg.Providers[p.Name()] = provider.ManagerProviderConfig{
+			Enabled:       true,
+			Endpoint:      "http://example.com",
+			Protocol:      p.Protocol(),
+			Models:        p.Models(),
+			BillingSource: "token_plan",
+		}
+	}
+	if err := mgr.LoadFromConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("LoadFromConfig: %v", err)
+	}
+	return mgr
+}
+
 func TestRouter_PriorityStrategyPicksLowestPriority(t *testing.T) {
 	mgr := newFakeManager(t,
 		&fakeProvider{name: "p1", proto: provider.ProtocolOpenAI, models: []string{"m1"}},
@@ -971,7 +1008,9 @@ func TestRouter_CatchAllAuto_Level2OverrideByRouteOrder(t *testing.T) {
 		"zulu":  zuluPool,
 	}, Config{
 		Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"},
-		ProviderOrder: map[string]int{"alpha": 0, "zulu": 1}, // 改写:alpha 优先(覆盖默认 zulu)
+		ProviderOrder: map[string]map[string]int{
+			"api": {"alpha": 0, "zulu": 1},
+		}, // 改写:alpha 优先(覆盖默认 zulu 最早 key);newFakeManager 假 provider 默认 api 计费层
 	})
 
 	it, err := r.Route(context.Background(), &provider.Request{Model: "x", Path: "/v1/messages"})
@@ -986,3 +1025,60 @@ func TestRouter_CatchAllAuto_Level2OverrideByRouteOrder(t *testing.T) {
 		t.Errorf("first = %s, want alpha(ProviderOrder 改写覆盖默认最早 key 序)", res.ProviderName)
 	}
 }
+
+// TestRouter_CatchAllAuto_Level2KevsKeyedByVendor P-route-order:
+// 回归测试(2026-08-10):ProviderOrder 的键是「厂商名」(route_order provider 作用域),
+// 而 catch_all 候选是「注册面名」。当某些面的名字 ≠ vendor(mimo-token-plan-anthropic 的
+// vendor 是 mimo)时,必须先把面名归到 vendor 再查改写。
+// 修复前:seq 直接用面名查(ProviderOrder["mimo-token-plan-anthropic"] 不存在),
+// 而 minimax 的裸面名恰等于 vendor → 被「有改写者优于无改写者」压到 mimo 前面,改写失效。
+func TestRouter_CatchAllAuto_Level2OverrideKeyedByVendor(t *testing.T) {
+	base := time.Now()
+	mkPool := func(bs string, created time.Time) *keypool.Pool {
+		return keypool.NewPool("p", []*keypool.Key{{
+			ID: "1", ProviderName: "p", Name: "k1", Key: "sk",
+			Status: keypool.KeyStatusActive, BillingSource: bs,
+			CreatedAt: created, UpdatedAt: created,
+		}}, nil, keypool.Config{})
+	}
+	// mimo 的 key 比 minimax 晚加入 → 默认「最早 key 时间」序下 miminimax 本应优先;
+	// 但 route_order 改写把 mimo 排到 minimax 前(vendor 键)。修复后应按 vendor 命中,
+	// mimo-token-plan-anthropic 排到第一;修复前它查不到改写,minimax 反而被加权排前。
+	mimoPool := mkPool("token_plan", base)                  // mimo 后加入
+	minimaxPool := mkPool("token_plan", base.Add(-time.Hour)) // minimax 先加入
+	// 用 RegisterWithProtocolVendor 造「面名 ≠ vendor」的假 provider(fakeProvider 也带 vendor,
+	// 这里直接用带 vendor 的自定义注册;newFakeManager 不够,需显式注册 vendor 元数据)。
+	mgr := newFakeManagerWithVendors(t,
+		map[string]string{"mimo-token-plan-anthropic": "mimo", "minimax": "minimax"},
+		&fakeProvider{name: "mimo-token-plan-anthropic", proto: provider.ProtocolAnthropic, models: []string{"mimo-v2.5"}},
+		&fakeProvider{name: "minimax", proto: provider.ProtocolAnthropic, models: []string{"MiniMax-M3"}},
+	)
+	r := NewRouter(zap.NewNop(), mgr, map[string]*keypool.Pool{
+		"mimo-token-plan-anthropic": mimoPool,
+		"minimax":                   minimaxPool,
+	}, Config{
+		Aliases: map[string]AliasConfig{}, CatchAll: &AliasConfig{Alias: "*"},
+		// 改写按 vendor 键:哪怕 minimax 默认(最早 key)排前,mimo 改写后应排到第一
+		ProviderOrder: map[string]map[string]int{
+			"token_plan": {"mimo": 0, "minimax": 1},
+			// 关键防回归:api 层 mimo=1。若 ProviderOrder 被平铺(后读层覆盖前读层),
+			// mimo 会被顶成 1,与 minimax(token_plan=1)在 token_plan 桶里打平,回落到
+			// 最早 key 时间 → minimax 反而领先,本测试即失败。分层隔离才能守住 mimo 优先。
+			"api": {"mimo": 1},
+		},
+	})
+
+	it, err := r.Route(context.Background(), &provider.Request{Model: "x", Path: "/v1/messages"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	res, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if res.ProviderName != "mimo-token-plan-anthropic" {
+		t.Errorf("first = %s, want mimo-token-plan-anthropic(ProviderOrder 按层+vendor 键命中协议面)",
+			res.ProviderName)
+	}
+}
+

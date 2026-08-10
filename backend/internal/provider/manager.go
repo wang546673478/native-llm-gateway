@@ -260,6 +260,15 @@ func (m *Manager) BillingSourceFor(provider string) string {
 	return "api"
 }
 
+// VendorFor P-route-order: 查注册名所属厂商(vendor)。
+// 路由 Level 2 排序用 vendor 键(route_order 的 provider 作用域存厂商名),
+// 而候选是注册面名(如 mimo-token-plan-anthropic / minimax),需先归到 vendor
+// 再查改写,否则改写落在「无人使用的裸面」上导致排序失效(2026-08-10 根因)。
+// vendor 未声明时 registry 返回 name 本身(单协议厂商,天然一致)。
+func (m *Manager) VendorFor(name string) string {
+	return m.registry.VendorFor(name)
+}
+
 // pricingKey 内部 hash key
 func pricingKey(provider, model string) string {
 	return provider + ":" + model

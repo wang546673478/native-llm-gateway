@@ -21,4 +21,7 @@ type ProviderLookup interface {
 	CostFor(providerName, modelID string) ModelCost
 	// EndpointFor 查 provider 的 baseURL(quotacheck 探测用;未加载返回空)
 	EndpointFor(providerName string) string
+	// VendorFor 查注册名的厂商(vendor)。路由 Level 2 排序的改写键是厂商名
+	// (route_order provider 作用域),而候选是注册面名,需归 vendor 再查改写。
+	VendorFor(name string) string
 }

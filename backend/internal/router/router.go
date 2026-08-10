@@ -33,10 +33,12 @@ type Config struct {
 	// 任意 agent 任意模型名都能用,仍按 tier 计费(token_plan → api → free)
 	CatchAll *AliasConfig
 
-	// P-route-order(2026-08-10,Level 2):层内 provider 排序改写(provider 名 → 位次,
-	// 小在前)。非空则覆盖「最早 key 时间」默认序。由上层(server)从 route_order 表
-	// 加载注入,router 不 import DB(低耦合)。nil/空 = 用默认序。
-	ProviderOrder map[string]int
+	// P-route-order(2026-08-10,Level 2):层内 provider 排序改写 — 外层键 = 计费层
+	// (token_plan/api),内层 = 厂商名 → 位次(小在前)。非空则覆盖「最早 key 时间」默认序。
+	// 由上层(server)从 route_order 表按层加载注入,router 不 import DB(低耦合)。nil = 用默认序。
+	// 分两层存储:同一 vendor 在 token_plan 与 api 层各自独立排序,
+	// 不会因另一层改写互相覆盖(2026-08-10 根因)。
+	ProviderOrder map[string]map[string]int
 }
 
 // RouteResult 路由结果:把一个请求锁定到具体的 Provider + Model + Key
@@ -208,36 +210,47 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 	r.mu.RLock()
 	providerOrder := r.cfg.ProviderOrder
 	r.mu.RUnlock()
-	seq := func(name string) (int, bool) {
+	// Level 2 改写键 = (billing_source, vendor),两维都要。
+	//  - 外层 key 是计费层(token_plan/api):同一 vendor 分开排序,层层独立改写。
+	//    若只按 vendor 平铺,会把某层(如 api 层 mimo=1)覆盖另一层(token_plan 层 mimo=0),
+	//    导致被覆盖层排序失效(2026-08-10 实测:token_plan 层 mimo 优先被 api 层值覆盖 → minimax 反超)。
+	//  - 内层 key 是厂商名(route_order 的 provider 作用域按 vendor 存),而候选是「注册面名」
+	//    (如 mimo-token-plan-anthropic / minimax),须先归 vendor 再查,否则改写落在无人使用的
+	//    裸面上、且 minimax 这种"裸面即 anthropic 面"的会因「有改写者优于无改写者」意外压过 mimo。
+	// 两层归位后再查,与前端/route_order(scope=provider,billing_source 分层)契约一致。
+	seq := func(tier, name string) (int, bool) {
 		if providerOrder != nil {
-			if v, ok := providerOrder[name]; ok {
-				return v, true
+			if byTier, ok := providerOrder[tier]; ok {
+				if v, ok := byTier[r.manager.VendorFor(name)]; ok {
+					return v, true
+				}
 			}
 		}
 		return 0, false
 	}
 	sort.Slice(routes, func(i, j int) bool {
 		ni, nj := routes[i].Name, routes[j].Name
-		if si, oki := seq(ni); oki {
-			if sj, okj := seq(nj); okj {
+		ti, tj := routes[i].BillingSource, routes[j].BillingSource
+		if si, oki := seq(ti, ni); oki {
+			if sj, okj := seq(tj, nj); okj {
 				if si != sj {
 					return si < sj
 				}
 			} else {
 				return true // 有改写者优于无改写者
 			}
-		} else if _, okj := seq(nj); okj {
+		} else if _, okj := seq(tj, nj); okj {
 			return false // 无改写者劣于有改写者
 		}
-		ti, tj := earliest(ni), earliest(nj)
-		if !ti.Equal(tj) {
-			if ti.IsZero() {
+		tei, tej := earliest(ni), earliest(nj)
+		if !tei.Equal(tej) {
+			if tei.IsZero() {
 				return false
 			}
-			if tj.IsZero() {
+			if tej.IsZero() {
 				return true
 			}
-			return ti.Before(tj)
+			return tei.Before(tej)
 		}
 		return ni < nj
 	})
@@ -688,7 +701,7 @@ func (r *Router) SetPools(newMap map[string]*keypool.Pool) {
 // SetProviderOrder P-route-order(2026-08-10):热更新 Level 2 层内 provider 排序改写。
 // 在 r.mu 写锁下替换 cfg.ProviderOrder(PUT /routing/order 后由 server 调用)。
 // routeCatchAllAuto 读时在同一锁下快照,避免 data race。
-func (r *Router) SetProviderOrder(m map[string]int) {
+func (r *Router) SetProviderOrder(m map[string]map[string]int) {
 	r.mu.Lock()
 	r.cfg.ProviderOrder = m
 	r.mu.Unlock()

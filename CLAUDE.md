@@ -248,4 +248,4 @@ sudo systemctl start llm-gateway # systemd 托管
 | admin list 锁外读 *Key(F3) | server SetKeyStatusLookup/SetPoolLookup + auth handler 读 k.Status | admin 频次 + amd64 不撕裂;为低危竞态在热路径加锁风险>收益,保留 |
 | **/api/v1+/admin 管理面无鉴权(3.1)** | mark-quota-exceeded/create key 等敏感突变端点无 auth | **安全风险,用户决断**:keys CRUD 设计上证 auth-free(trusted network),但整个管理面无鉴权有成真实暴露风险——待用户决定加 admin auth/网络绑定,不擅自锁死 |
 | Logging.output/file_path + usage.retention_days + keypool.health_check_interval(#140) | 零消费 config 字段 | 疑似"拟建未接"功能(文件日志/用量保留)非意外孤岛,移除是产品决定,暂缓评估 |
-| 前端树聚合粒度 ≠ 路由候选单元 | Routing 树按 vendor 折叠(minimax 一面显 weige/key-1);路由把 minimax/anthropic vs minimax-openai 当独立候选 | 展示简化非耦合错误:树拖拽命中 vendor key 序(scope=key provider=minimax)共享两协议面 pool。若想让树反映真实候选需改聚合粒度(产品决策,非耦合问题),保留 |
+| 前端树聚合粒度 ≠ 路由候选单元部分 | Routing 树按 vendor 折叠(minimax 一面显 weige/key-1);路由把 minimax/anthropic vs minimax-openai 当独立候选 | 展示简化非耦合错误;树拖拽命中 vendor key 序(scope=key provider=minimax)共享两协议面 pool。已修:Level 2 provider 改写按 (billing_source, vendor) 分层归位,协议面先归 vendor 再查改写,同 vendor 子树对协议面正确生效(2026-08-10)。剩余展示差异(minimax 一面显所有 key)为产品拟增强,保留 |
