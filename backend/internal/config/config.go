@@ -25,6 +25,8 @@ type Config struct {
 	Logging   LoggingConfig       `mapstructure:"logging"`
 	Metrics   MetricsConfig       `mapstructure:"metrics"`
 	Usage     UsageConfig         `mapstructure:"usage"`
+	// Fingerprint 设备指纹归一化配置(见 docs/fingerprint-sanitize-plan.md)。
+	Fingerprint FingerprintConfig `mapstructure:"fingerprint"`
 }
 
 // ServerConfig HTTP 服务配置
@@ -268,6 +270,22 @@ type UsageConfig struct {
 	FlushInterval time.Duration `mapstructure:"flush_interval"`
 	BatchSize     int           `mapstructure:"batch_size"`
 	RetentionDays int           `mapstructure:"retention_days"`
+}
+
+// FingerprintConfig 设备指纹归一化配置。
+// 把发往上游前 body 里的设备级指纹(device_id / platform / shell / os version)
+// 归一成 Gateway 一套固定值,抹平多机器共用一把上游 key 的「多头」信号(封号风险)。
+type FingerprintConfig struct {
+	// Enabled 是否归一化。nil = 默认开(true);显式 false 关闭。
+	// 用 *bool 区分「未配置」和「显式关闭」,因为 viper 解 bool 未配时给 false。
+	Enabled *bool `mapstructure:"enabled"`
+	// CanonicalDeviceID 统一 device_id。空则启动时随机生成一次(存内存,不落盘)。
+	CanonicalDeviceID string `mapstructure:"canonical_device_id"`
+}
+
+// FingerprintEnabled 归一化的最终开关;nil 视为默认开。
+func (c *FingerprintConfig) FingerprintEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // Load 从指定路径加载配置文件

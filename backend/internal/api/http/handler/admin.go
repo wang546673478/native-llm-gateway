@@ -57,6 +57,10 @@ type Admin struct {
 	// P-route-order: PUT /routing/order(scope=key)成功后由 server 调用来重载该 provider
 	// 的 pool(把 route_order 的 key 序接进 keypool)。nil = 不热更新。
 	KeyOrderReload func(provider string)
+	// P-fingerprint: 设备指纹归一化的运行时查询/热切换(回调注入,handler 不依赖 server 状态)。
+	// FingerprintGet 返回 (enabled, canonical_device_id);FingerprintSet 翻转 enabled。
+	FingerprintGet func() (bool, string)
+	FingerprintSet func(enabled bool)
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -86,6 +90,8 @@ func NewAdmin(
 	routeOrderStore dbpkg.RouteOrderStore, // 可 nil(改写不可用)
 	providerOrderReload func(), // 可 nil(PUT provider 顺序后热更新 router)
 	keyOrderReload func(provider string), // 可 nil(PUT key 顺序后重载 pool)
+	fingerprintGet func() (bool, string), // 可 nil(fingerprint 查询不可用)
+	fingerprintSet func(enabled bool), // 可 nil(fingerprint 切换不可用)
 ) *Admin {
 	return &Admin{
 		Manager:             mgr,
@@ -103,6 +109,8 @@ func NewAdmin(
 		RouteOrderStore:     routeOrderStore,
 		ProviderOrderReload: providerOrderReload,
 		KeyOrderReload:      keyOrderReload,
+		FingerprintGet:      fingerprintGet,
+		FingerprintSet:      fingerprintSet,
 	}
 }
 
@@ -141,6 +149,9 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	// P68 / P-quota-balance: 暴露 quota runtime config(目前只含 warn_threshold_pct)
 	// 给前端 ProviderKeys.vue 用,避免硬编码颜色阈值。
 	r.GET("/config/quota", a.getQuotaConfig)
+	// P-fingerprint: 设备指纹归一化开关查询/热切换
+	r.GET("/fingerprint", a.getFingerprint)
+	r.PUT("/fingerprint", a.putFingerprint)
 }
 
 // listRegisteredProviders GET /api/v1/providers/registered
@@ -966,4 +977,42 @@ func (a *Admin) getQuotaConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"warn_threshold_pct": pct,
 	})
+}
+
+// getFingerprint GET /api/v1/fingerprint
+// 返回设备指纹归一化的运行时状态(enabled + canonical_device_id)。
+// FingerprintGet 为 nil(= server 未注入)时返回默认关闭 + 空 device_id。
+func (a *Admin) getFingerprint(c *gin.Context) {
+	enabled := false
+	canonical := ""
+	if a.FingerprintGet != nil {
+		enabled, canonical = a.FingerprintGet()
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"enabled":             enabled,
+		"canonical_device_id": canonical,
+	})
+}
+
+// putFingerprint PUT /api/v1/fingerprint
+// 热切换设备指纹归一化开关。body: {"enabled": true|false}。
+// 只翻 enabled,不改 canonical_device_id(该值启动时 Capture,改它需重启)。
+func (a *Admin) putFingerprint(c *gin.Context) {
+	if a.FingerprintSet == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "fingerprint toggle not available"})
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "field 'enabled' is required"})
+		return
+	}
+	a.FingerprintSet(*req.Enabled)
+	c.JSON(http.StatusOK, gin.H{"enabled": *req.Enabled})
 }

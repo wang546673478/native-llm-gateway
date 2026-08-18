@@ -54,6 +54,9 @@ type Engine struct {
 	// c.Get("gateway_key") magic key(CLAUDE.md 明确禁止)— 改 auth 字段/字段名
 	// 只改 context.go 一处,不再改 proxy.go 5 处。
 	gkCtx GatewayKeyContext
+	// fingerprintSanitizer 设备指纹归一化钩子(nil = 不归一)。与 QuotaChecker 同构:
+	// server 注入,proxy 不 import fingerprint 包。
+	fingerprintSanitizer func(body []byte) []byte
 }
 
 // streamAcc 是单条流式响应的累积 buffer + truncated 标记。
@@ -85,6 +88,10 @@ type Config struct {
 	// GkContext 可选的 GatewayKey 提取抽象;nil 时用默认实现(defaultGatewayKeyContext)。
 	// 供测试 mock / 特殊上下文注入,生产留空即可。
 	GkContext GatewayKeyContext
+	// FingerprintSanitizer 可选的设备指纹归一化钩子;nil = 不归一(透传原样)。
+	// 由 server 注入 fingerprint.Sanitize 闭包(捕获启动时的 Snapshot),proxy 不直接
+	// import fingerprint 包——与 QuotaChecker 同构,保持低耦合。
+	FingerprintSanitizer func(body []byte) []byte
 }
 
 // NewEngine 构造 Proxy Engine
@@ -119,6 +126,7 @@ func NewEngine(cfg Config) *Engine {
 		maxRetry:      cfg.MaxRetry,
 		writeTimeout:  cfg.WriteTimeout,
 		gkCtx:         cfg.GkContext,
+		fingerprintSanitizer: cfg.FingerprintSanitizer,
 	}
 }
 
@@ -288,7 +296,14 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	//     Route OK → CheckAllowed fail → fallback 到 default_model(假设 default_model 在白名单)
 	//     如果 default_model 不在白名单 → 403
 
-	// 3. 构造 Provider.Request(Body 透传)
+	// 3. 设备指纹归一化(可选)—— 在构造 Provider.Request 前,对最终要发的 body 做一次。
+	// nil = 不归一(fingerprint 开关关闭),body 原样透传,零改动零开销。
+	// 非 anthropic 面(openai/google)的 body 无 device_id/Environment 块,Sanitize 天然 no-op。
+	if e.fingerprintSanitizer != nil {
+		body = e.fingerprintSanitizer(body)
+	}
+
+	// 3.5 构造 Provider.Request(Body 透传)
 	req := &provider.Request{
 		Method:       c.Request.Method,
 		Path:         c.Request.URL.Path,

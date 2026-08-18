@@ -89,6 +89,7 @@ backend/
 │   │   └── key.go              ← IsUsable / IsPolledAndExhausted
 │   ├── circuit/               ← per-key 熔断器(CLOSED → OPEN → HALF_OPEN)
 │   ├── quotacheck/            ← 余额轮询 + probe 探测
+│   ├── fingerprint/           ← 设备指纹归一化(多机共用上游 key 抹平 device_id/平台多头信号,防封号)
 │   ├── accesslog/             ← 接入日志(body 文件 + 30 天保留)
 │   ├── auth/                  ← 客户端鉴权 + Provider Key 管理
 │   ├── usage/                 ← 用量异步收集 + 批量落库
@@ -230,6 +231,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | Bug: COOLING 卡死 | `ReportRateLimit` token_plan 连续冷却升级 QE |
 | handler→mimo 解耦 | 管理 API handler 不再直连厂商包,闭包注入(bda7ad0) |
 | magic key→gkCtx | proxy 5 处 `c.Get("gateway_key")` 统一走接口(a75ea23) |
+| 设备指纹归一化 | 新包 `internal/fingerprint`,proxy 层闭包注入(与 QuotaChecker 同构),抹平多机共用上游 key 的 `device_id`/platform/shell/os-version 多头信号;`/api/v1/fingerprint` 热开关 + Overview 卡片 + config `fingerprint` 块。只归一无副作用的纯指纹,**不碰 workdir/对话内容**(见 docs/fingerprint-sanitize-plan.md) |
 
 ### 剩余耦合(评估为合理保留,保网关稳定)
 

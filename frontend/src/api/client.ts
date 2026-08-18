@@ -324,4 +324,11 @@ export const api = {
   // P-quota-balance: 后端 quota runtime config(目前只含 warn_threshold_pct)
   // ProviderKeys.vue 用它做余额颜色阈值,避免硬编码。
   quotaConfig: () => client.get<{ warn_threshold_pct: number }>('/config/quota').then(r => r.data),
+  // P-fingerprint: 设备指纹归一化开关查询/热切换
+  fingerprint: {
+    get: () =>
+      client.get<{ enabled: boolean; canonical_device_id: string }>('/fingerprint').then(r => r.data),
+    set: (enabled: boolean) =>
+      client.put<{ enabled: boolean }>('/fingerprint', { enabled }).then(r => r.data),
+  },
 }

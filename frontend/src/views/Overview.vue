@@ -86,13 +86,31 @@
         </n-gi>
       </n-grid>
     </n-card>
+
+    <n-card title="设备指纹归一化" style="margin-top: 16px">
+      <div class="fp-row">
+        <div class="fp-desc">
+          多台机器经网关共用一把上游 key 时，把 device_id / 平台 / shell / 系统版本
+          归一成网关固定值，抹平「多头设备」信号，降低封号风险。仅改无副作用的纯指纹，
+          不碰工作目录与对话内容。
+        </div>
+        <n-switch
+          :value="fpEnabled"
+          :loading="fpLoading"
+          @update:value="toggleFingerprint"
+        />
+      </div>
+      <div v-if="fpCanonical" class="fp-canonical">
+        统一 device_id：<code>{{ fpCanonical }}</code>
+      </div>
+    </n-card>
   </n-spin>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import {
-  NCard, NDataTable, NGi, NGrid, NSpin,
+  NCard, NDataTable, NGi, NGrid, NSpin, NSwitch,
 } from 'naive-ui'
 import { api, type DashboardResp } from '../api/client'
 import { fmtNum, quotaDisplay } from '../utils/status'
@@ -100,6 +118,33 @@ import { fmtNum, quotaDisplay } from '../utils/status'
 const data = ref<DashboardResp | null>(null)
 const loading = ref(true)
 let timer: number | undefined
+
+// P-fingerprint: 设备指纹归一化开关状态
+const fpEnabled = ref(false)
+const fpCanonical = ref('')
+const fpLoading = ref(false)
+
+async function toggleFingerprint(v: boolean) {
+  fpLoading.value = true
+  try {
+    await api.fingerprint.set(v)
+    fpEnabled.value = v
+  } catch (e) {
+    console.error('fingerprint toggle failed', e)
+  } finally {
+    fpLoading.value = false
+  }
+}
+
+async function loadFingerprint() {
+  try {
+    const f = await api.fingerprint.get()
+    fpEnabled.value = f.enabled
+    fpCanonical.value = f.canonical_device_id
+  } catch (e) {
+    console.error('fingerprint load failed', e)
+  }
+}
 
 // P65: 移除过时的 columns(P48 卡片替代了它,模板从未引用)
 
@@ -127,6 +172,7 @@ async function load() {
 
 onMounted(() => {
   load()
+  loadFingerprint()
   timer = window.setInterval(load, 15_000)
 })
 onUnmounted(() => {
@@ -187,5 +233,28 @@ onUnmounted(() => {
   font-weight: 600;
   color: #18a058;
   font-size: 16px;
+}
+
+/* P-fingerprint: 设备指纹归一化开关 */
+.fp-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.fp-desc {
+  font-size: 13px;
+  color: #888;
+  line-height: 1.6;
+}
+.fp-canonical {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #666;
+}
+.fp-canonical code {
+  background: #f0f0f2;
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 </style>

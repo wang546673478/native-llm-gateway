@@ -61,3 +61,30 @@ func TestLoad_NoCatchAll(t *testing.T) {
 		t.Errorf("catch_all = %+v, want nil(未配置不兜底)", cfg.Routing.CatchAll)
 	}
 }
+
+// TestFingerprintDefaults 钉住指纹归一化的「默认开 / 显式关」语义。
+// 用 *bool 区分「未配置」(→默认开) 与「显式 false」(→关)。
+func TestFingerprintDefaults(t *testing.T) {
+	// 1. 未配置 fingerprint → 默认开
+	c1 := &Config{}
+	if !c1.Fingerprint.FingerprintEnabled() {
+		t.Error("unset fingerprint should default to enabled")
+	}
+
+	// 2. 显式 false → 关
+	f := false
+	c2 := &Config{Fingerprint: FingerprintConfig{Enabled: &f}}
+	if c2.Fingerprint.FingerprintEnabled() {
+		t.Error("explicit enabled=false should be disabled")
+	}
+
+	// 3. 显式 true → 开
+	tr := true
+	c3 := &Config{Fingerprint: FingerprintConfig{Enabled: &tr, CanonicalDeviceID: "abc"}}
+	if !c3.Fingerprint.FingerprintEnabled() {
+		t.Error("explicit enabled=true should be enabled")
+	}
+	if c3.Fingerprint.CanonicalDeviceID != "abc" {
+		t.Errorf("canonical_device_id = %q, want abc", c3.Fingerprint.CanonicalDeviceID)
+	}
+}

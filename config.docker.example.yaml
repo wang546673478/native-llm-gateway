@@ -592,3 +592,8 @@ usage:
   flush_interval: 10s
   batch_size: 100
   retention_days: 90
+
+# 设备指纹归一化(可选)—— 见 config.example.yaml 同段注释
+fingerprint:
+  # enabled: true
+  # canonical_device_id: ""

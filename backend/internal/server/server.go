@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/circuit"
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
+	"github.com/wang546673478/native-llm-gateway/internal/fingerprint"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
@@ -52,6 +54,12 @@ type Server struct {
 	metricsC *metrics.Collector
 	accessR  *accesslog.Recorder // P67: 接入日志 Recorder
 	quotaM   *quotacheck.Manager // P68: 配额恢复 worker
+	// fpEnabled 设备指纹归一化开关原子值(运行时热切,PATCH /api/v1/fingerprint 翻转)。
+	// 指针:engine 闭包与 server 持有同一个实例,热切换共享。默认 = cfg.Fingerprint 开关。
+	// atomic 保证热路径只读一次、无锁。
+	fpEnabled *atomic.Bool
+	// fpSnapshot 启动时 Capture 一次的网关环境快照。热切换只翻 enabled,不改快照。
+	fpSnapshot fingerprint.Snapshot
 	http     *http.Server
 }
 
@@ -137,6 +145,12 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		return nil, fmt.Errorf("accesslog new: %w", err)
 	}
 
+	// 设备指纹归一化:启动时翻一次开关 + Capture 一次网关环境。
+	// fpEnabled 同时被 engine 闭包与 server 持有 —— PATCH /api/v1/fingerprint 翻转即热切换。
+	fpEnabled := &atomic.Bool{}
+	fpEnabled.Store(cfg.Fingerprint.FingerprintEnabled())
+	fpSnap := fingerprint.Capture(cfg.Fingerprint.CanonicalDeviceID)
+
 	eng := proxy.NewEngine(proxy.Config{
 		Router:        r,
 		Logger:        logger,
@@ -149,6 +163,8 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		QuotaChecker: proxy.CheckQuotaFunc(func(ctx context.Context, providerName, baseURL string, k *keypool.Key) (bool, error) {
 			return quotacheck.CheckQuota(ctx, providerName, baseURL, k)
 		}),
+		// 设备指纹归一化(热切换):闭包每次请求读 fpEnabled,off 时原样透传。
+		FingerprintSanitizer: fingerprintSanitizer(fpEnabled, fpSnap),
 		MaxRetry: cfg.Retry.MaxAttempts,
 		// 流式写 deadline 续期预算 — 与 http.Server.WriteTimeout 同源,
 		// 流式场景下按 chunk 续期成空闲超时(非流式仍是绝对上限)
@@ -178,19 +194,21 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
 
 	s := &Server{
-		cfg:      cfg,
-		logger:   logger,
-		db:       db,
-		manager:  manager,
-		router:   r,
-		engine:   eng,
-		pools:    pools,
-		auth:     authn,
-		usageC:   usageC,
-		usageR:   usageRepo,
-		metricsC: metricsC,
-		accessR:  accessR,
-		quotaM:   quotaM,
+		cfg:        cfg,
+		logger:     logger,
+		db:         db,
+		manager:    manager,
+		router:     r,
+		engine:     eng,
+		pools:      pools,
+		auth:       authn,
+		usageC:     usageC,
+		usageR:     usageRepo,
+		metricsC:   metricsC,
+		accessR:    accessR,
+		quotaM:     quotaM,
+		fpEnabled:  fpEnabled,
+		fpSnapshot: fpSnap,
 	}
 	// P-route-order: 启动时把 route_order 的 Level 2 provider 改写加载进 router
 	s.reloadProviderOrder()
@@ -808,6 +826,19 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		func(provider string) { // P-route-order: PUT key 顺序后重载该 provider 的 pool(Level 3)
 			s.ReloadProviderPool(provider)
 		},
+		// P-fingerprint: 设备指纹归一化查询/热切换闭包(handler 不依赖 server 状态)
+		func() (bool, string) {
+			if s.fpEnabled == nil {
+				return false, ""
+			}
+			return s.fpEnabled.Load(), s.fpSnapshot.DeviceID
+		},
+		func(enabled bool) {
+			if s.fpEnabled != nil {
+				s.fpEnabled.Store(enabled)
+				s.logger.Info("fingerprint sanitize toggled", zap.Bool("enabled", enabled))
+			}
+		},
 	)
 	admin.Register(r.Group("/api/v1"))
 
@@ -1117,4 +1148,16 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		s.quotaM.Pools().SwapPools(newPools)
 	}
 	s.logger.Info("all provider pools reloaded", zap.Int("providers", len(newPools)))
+}
+
+// fingerprintSanitizer 构造设备指纹归一化闭包。闭包捕获 fpEnabled(atomic 开关)
+// 与 fpSnapshot(启动 Capture 一次),每次请求读一次开关:off 时原样返回(透传),on 时归一。
+// 这样 PATCH /api/v1/fingerprint 翻转 fpEnabled 即热切换,无需重启、无需重捕快照。
+func fingerprintSanitizer(enabled *atomic.Bool, snap fingerprint.Snapshot) func([]byte) []byte {
+	return func(body []byte) []byte {
+		if !enabled.Load() {
+			return body
+		}
+		return fingerprint.Sanitize(body, snap)
+	}
 }

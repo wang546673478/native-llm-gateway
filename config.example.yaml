@@ -586,3 +586,13 @@ usage:
   flush_interval: 10s
   batch_size: 100
   retention_days: 90
+
+# 设备指纹归一化(可选)—— 多台机器经网关共用一把上游 key 时,把 body 里
+# 设备级指纹(device_id / platform / shell / os version)归一成网关一套固定值,
+# 抹平「多头」信号,降低封号风险。只改无功能副作用的纯指纹,不碰工作目录/对话内容。
+fingerprint:
+  # enabled: 是否归一化。默认 true(留空即开);显式 false 关闭 → 透传原样。
+  # enabled: true
+  # canonical_device_id: 统一 device_id。留空则启动时随机生成一次(存内存,不落盘);
+  # 想固定或更换统一值,填一个 64 字符 hex 字符串。
+  # canonical_device_id: ""
