@@ -138,8 +138,8 @@ make vet
 # 3. 编译检查
 make build
 
-# 4. 前端类型检查
-cd frontend && npx tsc --noEmit
+# 4. 前端类型检查(Vue 项目须用 vue-tsc,裸 tsc 会误报 .vue 模块缺失)
+cd frontend && npx vue-tsc --noEmit
 ```
 
 ---
