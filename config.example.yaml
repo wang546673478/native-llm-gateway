@@ -75,19 +75,19 @@ providers:
     # 原生支持 OpenAI Responses API(Codex 透传)
     responses_api: true
     models:
-      # v4-flash:¥1/M 输入、¥0.02/M cache 命中、¥2/M 输出
+      # v4-flash: 官方价(元/百万 tokens,按@高峰时段)——未命中 3.0、命中 0.10、输出 9.0
       - id: "deepseek-v4-flash"
         aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.00002
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.009
+        cost_per_1k_cache_read: 0.0001
         cost_per_1k_cache_creation: 0.0
-      # v4-pro:¥3/M 输入、¥0.025/M cache 命中、¥6/M 输出,支持 thinking 模式
+      # v4-pro: 官方价(元/百万 tokens,按@高峰时段)——未命中 9.0、命中 0.30、输出 27.0,支持 thinking
       - id: "deepseek-v4-pro"
         aliases: ["pro-model"]
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-        cost_per_1k_cache_read: 0.000025
+        cost_per_1k_input: 0.009
+        cost_per_1k_output: 0.027
+        cost_per_1k_cache_read: 0.0003
         cost_per_1k_cache_creation: 0.0
     # P41 DeepSeek 支持的 API 特性(都通过 body 透传,Gateway 不需特殊处理):
     #   - Thinking 模式:extra_body={"thinking":{"type":"enabled"}}(v4-pro)
@@ -118,15 +118,15 @@ providers:
     models:
       - id: "deepseek-v4-flash"
         aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.00002
+        cost_per_1k_input: 0.003
+        cost_per_1k_output: 0.009
+        cost_per_1k_cache_read: 0.0001
         cost_per_1k_cache_creation: 0.0
       - id: "deepseek-v4-pro"
         aliases: []
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-        cost_per_1k_cache_read: 0.000025
+        cost_per_1k_input: 0.009
+        cost_per_1k_output: 0.027
+        cost_per_1k_cache_read: 0.0003
         cost_per_1k_cache_creation: 0.0
     circuit_breaker:
       failure_threshold: 5
