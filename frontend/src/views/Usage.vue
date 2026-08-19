@@ -7,6 +7,12 @@
         <n-text>结束:</n-text>
         <n-input v-model:value="end" placeholder="RFC3339" style="width: 280px" />
         <n-button type="primary" @click="query">查询</n-button>
+        <n-divider vertical />
+        <n-text>TPS 口径:</n-text>
+        <n-radio-group v-model:value="tpsMode" size="small">
+          <n-radio-button value="output">输出</n-radio-button>
+          <n-radio-button value="total">总</n-radio-button>
+        </n-radio-group>
       </n-space>
       <n-data-table :columns="columns" :data="rows" :bordered="false" :pagination="false" />
     </n-card>
@@ -28,7 +34,7 @@
 <script setup lang="ts">
 import { h, onMounted, ref } from 'vue'
 import { usePagination } from '../composables/usePagination'
-import { NButton, NCard, NDataTable, NInput, NSpace, NSpin, NText, NTag } from 'naive-ui'
+import { NButton, NCard, NDataTable, NInput, NSpace, NSpin, NText, NTag, NDivider, NRadioGroup, NRadioButton } from 'naive-ui'
 import { api, type AggregateRow, type ModelProviderRow } from '../api/client'
 import { fmtDateTime } from '../utils/time'
 import { fmtNum } from '../utils/status'
@@ -43,6 +49,29 @@ const loadingProvider = ref<Record<string, boolean>>({})
 
 const start = ref('')
 const end = ref('')
+
+// TPS 口径:output=输出 token/秒, total=总 token/秒
+const tpsMode = ref<'output' | 'total'>('output')
+
+// 单条 TPS = tokens / (latency_ms / 1000)。latency<=0 视为不可算(返回 null)。
+function singleTps(tokens: number, latencyMs: number): string {
+  if (!latencyMs || latencyMs <= 0) return '—'
+  return (tokens / (latencyMs / 1000)).toFixed(2)
+}
+
+// 聚合 TPS = 总 token ÷ 总耗时(不能对每条 TPS 求平均,后者会因 token 大小差异失真)。
+function aggTps(row: AggregateRow): string {
+  const tokens = tpsMode.value === 'output' ? row.total_output_tokens : row.total_tokens
+  const ms = row.total_latency_ms ?? 0
+  if (!ms || ms <= 0) return '—'
+  return (tokens / (ms / 1000)).toFixed(2)
+}
+
+// 单条记录的 TPS(按当前口径取 token)
+function rowTps(row: any): string {
+  const tokens = tpsMode.value === 'output' ? row.output_tokens : row.total_tokens
+  return singleTps(tokens, row.latency_ms)
+}
 
 // P66: 最近请求后端分页状态
 // 分页状态 + handlers 收敛到共享 usePagination(消除此前内联 reactive + 两份
@@ -108,6 +137,17 @@ const columns = [
     key: 'avg_latency_ms',
     render: (row: AggregateRow) => Number(row.avg_latency_ms ?? 0).toFixed(2),
   },
+  {
+    title: 'TPS',
+    key: 'tps',
+    render: (row: AggregateRow) => aggTps(row),
+  },
+  {
+    title: '首字(ms)',
+    key: 'avg_ttft_ms',
+    render: (row: AggregateRow) =>
+      row.avg_ttft_ms > 0 ? Number(row.avg_ttft_ms).toFixed(0) : '—',
+  },
 ]
 
 const recordColumns = [
@@ -126,6 +166,8 @@ const recordColumns = [
   },
   { title: '未缓存输入', key: 'input_tokens', render: (row: any) => fmtNum(row.input_tokens) },
   { title: '输出', key: 'output_tokens', render: (row: any) => fmtNum(row.output_tokens) },
+  { title: 'TPS', key: 'tps', render: (row: any) => rowTps(row) },
+  { title: '首字(ms)', key: 'ttft_ms', render: (row: any) => (row.ttft_ms > 0 ? row.ttft_ms : '—') },
   { title: 'Trace', key: 'trace_id' },
 ]
 

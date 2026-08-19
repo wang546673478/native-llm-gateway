@@ -602,7 +602,10 @@ func (a *Admin) dashboard(c *gin.Context) {
 		total.TotalOutput += r.TotalOutput
 		total.TotalTokens += r.TotalTokens
 		total.TotalCost += r.TotalCost
+		total.TotalLatencyMs += r.TotalLatencyMs
 		total.ErrorCount += r.ErrorCount
+		// 注意:AvgTtftMs / AvgLatencyMs 是 AVG,跨 model 不能简单相加,
+		// dashboard 总卡片不展示这两个粒度,这里故意不合成(留 0)。
 	}
 
 	// P47: 按 billing_source 聚合 — dashboard 显示 token_plan / api / free 三组

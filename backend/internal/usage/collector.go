@@ -28,9 +28,12 @@ type Record struct {
 	TotalTokens   int
 	Cost          float64
 	LatencyMs     int64
-	IsStream      bool
-	StatusCode    int
-	ErrorType     string
+	// TtftMs 首字时间(time to first token):流式请求从发起请求到收到第一个
+	// token 的耗时(ms)。非流式请求语义上无独立首字概念 → 填 0(不统计)。
+	TtftMs     int64
+	IsStream   bool
+	StatusCode int
+	ErrorType  string
 }
 
 // Collector 异步收集器
@@ -149,6 +152,7 @@ func (c *Collector) flush(batch []*Record) error {
 			TotalTokens:   r.TotalTokens,
 			Cost:          r.Cost,
 			LatencyMs:     int(r.LatencyMs),
+			TtftMs:        int(r.TtftMs),
 			IsStream:      r.IsStream,
 			StatusCode:    r.StatusCode,
 			ErrorType:     r.ErrorType,

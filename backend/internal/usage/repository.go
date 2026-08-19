@@ -99,7 +99,14 @@ type AggregateResult struct {
 	TotalTokens   int64   `json:"total_tokens"`
 	TotalCost     float64 `json:"total_cost"`
 	AvgLatencyMs  float64 `json:"avg_latency_ms"`
-	ErrorCount    int64   `json:"error_count"`
+	// TotalLatencyMs 时间窗内总耗时(SUM(latency_ms)),给前端算聚合 TPS 用。
+	// 注意:TPS 聚合必须是「总 token ÷ 总耗时」,不能对每条 TPS 求平均 ——
+	// 每条 avg 会因 token 大小差异失真。故这里单独累加出一个总耗时字段。
+	TotalLatencyMs int64 `json:"total_latency_ms"`
+	// AvgTtftMs 平均首字时间:只对 is_stream=true 且 ttft>0 的记录求平均,
+	// 非流式 ttft=0 不参与,避免被 0 稀释。
+	AvgTtftMs   float64 `json:"avg_ttft_ms"`
+	ErrorCount  int64   `json:"error_count"`
 }
 
 // Aggregate 按 Model 聚合(P65:去掉 provider 维度,只按 model_id)
@@ -114,6 +121,8 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 		TotalTokens  int64
 		Cost         float64
 		AvgLatency   float64
+		TotalLatency int64
+		AvgTtft      float64
 		ErrorCount   int64
 	}
 
@@ -137,6 +146,8 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 		COALESCE(SUM(total_tokens),0) as total_tokens,
 		COALESCE(SUM(cost),0) as cost,
 		COALESCE(AVG(latency_ms),0) as avg_latency,
+		COALESCE(SUM(latency_ms),0) as total_latency,
+		COALESCE(AVG(CASE WHEN is_stream THEN ttft_ms END),0) as avg_ttft,
 		COALESCE(SUM(CASE WHEN status_code >= 400 OR error_type != '' THEN 1 ELSE 0 END),0) as error_count
 	`).Group("model_id").Order("count DESC").Scan(&rows).Error
 	if err != nil {
@@ -148,13 +159,15 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 		out[i] = AggregateRow{
 			ModelID: r.ModelID,
 			AggregateResult: AggregateResult{
-				TotalRequests: r.Count,
-				TotalInput:    r.InputTokens,
-				TotalOutput:   r.OutputTokens,
-				TotalTokens:   r.TotalTokens,
-				TotalCost:     r.Cost,
-				AvgLatencyMs:  r.AvgLatency,
-				ErrorCount:    r.ErrorCount,
+				TotalRequests:  r.Count,
+				TotalInput:     r.InputTokens,
+				TotalOutput:    r.OutputTokens,
+				TotalTokens:    r.TotalTokens,
+				TotalCost:      r.Cost,
+				AvgLatencyMs:   r.AvgLatency,
+				TotalLatencyMs: r.TotalLatency,
+				AvgTtftMs:      r.AvgTtft,
+				ErrorCount:     r.ErrorCount,
 			},
 		}
 	}
@@ -217,6 +230,8 @@ func (r *Repository) AggregateByBillingSource(ctx context.Context, f QueryFilter
 		TotalTokens   int64
 		Cost          float64
 		AvgLatency    float64
+		TotalLatency  int64
+		AvgTtft       float64
 		ErrorCount    int64
 	}
 
@@ -240,6 +255,8 @@ func (r *Repository) AggregateByBillingSource(ctx context.Context, f QueryFilter
 		COALESCE(SUM(total_tokens),0) as total_tokens,
 		COALESCE(SUM(cost),0) as cost,
 		COALESCE(AVG(latency_ms),0) as avg_latency,
+		COALESCE(SUM(latency_ms),0) as total_latency,
+		COALESCE(AVG(CASE WHEN is_stream THEN ttft_ms END),0) as avg_ttft,
 		COALESCE(SUM(CASE WHEN status_code >= 400 OR error_type != '' THEN 1 ELSE 0 END),0) as error_count
 	`).Group("billing_source").Order("count DESC").Scan(&rows).Error
 	if err != nil {
@@ -251,13 +268,15 @@ func (r *Repository) AggregateByBillingSource(ctx context.Context, f QueryFilter
 		out[i] = BillingSourceRow{
 			BillingSource: r.BillingSource,
 			AggregateResult: AggregateResult{
-				TotalRequests: r.Count,
-				TotalInput:    r.InputTokens,
-				TotalOutput:   r.OutputTokens,
-				TotalTokens:   r.TotalTokens,
-				TotalCost:     r.Cost,
-				AvgLatencyMs:  r.AvgLatency,
-				ErrorCount:    r.ErrorCount,
+				TotalRequests:  r.Count,
+				TotalInput:     r.InputTokens,
+				TotalOutput:    r.OutputTokens,
+				TotalTokens:    r.TotalTokens,
+				TotalCost:      r.Cost,
+				AvgLatencyMs:   r.AvgLatency,
+				TotalLatencyMs: r.TotalLatency,
+				AvgTtftMs:      r.AvgTtft,
+				ErrorCount:     r.ErrorCount,
 			},
 		}
 	}

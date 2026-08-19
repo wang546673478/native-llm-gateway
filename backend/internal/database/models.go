@@ -96,7 +96,9 @@ type UsageRecord struct {
 	TotalTokens   int       `gorm:"column:total_tokens;not null;default:0" json:"total_tokens"`
 	Cost          float64   `gorm:"column:cost;not null;default:0" json:"cost"`
 	LatencyMs     int       `gorm:"column:latency_ms;not null;default:0" json:"latency_ms"`
-	IsStream      bool      `gorm:"column:is_stream;not null;default:false" json:"is_stream"`
+	// TtftMs 首字时间(流式):请求发起 → 收第一个 token 的耗时 ms;非流式填 0。
+	TtftMs     int       `gorm:"column:ttft_ms;not null;default:0" json:"ttft_ms"`
+	IsStream   bool      `gorm:"column:is_stream;not null;default:false" json:"is_stream"`
 	StatusCode    int       `gorm:"column:status_code" json:"status_code"`
 	ErrorType     string    `gorm:"column:error_type" json:"error_type"`
 	CreatedAt     time.Time `gorm:"index;column:created_at" json:"created_at"`

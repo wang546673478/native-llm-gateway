@@ -171,6 +171,8 @@ export interface AggregateResult {
   total_tokens: number
   total_cost: number
   avg_latency_ms: number
+  total_latency_ms: number
+  avg_ttft_ms: number
   error_count: number
 }
 
@@ -186,6 +188,8 @@ export interface AggregateRow {
   total_tokens: number
   total_cost: number
   avg_latency_ms: number
+  total_latency_ms: number
+  avg_ttft_ms: number
   error_count: number
 }
 
@@ -204,6 +208,8 @@ export interface DashboardResp {
     total_tokens: number
     total_cost: number
     avg_latency_ms: number
+    total_latency_ms: number
+    avg_ttft_ms: number
     error_count: number
   }>
   providers_count: number

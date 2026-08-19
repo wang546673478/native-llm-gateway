@@ -506,19 +506,23 @@ func (e *Engine) doStream(
 	req *provider.Request,
 	result *router.RouteResult,
 	entry *accesslog.AccessEntry,
-) (bool, *provider.Usage, *provider.ProviderError) {
+) (bool, *provider.Usage, *provider.ProviderError, int64) {
+	// streamStart 作为 TTFT 起点:从「即将发上游请求」开始计,第一个数据 chunk
+	// 到达时刻减去它即为首字时间(ms)。与 attemptOne 里的 start 意义一致,
+	// 但 doStream 不持有那个 start,这里单独计时保持内聚(不跨函数传时间锚点)。
+	streamStart := time.Now()
 	chunkCh, headerResp, err := pv.SendStreamRequest(ctx, req)
 	if err != nil {
 		var pe *provider.ProviderError
 		if errors.As(err, &pe) {
 			e.reportKeyError(result, pe)
-			return false, nil, pe
+			return false, nil, pe, 0
 		}
 		return false, nil, &provider.ProviderError{
 			ProviderName: result.ProviderName,
 			ErrorType:    provider.ErrorTypeConnection,
 			Message:      err.Error(),
-		}
+		}, 0
 	}
 
 	// 流式响应开始 — 此后不可 failover
@@ -552,6 +556,7 @@ func (e *Engine) doStream(
 	// gin 1.10 的 responseWriter 实现 Unwrap,ResponseController(Go 1.20+)可用。
 	rc := http.NewResponseController(c.Writer)
 
+	var ttftMs int64
 	for chunk := range chunkCh {
 		if chunk.Err != nil {
 			if errors.Is(chunk.Err, io.EOF) {
@@ -576,6 +581,10 @@ func (e *Engine) doStream(
 		if len(chunk.Data) == 0 {
 			continue
 		}
+		// TTFT:第一个有效数据 chunk 到达时记录首字时间(整个流只记录一次)。
+		if ttftMs == 0 {
+			ttftMs = time.Since(streamStart).Milliseconds()
+		}
 		// Task 7: 累积到 access log buffer(lookup-only,slot 已由
 		// doStream 开头的 acquireStreamSlot 一次性申请)
 		e.appendStreamChunk(req.TraceID, chunk.Data)
@@ -594,7 +603,7 @@ func (e *Engine) doStream(
 				ProviderName: result.ProviderName,
 				ErrorType:    provider.ErrorTypeClientDisconnected,
 				Message:      "client disconnected during stream: " + err.Error(),
-			}
+			}, ttftMs
 		}
 		if canFlush {
 			flusher.Flush()
@@ -609,7 +618,7 @@ func (e *Engine) doStream(
 	if headerResp != nil {
 		streamUsage = headerResp.Usage
 	}
-	return true, streamUsage, nil
+	return true, streamUsage, nil, ttftMs
 }
 
 // writeNonStreamResponse 把 Provider Response 原样写回客户端,并同步写
@@ -637,7 +646,7 @@ func (e *Engine) writeNonStreamResponse(
 			entry.RespBodySize = len(resp.Body)
 		}
 	}
-	e.recordUsageWithTokens(req, result, latency, resp.StatusCode, "", req.IsStream, resp.Usage)
+	e.recordUsageWithTokens(req, result, latency, 0, resp.StatusCode, "", req.IsStream, resp.Usage)
 }
 
 // isResponsesPath 判断请求路径是否是 OpenAI Responses API(Codex)
@@ -778,7 +787,7 @@ func (e *Engine) recordUsage(
 	errorType string,
 	isStream bool,
 ) {
-	e.recordUsageWithTokens(req, result, latency, statusCode, errorType, isStream, nil)
+	e.recordUsageWithTokens(req, result, latency, 0, statusCode, errorType, isStream, nil)
 }
 
 // recordUsageWithTokens 上报用量(含 token 数,如果有 resp.Usage)
@@ -786,6 +795,7 @@ func (e *Engine) recordUsageWithTokens(
 	req *provider.Request,
 	result *router.RouteResult,
 	latency time.Duration,
+	ttftMs int64,
 	statusCode int,
 	errorType string,
 	isStream bool,
@@ -798,6 +808,7 @@ func (e *Engine) recordUsageWithTokens(
 		ModelID:      result.ModelID,
 		Protocol:     string(result.Protocol),
 		LatencyMs:    latency.Milliseconds(),
+		TtftMs:       ttftMs,
 		StatusCode:   statusCode,
 		ErrorType:    errorType,
 		IsStream:     isStream,
@@ -1280,10 +1291,10 @@ func (e *Engine) attemptOne(
 
 	start := time.Now()
 	if req.IsStream {
-		ok, streamUsage, perr := e.doStream(ctx, c, pv, req, result, entry)
+		ok, streamUsage, perr, ttftMs := e.doStream(ctx, c, pv, req, result, entry)
 		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
 		if ok {
-			e.recordUsageWithTokens(req, result, time.Since(start), http.StatusOK, entryErrorType(entry), true, streamUsage)
+			e.recordUsageWithTokens(req, result, time.Since(start), ttftMs, http.StatusOK, entryErrorType(entry), true, streamUsage)
 			*outProviderName = result.ProviderName
 			return true
 		}
