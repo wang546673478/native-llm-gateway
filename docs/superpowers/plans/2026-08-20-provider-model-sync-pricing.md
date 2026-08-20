@@ -160,11 +160,46 @@ func ComputeCost(c ModelCost, u *Usage) float64 {
 
 - [ ] **Step 3: 清理所有对旧 ModelCost 字段的引用**
 
-`grep -rn "CostPer1k\|LongContextInput\|LongContextMultiplier\|CostPer1kCacheCreation"` 全仓库,把 `manager.go` 的 `LoadFromConfig` / `ReloadPricing`、`cmd/gateway/main.go` 的 `toManagerConfig`、`server.go` 的 `toManagerConfigForReload` 里构造 `provider.ModelCost{...}` 的字段全部改为三字段(暂填 `CostPerMillionInput/CacheRead/Output`,值仍从 config 旧字段取下 —— 注意 Step 4 的换算)。
+`grep -rn "CostPer1k\|LongContextInput\|LongContextMultiplier\|CostPer1kCacheCreation"` 全仓库,把 `manager.go` 的 `LoadFromConfig` / `ReloadPricing`、`cmd/gateway/main.go` 的 `toManagerConfig`、`server.go` 的 `toManagerConfigForReload` 里构造 `provider.ModelCost{...}` 的字段全部改为三字段(暂填 `CostPerMillionInput/CacheRead/Output`,值仍从 config 旧字段取下)。
 
-- [ ] **Step 4: 写测试 & 跑**
+> ⚠️ **单位换算注意**:config 旧字段是 `cost_per_1k_*`(每千 token),而新 `ModelCost` 字段语义是**每百万 token**。本 task 是**纯结构收敛**(改字段名/删除字段),**不做 ×1000 换算**——因为 Task 7 会彻底删 config 模型价格、价格改为在新页面手工填每百万值,这里临时保留"旧千价数值"只是过渡期编译通过的手段,最终会被 Task 7 丢弃。**不要在本 task 引入换算逻辑**(否则与 Task 7"价格不迁移"矛盾)。
 
-给 `ComputeCost` 追加用例:`PromptTokens=1_500_000, CompletionTokens=500_000`、三档价各 1/2/3 → 期望 `1.5*1 + 0.5*3 = 3.0`(无 cache read);`hasAnyCost=false` → 0。
+- [ ] **Step 4: 重写 TestComputeCost + 跑**
+
+现有 `provider_test.go:40-106` 的 `TestComputeCost` 用了 `CostPer1k*` / `LongContext*` / `CacheCreationTokens`,这些字段已被删,会编译失败。**整体重写**为三档每百万:
+
+```go
+func TestComputeCost(t *testing.T) {
+	m3 := ModelCost{
+		CostPerMillionInput:     2.1, // 每百万 token
+		CostPerMillionCacheRead: 0.42,
+		CostPerMillionOutput:    8.4,
+	}
+	t.Run("三档每百万", func(t *testing.T) {
+		u := &Usage{PromptTokens: 1_500_000, CacheReadTokens: 1_000_000, CompletionTokens: 500_000}
+		got := ComputeCost(m3, u)
+		want := 1.5*2.1 + 1.0*0.42 + 0.5*8.4
+		if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+			t.Errorf("cost = %v, want %v", got, want)
+		}
+	})
+	t.Run("无定价 → 0", func(t *testing.T) {
+		if got := ComputeCost(ModelCost{}, &Usage{PromptTokens: 1_000_000}); got != 0 {
+			t.Errorf("cost = %v, want 0", got)
+		}
+	})
+	t.Run("CacheCreationTokens 不参与计费", func(t *testing.T) {
+		u := &Usage{PromptTokens: 1_000_000, CacheCreationTokens: 999_000_000, CompletionTokens: 1_000_000}
+		got := ComputeCost(m3, u)
+		want := 1.0*2.1 + 1.0*8.4 // 不含 cache creation
+		if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+			t.Errorf("cost = %v, want %v", got, want)
+		}
+	})
+}
+```
+
+(删除所有 `LongContext*`、`CacheCreationTokens` 计费相关的用例,保留并改写三档 + 无定价两个基本语义。)
 
 Run: `cd /home/hhhh/llm-gateway && make test`
 Expected: PASS。
@@ -175,7 +210,7 @@ Expected: PASS。
 git commit -am "refactor(provider): ModelCost 收敛三档每百万定价,去掉缓存写入/长上下文"
 ```
 
-> 注意:本 task 只改结构/公式,暂不删 config 字段(那步在 Task 7),当前 config 旧字段仍会给 `CostPerMillion*` 提供值,换算 ×1000 的语义在这一步先不引入 —— 因为 Task 7 会彻底删 config 模型价格,所以这里临时保留旧值来源即可,不必精确换算。若你希望本步就 ×1000,见 Task 7 的迁移说明,但本计划默认 Task 7 统一处理。
+> 注意:本 task 只改结构/公式,暂不删 config 字段(那步在 Task 7)。这里新的 `CostPerMillion*` 字段里的值在过渡期仍是"千价数值"(未换算),但 Task 7 会彻底删 config 模型价格,届时这个过渡不再有意义。
 
 ---
 
@@ -660,6 +695,24 @@ func (a providerModelStoreAdapter) ListByVendor(ctx context.Context, v string) (
 - [ ] **Step 5: 空 DB 兜底 + 测试**
 
 在 `LoadModelsFromStore` 里若 `len(rows)==0`,log Warn("provider_models empty — route may have no candidates until first sync")。测试:`LoadModelsFromStore` 喂一个 fake store(含 vendor=minimax, model=MiniMax-M3, 价 0.28/0/1.10)后,`CostFor(VendorFor 归位后的注册面, MiniMax-M3)` 返回对应 ModelCost;`DefaultModelFor` 返回 `MiniMax-M3`。
+
+- [ ] **Step 6: `ReloadPricing` 语义拆分(热重载路径,关键)**
+
+`ReloadPricing`(manager.go:293-318)目前同时刷新 **pricing + defaultModels + billingSources + responsesAPI**。其中:
+- `billingSources` / `responsesAPI` 来自 config 的 `billing_source` / `responses_api` 字段——**本计划不删这两字段**,所以这两段刷新逻辑**必须保留**;
+- `pricing` / `defaultModels` 来自 config 的 `models` 段——**本计划删**,这两段改成由 `LoadModelsFromStore` 负责。
+
+因此 `ReloadPricing` 要做**拆分**(不做就热重载静默失效):
+1. 保留 `billingSources` + `responsesAPI` 的刷新(仍读 config 的 `billing_source`/`responses_api`);
+2. 删除 `pricing` + `defaultModels` 的刷新(不再读 `pcfg.ModelCosts`/`pcfg.Models`);
+3. `server.go:1029` 的调用从 `s.manager.ReloadPricing(toManagerConfigForReload(...))` 改为:
+   ```go
+   s.manager.ReloadPricing(toManagerConfigForReload(newCfg, s.pools)) // 保留:刷 billingSource/responsesAPI
+   _ = s.manager.LoadModelsFromStore(context.Background(), s.modelStoreAdapter) // 新增:刷 pricing/defaultModels(DB)
+   ```
+   (`s.modelStoreAdapter` 是 Task 6 Step 4 构造的适配器;需把它存为 Server 字段。)
+
+> 这一步若漏掉,`Reload` 热重载会拿到空的 pricing(因为 `toManagerConfigForReload` 删掉 models 后,`ReloadPricing` 里的 `pcfg.ModelCosts` 也删了)→ 计费归零。**高风险,必须做。**
 
 Run: `cd /home/hhhh/llm-gateway && make test`
 Commit:
