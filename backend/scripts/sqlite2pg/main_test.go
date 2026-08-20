@@ -79,8 +79,10 @@ func seed(t *testing.T, src, dst *gorm.DB) {
 		{Name: "minimax", Protocol: "openai", Endpoint: "https://api.minimax.chat", Enabled: true, Timeout: 60, BillingSource: "token_plan", CreatedAt: t0, UpdatedAt: t0},
 	}
 	models := []database.ProviderModel{
-		{Vendor: "deepseek", ModelID: "deepseek-v4-flash", CostPerMillionInput: 0.42, CostPerMillionOutput: 1.68, CreatedAt: t0},
-		{Vendor: "deepseek", ModelID: "deepseek-v4-pro", CostPerMillionInput: 0.5, CostPerMillionOutput: 2.0, CreatedAt: t0.Add(time.Second)},
+		// UpdatedAt 必须显式给值:否则两库 Create 时 gorm 各自填充 now(),
+		// 毫秒级差异被一致性校验误报为数据漂移(2026-08-20 CI 实测 116ms)
+		{Vendor: "deepseek", ModelID: "deepseek-v4-flash", CostPerMillionInput: 0.42, CostPerMillionOutput: 1.68, CreatedAt: t0, UpdatedAt: t0},
+		{Vendor: "deepseek", ModelID: "deepseek-v4-pro", CostPerMillionInput: 0.5, CostPerMillionOutput: 2.0, CreatedAt: t0.Add(time.Second), UpdatedAt: t0.Add(time.Second)},
 	}
 	keys := []database.GatewayKey{
 		{Name: "k1", KeyHash: "sk-abcdef1234567890", Providers: "[]", AllowedModels: `["*"]`, RPM: 100, TPM: 500000, Enabled: true, CreatedAt: t0, UpdatedAt: t0},
