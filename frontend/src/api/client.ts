@@ -251,6 +251,22 @@ export interface ModelProviderRow {
   request_count: number
 }
 
+// P-model-sync: 一个厂商的一条模型定价行(与后端 ProviderModelRow 对齐)
+export interface ProviderModelRow {
+  vendor: string
+  model_id: string
+  cost_per_million_input: number
+  cost_per_million_cache_read: number
+  cost_per_million_output: number
+  synced_at: string | null
+  source: string
+}
+
+export interface ProviderModelsResp {
+  vendors: Record<string, ProviderModelRow[]>
+  count: number
+}
+
 export const api = {
   providers: () => client.get<ProvidersResponse>('/providers').then(r => r.data),
   providersRegistered: () =>
@@ -355,4 +371,19 @@ export const api = {
   },
   // P-inflight: 实时活跃请求列表
   inflight: () => client.get<InflightResp>('/inflight').then(r => r.data),
+  // P-model-sync: 模型同步 + 定价(按 vendor 分组展示/同步/编辑价格)
+  models: {
+    list: () => client.get<ProviderModelsResp>('/providers/models').then(r => r.data),
+    sync: (vendor: string) =>
+      client
+        .post<{ vendor: string; synced_models: number }>('/providers/sync-models', { vendor })
+        .then(r => r.data),
+    save: (body: {
+      vendor: string
+      model_id: string
+      cost_per_million_input: number
+      cost_per_million_cache_read: number
+      cost_per_million_output: number
+    }) => client.put<{ ok: boolean }>('/providers/models', body).then(r => r.data),
+  },
 }
