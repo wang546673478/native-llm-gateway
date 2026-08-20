@@ -87,9 +87,11 @@
 ### 修复(排障挖出)
 
 - **key 表被清空后网关「静默跑」**:`sqlite2pg --clean` 默认 TRUNCATE 生产表(`provider_api_keys/gateway_keys/
-  provider_models/usage_records/access_logs`),运行中网关靠内存 pool 无感知、重启后才现形。从 08-20 每日 pg_dump 恢复。
+  provider_models/usage_records/access_logs/route_order`),运行中网关靠内存 pool 无感知、重启后才现形。从 08-20 每日 pg_dump 恢复。
 - **`test` key 503 no_route**:gateway key 白名单 `allowed_models` 命中的模型(如 `MiniMax-M3`/`mimo-v2.5-pro`)
   因 `provider_models` 被清缺失 → 白名单过滤后无候选 → no_route。全量同步补回 16 行模型后恢复 200。
+- **手动排好的路由顺序丢失**:`route_order` 表(Level 2/3 改写序)同被清空,「minimax 优先、mimo 兜底」
+  的显式顺序退化为「最早 key 时间」默认序。从备份恢复 9 行后 `provider order layers` 由 0 回到 2。
 
 ### 踩坑
 
