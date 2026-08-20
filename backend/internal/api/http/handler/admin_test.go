@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/wang546673478/native-llm-gateway/internal/inflight"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
@@ -183,5 +184,76 @@ func TestPoolStatuses_DedupSharedPools(t *testing.T) {
 		if s.ProviderName == "deepseek" && s.TotalKeys != 2 {
 			t.Errorf("deepseek total_keys = %d, want 2", s.TotalKeys)
 		}
+	}
+}
+
+// TestListInflight P-inflight:
+// GET /api/v1/inflight — InflightSnapshot 为 nil 时返回空 requests;非 nil 时
+// 返回正确字段(elapsed_ms 由 now-StartedAt 现算,不精确断言绝对值)。
+func TestListInflight(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	do := func(a *Admin) []byte {
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/inflight", nil)
+		a.listInflight(ginCtx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		return rec.Body.Bytes()
+	}
+
+	// 1) InflightSnapshot nil → {"requests":[]}
+	var empty struct {
+		Requests []json.RawMessage `json:"requests"`
+	}
+	if err := json.Unmarshal(do(&Admin{}), &empty); err != nil {
+		t.Fatalf("decode nil case: %v", err)
+	}
+	if empty.Requests == nil || len(empty.Requests) != 0 {
+		t.Fatalf("nil snapshot: requests = %v, want empty", empty.Requests)
+	}
+
+	// 2) 非 nil → 返回 snapshot 字段,elapsed_ms >= 0
+	now := time.Now()
+	start := now.Add(-1500 * time.Millisecond)
+	snapFn := func() []*inflight.Snapshot {
+		return []*inflight.Snapshot{{
+			TraceID:        "trace-1",
+			StartedAt:      start,
+			Model:          "deepseek-v4-pro",
+			ProviderName:   "deepseek",
+			GatewayKeyName: "key-1",
+			IsStream:       true,
+		}}
+	}
+	var body struct {
+		Requests []struct {
+			TraceID        string `json:"trace_id"`
+			StartedAt      string `json:"started_at"`
+			Model          string `json:"model"`
+			ProviderName   string `json:"provider_name"`
+			GatewayKeyName string `json:"gateway_key_name"`
+			IsStream       bool   `json:"is_stream"`
+			ElapsedMs      int64  `json:"elapsed_ms"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal(do(&Admin{InflightSnapshot: snapFn}), &body); err != nil {
+		t.Fatalf("decode non-nil case: %v", err)
+	}
+	if len(body.Requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(body.Requests))
+	}
+	r := body.Requests[0]
+	if r.TraceID != "trace-1" || r.Model != "deepseek-v4-pro" || r.ProviderName != "deepseek" ||
+		r.GatewayKeyName != "key-1" || !r.IsStream {
+		t.Errorf("request fields = %+v, want populated snapshot", r)
+	}
+	if r.StartedAt != start.UTC().Format(time.RFC3339) {
+		t.Errorf("started_at = %q, want %q", r.StartedAt, start.UTC().Format(time.RFC3339))
+	}
+	if r.ElapsedMs < 0 {
+		t.Errorf("elapsed_ms = %d, want >= 0", r.ElapsedMs)
 	}
 }

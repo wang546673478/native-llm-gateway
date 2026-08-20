@@ -28,6 +28,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/fingerprint"
+	"github.com/wang546673478/native-llm-gateway/internal/inflight"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
@@ -54,6 +55,7 @@ type Server struct {
 	metricsC *metrics.Collector
 	accessR  *accesslog.Recorder // P67: 接入日志 Recorder
 	quotaM   *quotacheck.Manager // P68: 配额恢复 worker
+	inflightR *inflight.Registry // P-inflight: 活跃请求内存快照表
 	// fpEnabled 设备指纹归一化开关原子值(运行时热切,PATCH /api/v1/fingerprint 翻转)。
 	// 指针:engine 闭包与 server 持有同一个实例,热切换共享。默认 = cfg.Fingerprint 开关。
 	// atomic 保证热路径只读一次、无锁。
@@ -151,6 +153,9 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	fpEnabled.Store(cfg.Fingerprint.FingerprintEnabled())
 	fpSnap := fingerprint.Capture(cfg.Fingerprint.CanonicalDeviceID)
 
+	// P-inflight: 活跃请求内存快照表(proxy 写、admin handler 读,都走窄接口)
+	inflightR := inflight.NewRegistry()
+
 	eng := proxy.NewEngine(proxy.Config{
 		Router:        r,
 		Logger:        logger,
@@ -159,6 +164,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		TokenRecorder: newAuthTokenRecorder(authn), // P13: TPM 计数(若 auth 启用)
 		Authenticator: authn,                       // P19: Provider 绑定检查
 		AccessLog:     accessR,                     // P67: 接入日志
+		Inflight:      inflightR,                   // P-inflight: 活跃请求快照
 		// P-quota-checker: 注入 quotacheck 探测 (proxy 不直接依赖 quotacheck 包)
 		QuotaChecker: proxy.CheckQuotaFunc(func(ctx context.Context, providerName, baseURL string, k *keypool.Key) (bool, error) {
 			return quotacheck.CheckQuota(ctx, providerName, baseURL, k)
@@ -207,6 +213,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		metricsC:   metricsC,
 		accessR:    accessR,
 		quotaM:     quotaM,
+		inflightR:  inflightR,
 		fpEnabled:  fpEnabled,
 		fpSnapshot: fpSnap,
 	}
@@ -839,6 +846,8 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 				s.logger.Info("fingerprint sanitize toggled", zap.Bool("enabled", enabled))
 			}
 		},
+		// P-inflight: 活跃请求快照只读闭包(handler 通过它读 proxy 写入的活跃请求)
+		func() []*inflight.Snapshot { return s.inflightR.Snapshot() },
 	)
 	admin.Register(r.Group("/api/v1"))
 

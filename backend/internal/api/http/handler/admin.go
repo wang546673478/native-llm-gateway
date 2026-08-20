@@ -15,6 +15,7 @@ import (
 
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
+	"github.com/wang546673478/native-llm-gateway/internal/inflight"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
@@ -61,6 +62,8 @@ type Admin struct {
 	// FingerprintGet 返回 (enabled, canonical_device_id);FingerprintSet 翻转 enabled。
 	FingerprintGet func() (bool, string)
 	FingerprintSet func(enabled bool)
+	// P-inflight: 活跃请求内存快照的只读查询(闭包注入,handler 不依赖 inflight 包)。
+	InflightSnapshot func() []*inflight.Snapshot
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -92,6 +95,7 @@ func NewAdmin(
 	keyOrderReload func(provider string), // 可 nil(PUT key 顺序后重载 pool)
 	fingerprintGet func() (bool, string), // 可 nil(fingerprint 查询不可用)
 	fingerprintSet func(enabled bool), // 可 nil(fingerprint 切换不可用)
+	inflightSnapshot func() []*inflight.Snapshot, // 可 nil(inflight 查询不可用)
 ) *Admin {
 	return &Admin{
 		Manager:             mgr,
@@ -111,6 +115,7 @@ func NewAdmin(
 		KeyOrderReload:      keyOrderReload,
 		FingerprintGet:      fingerprintGet,
 		FingerprintSet:      fingerprintSet,
+		InflightSnapshot:    inflightSnapshot,
 	}
 }
 
@@ -152,6 +157,8 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	// P-fingerprint: 设备指纹归一化开关查询/热切换
 	r.GET("/fingerprint", a.getFingerprint)
 	r.PUT("/fingerprint", a.putFingerprint)
+	// P-inflight: 实时活跃请求列表
+	r.GET("/inflight", a.listInflight)
 }
 
 // listRegisteredProviders GET /api/v1/providers/registered
@@ -1018,4 +1025,36 @@ func (a *Admin) putFingerprint(c *gin.Context) {
 	}
 	a.FingerprintSet(*req.Enabled)
 	c.JSON(http.StatusOK, gin.H{"enabled": *req.Enabled})
+}
+
+// listInflight GET /api/v1/inflight — 返回当前活跃请求的内存快照列表。
+// elapsed_ms 由 now - StartedAt 现算(快照只存 StartedAt,不存耗时)。
+func (a *Admin) listInflight(c *gin.Context) {
+	snap := []*inflight.Snapshot{}
+	if a.InflightSnapshot != nil {
+		snap = a.InflightSnapshot()
+	}
+	type req struct {
+		TraceID        string `json:"trace_id"`
+		StartedAt      string `json:"started_at"`
+		Model          string `json:"model"`
+		ProviderName   string `json:"provider_name"`
+		GatewayKeyName string `json:"gateway_key_name"`
+		IsStream       bool   `json:"is_stream"`
+		ElapsedMs      int64  `json:"elapsed_ms"`
+	}
+	now := time.Now()
+	out := make([]req, 0, len(snap))
+	for _, s := range snap {
+		out = append(out, req{
+			TraceID:        s.TraceID,
+			StartedAt:      s.StartedAt.UTC().Format(time.RFC3339),
+			Model:          s.Model,
+			ProviderName:   s.ProviderName,
+			GatewayKeyName: s.GatewayKeyName,
+			IsStream:       s.IsStream,
+			ElapsedMs:      now.Sub(s.StartedAt).Milliseconds(),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"requests": out})
 }
