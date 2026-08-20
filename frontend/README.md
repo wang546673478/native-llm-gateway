@@ -31,5 +31,6 @@ npm run preview      # 本地预览生产构建
 | `/routing` | catch_all 自动模式状态 | `/api/v1/routing` |
 | `/usage` | 用量查询 + 聚合 | `/api/v1/usage`, `/api/v1/usage/aggregate` |
 | `/access-logs` | 接入日志 + 详情(人类可读/原始 JSON 切换) | `/api/v1/access-logs`, `/:id/detail` |
+| `/models` | 模型管理(上游同步 + 手工定价,按 vendor 分组) | `/api/v1/providers/models`, `POST /api/v1/providers/sync-models`, `PUT /api/v1/providers/models` |
 
 > 详情页的 token 用量行(输入/输出/缓存读/缓存写)只对**非流式**请求显示 —— 流式响应存的是 SSE 文本,前端无法整体 JSON.parse;流式请求的 token 数看用量页(`/usage`,数据来自内存解析的 usage_records,不受影响)。

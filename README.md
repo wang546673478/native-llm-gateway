@@ -21,7 +21,7 @@
 网关对客户端暴露的是**一条链,不是一张路由表**:
 
 ```
-客户端发任何模型名(gpt-5 / claude-opus-5 / qwen-plus / 随便什么)
+客户端发任何模型名(gpt-5 / claude-opus-5 / deepseek-v4-pro / 随便什么)
   → 模型名只是标签,不参与路由决策
   → 所有 enabled provider 自动参与(按请求路径选协议面)
   → 一层 token_plan(包月套餐,如 MiniMax)→ 二层 api(按量)→ 三层 free
@@ -91,12 +91,9 @@ wire_api = "responses"
 |---|---|---|---|---|
 | `deepseek` | `deepseek`(openai)+ `deepseek-anthropic`(anthropic) | api | poll(官方余额接口) | ✅(`responses_api: true`,仅 v4-flash) |
 | `minimax` | `minimax`(anthropic)+ `minimax-openai`(openai) | **token_plan** | poll(`token_plan/remains`) | ✅ |
-| `mimo` | `mimo`(openai)+ `mimo-token-plan`(openai,token_plan 套餐) + `mimo-anthropic`(anthropic) + `mimo-anthropic-token-plan` | 同 vendor 共享 pool | probe(未文档化端点,cookie 鉴权) | ✅ |
-| `glm` | `glm`(openai)+ `glm-anthropic`(anthropic) | api | poll(官方 monitor 端点) | ❌ |
-| `qwen` | `qwen`(openai) | api | probe(无接口,每次请求重探) | ❌ |
-| `gemini` | `gemini`(google) | api | probe(无接口,每次请求重探) | ❌ |
+| `mimo` | `mimo`(openai,api)+ `mimo-token-plan`(openai,token_plan 套餐) + `mimo-anthropic`(anthropic,api) + `mimo-token-plan-anthropic`(anthropic,token_plan 套餐) | api + token_plan(两套端点两套 key) | probe(无官方余额接口,未文档化 cookie 端点探测) | ✅ |
 
-> 同一厂商的多个注册名(协议面)共享同一 key 池;key 厂商级一份,协议由 key 的 Protocols 标记过滤。kimi 已删除(需要时按 `docs/provider厂商定制包指南.md` 加回)。
+> 同一厂商的多个注册名(协议面)共享同一 key 池;key 厂商级一份,协议由 key 的 Protocols 标记过滤。例外:mimo 两套端点用两套 key,按 per-key BillingSource 隔离(sk- key 只走 api 端点、tp- key 只走 token-plan 端点,交叉必 401)。kimi / glm / qwen / gemini 已删除(需要时按 `docs/provider厂商定制包指南.md` 加回)。
 > 余额恢复:poll = 额度耗尽标 QUOTA_EXCEEDED,quotacheck 轮询余额,恢复自动回链;probe = 不永久标记,每次请求重新探测,充值即恢复。
 
 ## 管理 API(`/api/v1`)
@@ -105,6 +102,9 @@ wire_api = "responses"
 |---|---|
 | `GET /providers` | 按厂商聚合的 Provider 列表(共享 pool、每把 key 的熔断/额度状态) |
 | `GET /providers/registered` | Registry 注册名列表(轻量,过滤下拉用) |
+| `GET /providers/models` | 模型清单(按 vendor 分组,DB `provider_models`,含三档价格) |
+| `POST /providers/sync-models` | `{vendor}` 触发上游 `/models` 同步(sort_order 记上游顺序,默认模型 = 首个) |
+| `PUT /providers/models` | 保存某模型三档每百万价格(模型管理页手工定价) |
 | `GET /routing` | catch_all 状态(自动模式 / 显式列表) |
 | `GET/PUT /routing/order` | Level 2/3 优先级改写:provider 顺序 / 某 provider 内 key 顺序(路由页拖拽落库,热生效) |
 | `GET /keys` | Gateway Key 管理(CRUD;白名单在此配置) |
@@ -119,7 +119,7 @@ wire_api = "responses"
 
 ```bash
 # 1. 配置(不入库,磁盘生效)
-cp config.example.yaml config.yaml   # 按需改 provider/价格
+cp config.example.yaml config.yaml   # 按需改 provider;模型/价格在「模型管理页」配(存 DB,不在 config)
 
 # 2. 后端
 cd backend && go build -o bin/gateway ./cmd/gateway
@@ -227,10 +227,11 @@ docker run -d --name llm-gateway \
 ```
 backend/internal/
 ├── provider/                 # Provider 接口 + 厂商包
+│   ├── builtin/              # blank import 3 个厂商包(deepseek/mimo/minimax)→ 注册进默认 Registry
 │   ├── deepseek/             # deepseek + deepseek-anthropic(双协议面,共享 pool)
 │   ├── minimax/              # minimax + minimax-openai + token plan balancer
-│   ├── glm/                  # glm + glm-anthropic(官方 monitor 余额端点)
-│   ├── qwen/ gemini/
+│   ├── mimo/                 # mimo / mimo-token-plan / mimo-anthropic / mimo-token-plan-anthropic(两套端点两套 key)
+│   ├── google/               # Google 协议共享实现(当前无厂商消费者,暂留)
 │   ├── openai_compatible/    # OpenAI 兼容共享实现(上游路径/错误分类/SSE)
 │   ├── anthropic_compatible/ # Anthropic 兼容共享实现
 │   └── registry.go manager.go
@@ -249,9 +250,9 @@ backend/internal/
 
 - 同 tier 内多个 provider 顺序 = 默认按该 provider 最早 key 加入时间(先来优先),可用 Routing 页拖拽改写(route_order);无 key/provider 按名字兜底确定性
 - **无终端禁用状态**:上游 auth 错误 → 该 key COOLING 5 分钟自动重试;400 invalid_request 只计数;5xx/timeout/connection → per-key 熔断器(只熔断这一把 key,不连坐同 provider 其他 key)
-- 配额耗尽标记按厂商分两档:poll(有余额接口:deepseek/minimax/glm)→ 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;probe(无接口:qwen/gemini)→ 不永久标记,每次请求重新探测,恢复后自动可用
+- 配额耗尽标记按厂商分两档:poll(有余额接口:deepseek/minimax)→ 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;probe(无官方余额接口:mimo)→ 不永久标记,每次请求重新探测,恢复后自动可用
 - 跨厂商切换时客户端回带的推理块会被网关剥离 + 强制 `effort=none`(DeepSeek 校验)
-- provider 的 endpoint/protocol/models 改动需重载(用 `./gateway-reload.sh` 无感重载,自动编译+优雅排空);routing/价格/key 热重载。重载后 key 状态从 `key-state.json` 快照恢复(QUOTA_EXCEEDED/COOLING 不丢),无需重新 poll 确认
+- provider 的 endpoint/protocol 改动需重载(用 `./gateway-reload.sh` 无感重载,自动编译+优雅排空);routing/key 热重载,模型清单与价格走 DB(`provider_models`,模型管理页改即生效,无需重载)。重载后 key 状态从 `key-state.json` 快照恢复(QUOTA_EXCEEDED/COOLING 不丢),无需重新 poll 确认
 
 ## 已知耦合点(2026-08 现状)
 

@@ -147,7 +147,7 @@ func init() {
 死活不出现它。在现有四个 blank import 后面加一行:
 
 ```go
-_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm" // 触发 init() 注册(OpenAI + Anthropic 两个注册名)
+_ "github.com/wang546673478/native-llm-gateway/internal/provider/mimo" // 触发 init() 注册(示例;glm/qwen/gemini 已于 2026-08-20 删除)
 ```
 
 ### Step 4:余额查询(可选,`balancer.go`)
@@ -161,11 +161,11 @@ func init() {
 
 Balancer 接口:`FetchBalance(ctx, baseURL, key) (*Balance, error)`,返回 `{Raw float64, HasQuota bool, Kind "percent"|"currency"}`。
 - **token_plan 厂商必须有**(percent 或金额),否则额度耗尽永不标记、永不降级
-- 有官方余额端点的厂商一律写(deepseek / minimax / glm 都有;qwen / gemini 没有,不写 → 走 probe 模式:额度耗尽只计数不标记,每次请求重新探测,充值即恢复)
+- 有官方余额端点的厂商一律写(现存厂商:deepseek / minimax 有;mimo 没有,不写 → 走 probe 模式:额度耗尽只计数不标记,每次请求重新探测,充值即恢复)
 - balancer 会被请求路径的主动查额度复用(quotacheck.CheckQuota):网络类错误后由网关统一调用,厂商包无需另写查询入口
 - 实测过 MiniMax 的 `token_plan/remains` 是**未文档化端点**(quota host 与 chat host 不同,`www.minimaxi.com`),且早期猜的字段名都不对;稳定兜底仍是错误码驱动(HTTP 200 + base_resp 1008/2056 → 见踩坑 #1)——balancer 拿不到数就靠错误码降级,两条路都写着
 - **控制台 cookie 鉴权模式**(MiMo 先例,见踩坑 #19):厂商无官方余额 API 但控制台有未文档化端点(社区逆向),鉴权是账号登录 cookie(约 1 天过期)而非 API key。实现要点:① cookie 放 config `quota_cookie` + 管理 API `POST /api/v1/providers/mimo/quota-cookie` 热更新(验证 → DB 持久化 → 注入),不放 key 上;② poll 按 vendor pool 去重,balancer 内按 `k.BillingSource` 分支端点(token_plan key → 套餐端点,api key → 余额端点),不能在注册名上分;③ cookie 过期 401 → 轮询退化保守(不标耗尽),错误码兜底不变
-- glm 用官方 monitor 余额端点(滚动窗口重置后自动恢复)
+- (glm 已随包删除,其 monitor 端点案例仅作历史参考)
 
 ### Step 5:config.yaml 加块
 

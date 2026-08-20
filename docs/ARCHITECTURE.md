@@ -64,7 +64,7 @@ s.saveKeyStateSnapshot() ← 把 pool 的 QUOTA_EXCEEDED / COOLING / 余额写�
                  │           │              │
                  │           └─ provider ───┼── openai_compatible / anthropic_compatible / google
                  │              │           │
-                 │              │           └─ 厂商包:deepseek / minimax / mimo / glm / qwen / gemini
+                 │              │           └─ 厂商包:deepseek / minimax / mimo(2026-08-20 下线 glm/qwen/gemini)
                  │              │
                  ├─ accesslog ──┤
                  ├─ metrics ─────┤

@@ -65,3 +65,31 @@
 | `key_rotation` 仅 round_robin,无 sticky 模式 | 暂不实现 | `docs/config-reference.md` §7 |
 | 详情页流式 token 不显示 | 有意不修,看 Usage 页 | `docs/踩坑与排错.md` #17 |
 | `api.md` 完整 HTTP API 文档 | 缺失,散落在 README | `docs/INDEX.md` §5 |
+
+---
+
+## 2026-08-20 — 模型/定价进 DB + 三厂商下线 + 网关全挂排障实录
+
+### 新增
+
+- **模型管理页**(`/models`):按 vendor 分组的模型清单、上游同步按钮、手工定价
+- **DB 表 `provider_models` 成为模型清单与定价唯一真相源**(vendor 粒度、sort_order 保上游顺序,默认模型 = 上游首个)
+- 管理 API:`GET /api/v1/providers/models` / `POST /api/v1/providers/sync-models` / `PUT /api/v1/providers/models`
+
+### 变更
+
+- **下线 gemini / qwen / glm 三个厂商**(包 + 注册 + config 模板同步删;glm 历史 53 次、qwen/gemini 0 次)。现存 deepseek / minimax / mimo 三厂商 8 个注册面
+- config.yaml 删除 `providers.*.models` 段与 `default_model` 字段(改由 DB 提供)
+- 前端 dist 需 `npm run build` 才含模型管理页(8080 托管 dist 而非 dev server)
+
+### 修复(排障挖出,均含守卫测试)
+
+- `ListModels` 硬编码 `/v1/models` → endpoint 已含版本前缀的厂商拼出 `/v1/v1/models`;按 `ResponsesPath` 惯例加 `ModelsPath`
+- mimo openai 面双 `/v1` 的 `ChatPath`(该面历史 0 条成功记录,靠 anthropic 面掩盖)
+- 默认模型按字典序取 → minimax 会从 `MiniMax-M3` 静默降到 `MiniMax-M2`;改按上游顺序
+- `Provider.Models` 关联建跨命名空间外键(`vendor` → `providers.name`)→ 启动崩溃循环;移除
+- 模型同步取 key 不按计费面 → mimo 的 `tp-` key 发到 api 端点 401;`ListModels` 改按本面 `BillingSource` 取 key
+
+### 踩坑
+
+- **#23:AutoMigrate 只加不删** —— 删结构体字段会在生产库留下 NOT NULL 死列,轻则 INSERT 全炸、重则启动崩溃循环。已进 CLAUDE.md 提交前自检清单

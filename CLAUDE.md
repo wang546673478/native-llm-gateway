@@ -64,7 +64,7 @@
 | `swapToOtherKey` 里同时操作 Pool + Auth | 拆成 4 个独立函数 |
 | `ReportRateLimit` 只刷新不升级 | 连续冷却超限 → QE |
 | config 改了不改三个模板 | 必须同步改 config.yaml / example / docker |
-| 新 provider 忘了 blank import | `cmd/gateway/main.go` 加一行 |
+| 新 provider 忘了 blank import | `provider/builtin/builtin.go` 加一行 |
 | 流式请求在详情页找 token | 去 Usage 页 |
 | 删结构体字段就当改完了 | 手工 DROP COLUMN(AutoMigrate 只加不删) |
 | SQLite 单写者扛高并发 | 生产用 PostgreSQL |
@@ -77,7 +77,7 @@
 backend/
 ├── cmd/gateway/main.go        ← 入口(加载 config → 构造 pool → 启动 server)
 ├── internal/
-│   ├── provider/              ← Provider 接口 + 厂商包(deepseek/minimax/mimo/glm/qwen/gemini)
+│   ├── provider/              ← Provider 接口 + 厂商包(deepseek/minimax/mimo;google 协议层无消费者)
 │   │   ├── openai_compatible/   ← OpenAI 兼容共享实现
 │   │   ├── anthropic_compatible/← Anthropic 兼容共享实现
 │   │   ├── google/              ← Google Generative AI 共享实现
@@ -103,7 +103,7 @@ backend/
 
 frontend/
 ├── src/
-│   ├── views/                 ← 7 个页面(Overview/Providers/ProviderKeys/Keys/Routing/Usage/AccessLogs)
+│   ├── views/                 ← 9 个页面(Overview/Providers/ProviderKeys/Keys/Routing/Usage/AccessLogs/Inflight/Models)
 │   ├── api/client.ts          ← 后端 API 封装
 │   └── router/index.ts        ← vue-router 路由
 
@@ -169,7 +169,7 @@ sudo systemctl start llm-gateway # systemd 托管
 - 不要在 `swapToOtherKey` 里同时操作 Pool + Auth + RouteResult
 - 不要在 `ReportRateLimit` 里只刷新 CoolingUntil 而不升级到 QE
 - 不要改 config struct 不改三个 config 模板
-- 不要加新 provider 忘了 `cmd/gateway/main.go` 的 blank import
+- 不要加新 provider 忘了 `provider/builtin/builtin.go` 的 blank import
 - 不要在 access log 详情页找流式请求的 token(去 Usage 页)
 - 不要用 SQLite 扛生产高并发(用 PostgreSQL)
 - **不要在发现耦合问题时说"先这样,回头改"** — 立刻改,否则不提交
@@ -184,7 +184,7 @@ sudo systemctl start llm-gateway # systemd 托管
 - [ ] 我加的新字段删除后只改 1 处?
 - [ ] 我有没有跨包直接 import(如 pool → circuit)?
 - [ ] config 改了?三个模板都改了吗?
-- [ ] 新 provider 加了 blank import 吗?
+- [ ] 新 provider 在 `provider/builtin/builtin.go` 加了 blank import 吗?
 - [ ] 新字段有 GORM tag + migration 吗?
 - [ ] **删了 GORM 结构体字段/关联吗?→ 必须手工 `ALTER TABLE ... DROP COLUMN`** —— AutoMigrate 只加不删,留下的 NOT NULL 死列会让 INSERT 全炸(踩坑 #23)
 - [ ] `make test` 是绿的吗?
@@ -218,6 +218,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | 深度审计(十五轮) | 数据竞态 F1/F2/F4 / DB 数据完整性 H1/M1/M2 / 热重载 s.cfg 分歧 / 前端过滤契约补漏 / 文档漂移 | 锁边界 + 熔断热路径竞态(3 subagent:并发/DB/热载审计)全修 → -race 0 race;usage/accesslog/gateway-key 静默丢数据+重复插+reload 误吞全修(ef9308d+e2f163d+c0d12dc+93e929e+545cc72) |
 | HTTP/balancer/常量(十六轮) | status 白名单单源破坏(修自引 bug) / ClassifyErrorWithBody 400 quota 盲区 / gemini+qwen probe fallback 误路由 / glm Bearer 统一 / 低危契约规范化 | 前端过滤加项漏后端白名单(全坏)修复+守卫测试;400 quota→failover;QE 永不复原修;死端点/错误 token/doc 漂移清理(7b00819+dac1ddf+8492123) |
 | Key 调度树状模型(十七轮) | 同 provider key 顺序黏性(sticky 先用尽一把再切) / 候选名单天然化(catch_all `{}`) / 429 同 key 重试10次 / route_order 排序改写(方案B,表+GET/PUT+热生效) / 前端拖拽树状图 | 加 priority 无需字段;层内 provider 按最早 key 时间;route_order 改写覆盖(Level2 provider/Level3 key);保存→重进保持;低耦合:StickyScheduler 无状态(始终选最高优先级可用 key,恢复自动回位)、顺序覆盖接口注入、枚举单源(8893971+769a927+d9341a2+5674a5a+994a710+682dd62+b23ea78+0a234c8+0682a6d+0ba9b49+13f07c1)<br>/十八轮(2026-08-10):补「熔断/网络错误恢复后 sticky 回位」— StickyScheduler 删 current/Rewind,改为始终选 keys[0](最高优先级可用 key);额度 poll 与熔断 HALF_OPEN→CLOSED 恢复的 key 重建 bucket 后即 keys[0,自动回位;429 仍重试 10 次、网络错误仍走熔断(用户选型 B) | 修复 key-1 一次 connection 错误把 sticky 永久推到 weige 的卡死:高位 key 恢复后不再粘死在低位(放弃 current 指针的"stay-put",改最高优先级优先,满足"先耗尽再切、恢复回位";无状态更纯,删死代码) |
+| 模型进 DB + 排障实录(十九轮,2026-08-20) | provider_models 成模型/定价唯一真相源(上游同步 + 手工定价 + 模型管理页) / 下线 gemini/qwen/glm 三厂商(历史用量 glm 53、qwen/gemini 0) / 排障 8 连修:ListModels 硬编码 /v1/models 路径、mimo openai 面双 /v1(ChatPath 默认撞上已含 /v1 的 endpoint,该面 0 条成功记录)、默认模型字典序(MiniMax-M3 会掉到 M2 → sort_order 保上游顺序)、跨命名空间外键(Provider.Models 关联 → AutoMigrate 建 vendor FK → 启动崩溃循环)、按面计费源取 key(tp- key 发 api 端点必 401)、前端 dist 未重建、AutoMigrate 只加不删留下 NOT NULL 死列 | 网关从「全部 503」恢复至三厂商(deepseek/minimax/mimo)正常路由,默认模型与改动前逐家一致;守卫测试 ×5 防回潮(503e614+2792a5a+25c9e0f+6984bf4+96ae49a) |
 
 **单点修复:**
 
@@ -225,10 +226,10 @@ sudo systemctl start llm-gateway # systemd 托管
 |---|---|
 | `acquireFromTierLocked` 拆分 → **已收敛为单一实现** | filter chain 曾是死代码,已删;`acquireFromTierLocked` 为唯一路径 |
 | `swapToOtherKey` 拆分 | `poolForFailover` / `allowedIDSetFromRequest` / `swapToOtherKey` 3 个职责 |
-| `routing.model` fallback | `filterCandidates` model 空自动用 `default_model` |
+| `routing.model` fallback | `filterCandidates` model 空自动用 `default_model`(2026-08-20 起 default_model 改由 DB `provider_models` 的 sort_order 首行提供) |
 | Pool 解耦 circuit | `BreakerFactory` 接口注入,`keypool` 不再 import `circuit` |
 | magic key 抽象 | `GatewayKeyContext`(context.go),消除 5 处 `c.Get("gateway_key")` 散布 |
-| Provider 自动注册 | 新增 `provider/builtin/`,main.go 6 个 blank import → 1 个 |
+| Provider 自动注册 | 新增 `provider/builtin/`,main.go 6 个 blank import → 1 个(2026-08-20 起只剩 deepseek/minimax/mimo 3 个) |
 | Bug: weige QE 死循环 | `ReportSuccess` + `CheckQuota` 才恢复 QE |
 | Bug: COOLING 卡死 | `ReportRateLimit` token_plan 连续冷却升级 QE |
 | handler→mimo 解耦 | 管理 API handler 不再直连厂商包,闭包注入(bda7ad0) |
@@ -241,7 +242,7 @@ sudo systemctl start llm-gateway # systemd 托管
 |---|---|---|
 | `provider` import `keypool` | provider/registry.go `Pool interface{}` + `Request.Key` | 合理类型依赖(pool 注入,非构造),保留 |
 | `proxy.Engine` 持 3 个具体跨包引用 | `*router.Router`/`*auth.Authenticator`/`*accesslog.Recorder` | 窄方法协作方,接口化收益<复杂度,保留 |
-| `provider/{deepseek,glm,mimo,minimax}→quotacheck` | 厂商 balancer 实现 quotacheck.Balancer | 依赖倒置(消费者定接口,实现方注册),保留 |
+| `provider/{deepseek,minimax}→quotacheck` | 厂商 balancer 实现 quotacheck.Balancer(glm 已随包删除;mimo 无官方余额端点走 probe 不写 balancer) | 依赖倒置(消费者定接口,实现方注册),保留 |
 | circuit 内建默认(5/60s/30s/1) | circuit.New 硬编码 | 合法包内单源;不为集中去 import config,保留 |
 | write_timeout 双语义 | http.Server 原始值 vs 引擎 2m 流式兜底 | 有意设计差异(socket 绝对上限 vs chunk 续期),保留 |
 | `mimo.quotaCookie` 全局单例 | provider/mimo/balancer.go | 通过 MimoQuotaSet 闭包注入隔离,proxy 不直接碰,保留 |

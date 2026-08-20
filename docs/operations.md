@@ -242,9 +242,19 @@ make test               # 跑测试
 
 ### 6.2 schema 变更
 
-GORM AutoMigrate 自动处理新增字段(改 `database/models.go`struct + gorm tag)。
+GORM AutoMigrate 自动处理**新增字段**(改 `database/models.go` struct + gorm tag)。
 
-**大改**(改字段类型 / 删字段)需要 SQL 迁移文件:`migrations/00X.up.sql`。
+**删字段 / 删关联必须手工执行**(AutoMigrate 只加不删,踩坑 #23):
+
+```sql
+-- 先确认空表(有行则先备份),再删
+ALTER TABLE <表> DROP COLUMN <列>;
+ALTER TABLE <表> DROP CONSTRAINT <约束名>;
+```
+
+删除后立刻重启验证 —— AutoMigrate 失败是致命错误会中止启动,漂移一定会以
+「起不来」的形式暴露。`migrations/00X.up.sql` 机制已废弃(2026-08-20 决定:
+保持 AutoMigrate 现状,靠 CLAUDE.md 提交前自检清单补「减法无人负责」的缺口)。
 
 ### 6.3 数据库切换
 

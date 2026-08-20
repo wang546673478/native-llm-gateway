@@ -14,14 +14,15 @@
 | 路由 | alias 表 + 短/长格式 + fallback model | **无路由表**:`routing.catch_all: {}` 自动模式,所有 provider 自动参与,按 tier(token_plan → api → free)计费;alias 表与 fallback model 已退役(能力保留) |
 | 路由决策 | 按 model 名路由到声明它的 provider | **模型名只是标签**:配了 catch_all 后一律走链,真实名也不直连声明者 |
 | 白名单 | 入口校验 | **逐候选校验 + 参与选择**:白名单外的候选跳过;provider 声明过白名单模型就用白名单模型 |
-| Provider 结构 | 按协议拆目录(`deepseek_anthropic/` 等)+ glm/kimi | **按厂商一个目录,内含多协议面**:`deepseek/`(openai+anthropic)、`minimax/`(anthropic+openai)、`glm/`(openai+anthropic,2026-08 加回,官方 monitor 余额端点);kimi 已删;同厂商协议面共享 key 池,vendor 级一份 key |
-| Provider 能力 | 无 | config `responses_api: true` 标记原生支持 OpenAI Responses API 的厂商(deepseek/minimax),`/responses` 纯透传(Codex) |
+| Provider 结构 | 按协议拆目录(`deepseek_anthropic/` 等)+ glm/kimi | **按厂商一个目录,内含多协议面**(2026-08-20 起 3 厂商):`deepseek/`(openai+anthropic)、`minimax/`(anthropic+openai)、`mimo/`(openai+anthropic,api 与 token-plan 两套端点、两套 key 互不通用);glm/qwen/gemini/kimi 均已删除;同厂商协议面共享 key 池,vendor 级一份 key |
+| Provider 能力 | 无 | config `responses_api: true` 标记原生支持 OpenAI Responses API 的厂商(deepseek/minimax/mimo),`/responses` 纯透传(Codex) |
 | 错误处理 | 400 invalid_request 禁用 key | **无终端禁用状态**(P-no-disabled):auth → 该 key COOLING 5 分钟自动重试;400 invalid_request 只计数;429+2056「Token Plan 用量上限」分类为 quota_exceeded。跨厂商续接剥离推理块 + 强制 `effort=none`(DeepSeek 校验) |
 | 熔断器 | §5.6 provider 级(Manager/Reporter) | **per-key 级**(2026-08-06):熔断器挂在 keypool,5xx/timeout/connection 只熔断出问题的 key,不连坐同 provider 其他 key;429/quota/auth/invalid_request 不计入;转移全程日志 |
-| 配额机制 | 无轮询概念 | 按厂商两档恢复:poll(有余额接口:deepseek/minimax/glm)→ 标 QUOTA_EXCEEDED,quotacheck 轮询,余额恢复自动回链,连续 2 轮读到 0 才确认;probe(无接口:qwen/gemini)→ 不永久标记,每次请求重新探测 |
+| 配额机制 | 无轮询概念 | 按厂商两档恢复:poll(有余额接口:deepseek/minimax)→ 标 QUOTA_EXCEEDED,quotacheck 轮询,余额恢复自动回链,连续 2 轮读到 0 才确认;probe(无官方余额接口:mimo)→ 不永久标记,每次请求重新探测 |
+| 模型清单与定价 | config `models:` 段 + `default_model` + 厂商包 `DefaultModels` 常量 | **DB `provider_models` 唯一真相源**(vendor 粒度):模型管理页「上游同步」(`POST /api/v1/providers/sync-models`)从厂商上游 `/models` 拉取,sort_order = 上游返回下标(旗舰排最前),**默认模型 = sort_order 最小者**(非字典序);三档每百万价格由管理页手工填(`PUT /api/v1/providers/models`);config 无 models 段、无 default_model |
 | Key 路由 | 路由层与 Provider 层各自取 key | **req.Key 透传**:路由层已 acquire 的 key 传给 Provider 层复用,禁止二次 acquire(双 acquire 曾把 429 冷却标到没发过请求的 healthy key 上,见踩坑 #15) |
 | 计费 | 无 tier 概念 | `billing_source: token_plan/api/free` 分层,quota 耗尽自动降级/恢复 |
-| 管理 API | 规格书 §9 | 增加 `/access-logs/export`(JSONL 训练数据导出)、`/config/quota`、`/usage/by_model/:model_id/providers`;provider 按厂商聚合;熔断状态不再按 provider 输出 |
+| 管理 API | 规格书 §9 | 增加 `/access-logs/export`(JSONL 训练数据导出)、`/config/quota`、`/usage/by_model/:model_id/providers`、`/providers/models`(模型清单)、`/providers/sync-models`(上游模型同步)、`PUT /providers/models`(手工定价);provider 按厂商聚合;熔断状态不再按 provider 输出 |
 | 接入日志 | — | 30 天保留、body 上限 16MB、区分「客户端请求模型/实际使用模型」、详情人类可读;详情页 usage 行只对非流式请求显示(流式看用量页) |
 | 持久化 | 无 | 日志追加模式 `logs/gateway.log`,按天轮转 7 天清理;优雅关停写 `key-state.json` 快照(QUOTA_EXCEEDED/COOLING/余额),重启恢复,不等重新 poll |
 
@@ -138,9 +139,11 @@ Gateway 核心代码不知道、也不需要知道
 
 客户端协议            可路由到的 Provider
 ─────────────────────────────────────────
-Anthropic (v1/messages)   → MiniMax, Kimi, GLM（protocol=anthropic）
-OpenAI (v1/chat/comp.)    → DeepSeek, Qwen, MiniMax, Kimi（protocol=openai）
-Google (v1/generate)      → Gemini（protocol=google）
+Anthropic (v1/messages)   → MiniMax(minimax), DeepSeek(deepseek-anthropic),
+                            MiMo(mimo-anthropic / mimo-token-plan-anthropic)
+OpenAI (v1/chat/comp.)    → DeepSeek, MiniMax(minimax-openai),
+                            MiMo(mimo / mimo-token-plan)
+Google (v1/generate)      → Gemini（2026-08-20 已下线;provider/google 协议层保留,无消费者）
 
 配置方式：每个 Provider 声明自己的 protocol 字段
 路由逻辑：根据请求 endpoint 匹配协议，只路由到对应协议的 Provider
@@ -237,10 +240,9 @@ llm-gateway/
 │   │   │   │   ├── balancer.go          #   余额查询
 │   │   │   │   └── registry_test.go     #   双协议面注册回归测试
 │   │   │   ├── minimax/                 # 同款结构(anthropic 面 + openai 面 + balancer)
-│   │   │   ├── qwen/
-│   │   │   │   └── qwen.go
-│   │   │   ├── gemini/
-│   │   │   │   └── gemini.go
+│   │   │   ├── mimo/                    # 同款结构(openai 面 + anthropic 面 + balancer,api/token-plan 两套端点)
+│   │   │   ├── google/                  # Google 协议层(gemini 已下线,2026-08-20 起无消费者)
+│   │   │   ├── builtin/                 # 厂商自动注册(blank import 单一入口)
 │   │   │   ├── openai_compatible/       # 通用 OpenAI 兼容 Provider
 │   │   │   │   ├── openai_compatible.go #   含 ResponsesPath(/responses 透传)
 │   │   │   │   └── config.go
@@ -295,10 +297,13 @@ llm-gateway/
 │   │   ├── views/
 │   │   │   ├── Overview.vue
 │   │   │   ├── Providers.vue
+│   │   │   ├── ProviderKeys.vue
 │   │   │   ├── Keys.vue
+│   │   │   ├── ModelManager.vue        # 模型管理页(上游同步 + 手工定价)
 │   │   │   ├── Routing.vue
 │   │   │   ├── Usage.vue
-│   │   │   └── Settings.vue
+│   │   │   ├── AccessLogs.vue
+│   │   │   └── Inflight.vue
 │   │   ├── components/
 │   │   │   ├── StatusBadge.vue
 │   │   │   ├── UsageChart.vue
@@ -341,8 +346,10 @@ llm-gateway/
 
 ```yaml
 # config.yaml — Gateway 完整配置(2026-08 现状)
-# 权威完整示例:config.example.yaml(本示例为结构 + 代表字段,模型列表从简)
+# 权威完整示例:config.example.yaml(本示例为结构 + 代表字段)
 # 注意:Provider API key 全部由 DB(provider_api_keys 表)管理,config 不存 key
+# 注意:模型清单与定价也不在 config — 唯一真相源 = DB provider_models(模型管理页
+#   「上游同步」拉取 + 手工定价),详见第七部分 §7.1
 
 server:
   host: "0.0.0.0"
@@ -385,8 +392,10 @@ auth:
         rpm: 100
         tpm: 500000
 
-# Provider 配置 — 8 个块,按厂商分:deepseek / deepseek-anthropic / qwen /
-# minimax / minimax-openai / gemini / glm / glm-anthropic(共 5 个厂商)
+# Provider 配置 — 8 个块,按厂商分(2026-08-20 现状,3 个厂商):
+#   deepseek / deepseek-anthropic / minimax / minimax-openai /
+#   mimo / mimo-anthropic / mimo-token-plan / mimo-token-plan-anthropic
+# glm / qwen / gemini 已于 2026-08-20 下线删除;模型清单与定价在 DB provider_models
 providers:
   deepseek:
     enabled: true
@@ -395,19 +404,6 @@ providers:
     protocol: "openai"                 # openai | anthropic | google
     timeout: 60s
     responses_api: true                # 原生支持 OpenAI Responses API(Codex 透传)
-    models:
-      - id: "deepseek-v4-flash"        # ¥1/M 输入、¥0.02/M cache 命中、¥2/M 输出
-        aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.00002
-        cost_per_1k_cache_creation: 0.0
-      - id: "deepseek-v4-pro"          # ¥3/M 输入、¥0.025/M cache 命中、¥6/M 输出,支持 thinking
-        aliases: ["pro-model"]
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-        cost_per_1k_cache_read: 0.000025
-        cost_per_1k_cache_creation: 0.0
     circuit_breaker:                   # 0 = 不启用(per-key 熔断)
       failure_threshold: 5
       failure_window: 60s
@@ -423,20 +419,7 @@ providers:
     endpoint: "https://api.deepseek.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
-    models:                            # 与 deepseek 相同模型,价格一致
-
-  qwen:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    protocol: "openai"
-    timeout: 60s
-    models:
-      - id: "qwen-plus"                # 商用主力
-        aliases: []
-        cost_per_1k_input: 0.0058
-        cost_per_1k_output: 0.0144
-      # qwen-turbo / qwen-max / qwen-coder-plus / qwen-long / qwen-vl-max / qwen3-235b-a22b 见 example
+    # 模型清单/定价在 DB provider_models(与 deepseek 同 vendor 共享一份)
 
   minimax:
     enabled: true
@@ -444,16 +427,7 @@ providers:
     endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
-    models:
-      - id: "MiniMax-M3"               # 1M tokens,旗舰,仅自动缓存
-        aliases: ["MiniMax"]
-        cost_per_1k_input: 0.0021      # 永久五折后价(官方标准价 ¥4.2/M 输入)
-        cost_per_1k_output: 0.0084
-        cost_per_1k_cache_read: 0.00042
-        # 官方悬崖:输入含缓存 > 512k → 输入/输出/缓存全项 ×2
-        long_context_input_threshold: 512000
-        long_context_multiplier: 2
-      # MiniMax-M2.7/M2.5/M2.1/M2 及 -highspeed 变体(204,800 上下文,主动缓存)见 example
+    # 模型清单/定价在 DB provider_models(旗舰 MiniMax-M3 由上游同步排在首位)
 
   minimax-openai:                      # 同一供应商,不同协议端点,共享 key
     enabled: true
@@ -462,44 +436,38 @@ providers:
     protocol: "openai"
     timeout: 90s
     responses_api: true
-    models:                            # 与 minimax 相同的模型列表
+    # 与 minimax 共享 vendor 模型清单(DB provider_models)
 
-  gemini:
+  mimo:
     enabled: true
-    billing_source: "api"
-    endpoint: "https://generativelanguage.googleapis.com/v1beta"
-    protocol: "google"
-    timeout: 60s
-    models:
-      - id: "gemini-2.5-flash"         # gemini-2.0-flash / 1.5-pro 已 shutdown
-        aliases: ["gemini-flash"]
-        cost_per_1k_input: 0.00054
-        cost_per_1k_output: 0.00216
-      # 2.5-flash-lite / 2.5-pro / 3.5-flash / 3.1-flash-lite 见 example
-
-  glm:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    billing_source: "api"              # 按量付费端点(只认 sk- key)
+    endpoint: "https://api.xiaomimimo.com/v1"
     protocol: "openai"
     timeout: 60s
-    responses_api: false               # 官方无 /responses API
-    models:
-      - id: "glm-5.2"                  # 旗舰,1M 上下文/128K 输出,¥8/M 输入、¥28/M 输出、¥2/M 缓存
-        aliases: []
-        cost_per_1k_input: 0.008
-        cost_per_1k_output: 0.028
-        cost_per_1k_cache_read: 0.002
-        cost_per_1k_cache_creation: 0.0
-      # 其余在售文本模型(glm-5.1 / glm-5 / glm-5-turbo / glm-4.7 / glm-4.6 / glm-4.5)按官方价格页补
+    responses_api: true                # 原生支持 /responses(endpoint 已含 /v1)
+    # 模型清单/定价在 DB provider_models(旗舰 mimo-v2.5 由上游同步排在首位)
 
-  glm-anthropic:                       # 与 glm 共用同一组 Provider Key
+  mimo-anthropic:                      # 同一供应商,Anthropic 兼容端点,共享 key(Claude Code 走这里)
     enabled: true
     billing_source: "api"
-    endpoint: "https://open.bigmodel.cn/api/anthropic"
+    endpoint: "https://api.xiaomimimo.com/anthropic"
     protocol: "anthropic"
     timeout: 60s
-    models:                            # 与 glm 相同的模型列表
+
+  mimo-token-plan:                     # Token Plan 套餐端点(只认 tp- key,与 sk- 不通用)
+    enabled: true
+    billing_source: "token_plan"       # 套餐,优先路由,额度耗尽 429 自动降级到 api 层
+    endpoint: "https://token-plan-cn.xiaomimimo.com/v1"
+    protocol: "openai"
+    timeout: 60s
+    responses_api: true
+
+  mimo-token-plan-anthropic:
+    enabled: true
+    billing_source: "token_plan"
+    endpoint: "https://token-plan-cn.xiaomimimo.com/anthropic"
+    protocol: "anthropic"
+    timeout: 60s
 
 # 路由规则 — 唯一规则:catch_all 自动模式(无路由表)
 routing:
@@ -1188,10 +1156,10 @@ Response 200:
       },
       "models": [
         {
-          "id": "deepseek-coder",
-          "aliases": ["coding-model"],
-          "cost_per_1k_input": 0.0014,
-          "cost_per_1k_output": 0.0028
+          "id": "deepseek-v4-flash",
+          "cost_per_million_input": 1.0,
+          "cost_per_million_cache_read": 0.02,
+          "cost_per_million_output": 2.0
         }
       ],
       "key_pool": {
@@ -1212,7 +1180,12 @@ Response 200:
 
 GET    /api/v1/providers/registered      # Registry 注册名列表(轻量)
 GET    /api/v1/providers/:name           # 单个详情
-# 注:管理 API 为只读(provider 由 config 管理,改配置需重载);写操作只有 key CRUD
+
+# 模型管理(2026-08-20 新增,唯一真相源 = DB provider_models)
+GET    /api/v1/providers/models           # 按 vendor 分组列出全部模型(三档每百万价格/sort_order/source/synced_at)
+POST   /api/v1/providers/sync-models {vendor}   # 从厂商上游 /models 拉取在售模型 upsert(sort_order = 上游返回下标)
+PUT    /api/v1/providers/models {vendor, model_id, cost_per_million_input/cache_read/output}   # 手工定价
+# 注:provider 本体由 config 管理(改配置需重载);写操作 = key CRUD + 模型同步/定价
 ```
 
 ## 6.3 管理 API — Provider Keys(厂商 key 池)
@@ -1323,7 +1296,7 @@ Response 200:
   "providers": {
     "deepseek": "healthy",
     "minimax": "healthy",
-    "glm": "unhealthy"
+    "mimo": "unhealthy"
   }
 }
 
@@ -1348,6 +1321,9 @@ GET  /healthz                           存活探针(gateway-reload.sh 用)
 GET    /api/v1/providers                按厂商聚合(共享 pool、key 状态)
 GET    /api/v1/providers/registered     Registry 注册名列表
 GET    /api/v1/providers/:name          单个详情
+GET    /api/v1/providers/models         模型清单(DB provider_models,按 vendor 分组)
+POST   /api/v1/providers/sync-models    {vendor} 从上游 /models 同步模型
+PUT    /api/v1/providers/models         手工定价(三档每百万价格)
 
 GET    /api/v1/providers/:name/api-keys         厂商 key 池列表
 POST   /api/v1/providers/:name/api-keys         添加
@@ -1401,16 +1377,20 @@ CREATE TABLE IF NOT EXISTS providers (
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS provider_models (
+CREATE TABLE IF NOT EXISTS provider_models (   -- 模型清单与定价唯一真相源(2026-08-20 起)
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider_name           TEXT NOT NULL REFERENCES providers(name),
+    vendor                  TEXT NOT NULL,               -- 厂商名;同厂商各协议面共享一份模型清单
     model_id                TEXT NOT NULL,
-    cost_per_1k_input       REAL NOT NULL DEFAULT 0,
-    cost_per_1k_output      REAL NOT NULL DEFAULT 0,
-    cost_per_1k_cache_read  REAL NOT NULL DEFAULT 0,      -- P40: 缓存价
-    cost_per_1k_cache_creation REAL NOT NULL DEFAULT 0,   -- P40: 主动缓存写价
+    cost_per_million_input  REAL NOT NULL DEFAULT 0,     -- 每百万 token 价;0 = 未填(未定价模型仍可用)
+    cost_per_million_cache_read REAL NOT NULL DEFAULT 0, -- 缓存命中输入每百万价;无此概念 = 0
+    cost_per_million_output REAL NOT NULL DEFAULT 0,
+    sort_order              INTEGER NOT NULL DEFAULT 0,  -- 上游 ListModels 返回下标(旗舰排最前);
+                                                         -- 默认模型 = sort_order 最小者(非字典序)
+    source                  TEXT NOT NULL DEFAULT 'manual',  -- "upstream"(上游同步)| "manual"(手工加)
+    synced_at               DATETIME,                    -- 最近一次上游同步时间
     created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(provider_name, model_id)
+    updated_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(vendor, model_id)
 );
 
 CREATE TABLE IF NOT EXISTS model_aliases (   -- alias 已退役,表保留(历史数据兼容)
@@ -1591,19 +1571,27 @@ CREATE INDEX idx_access_logs_error ON access_logs(error_type);
 └──────────────┴────────────────┴────────────────┴─────────────────┘
 ```
 
-## 8.2 OpenAI 兼容 Provider（DeepSeek / GLM / Qwen / MiniMax）
+> 2026-08-20:GLM/Qwen/Gemini 三个厂商包已删除。上表 Google 列仅作协议层参照 — `provider/google` 协议层与 `ProtocolGoogle` 仍在(proxy/response.go、router、admin handler),但已无在册消费者(Gemini 曾是唯一消费者)。
 
-> 现状(2026-08):Kimi 已删除。同一基座被多厂商复用:deepseek(openai 面)、glm(openai 面)、qwen、minimax(openai 面)。DeepSeek/GLM/MiniMax 的 anthropic 面继承 anthropic_compatible.Base,见 §8.3。
+## 8.2 OpenAI 兼容 Provider（DeepSeek / MiniMax / MiMo）
+
+> 现状(2026-08-20):GLM/Qwen/Kimi 厂商已删除。现存 openai 面:deepseek、minimax-openai、
+> mimo、mimo-token-plan(共用 openai_compatible.Base)。DeepSeek/MiniMax/MiMo 的
+> anthropic 面继承 anthropic_compatible.Base,见 §8.3。
 
 ```go
 // backend/internal/provider/openai_compatible/openai_compatible.go
 
 /*
-适用 Provider:
+适用 Provider(2026-08-20 现状):
   - DeepSeek:  endpoint = https://api.deepseek.com
+  - MiniMax:   endpoint = https://api.minimaxi.com/v1
+  - MiMo:      endpoint = https://api.xiaomimimo.com/v1(api 按量)
+               或 https://token-plan-cn.xiaomimimo.com/v1(token_plan 套餐)
+
+已下线(2026-08-20,厂商包已删):
   - GLM:       endpoint = https://open.bigmodel.cn/api/paas/v4
   - Qwen:      endpoint = https://dashscope.aliyuncs.com/compatible-mode/v1
-  - MiniMax:   endpoint = https://api.minimaxi.com/v1
 
 协议: OpenAI Chat Completions API
 认证: Authorization: Bearer {api_key}
@@ -1618,21 +1606,27 @@ CREATE INDEX idx_access_logs_error ON access_logs(error_type);
     - Prefix caching:默认开启,响应 prompt_cache_hit_tokens / prompt_cache_miss_tokens
     - 旧名 deepseek-chat / deepseek-reasoner 2026-07-24 弃用
 
-  GLM (智谱):
+  GLM (智谱)(2026-08-20 已下线):
     - 基本兼容 OpenAI 格式(glm-5.2 起:function calling / 上下文缓存 / 结构化输出 / 思考模式)
     - 思考模式:thinking + reasoning_effort,响应带 reasoning_content
     - 官方无 /responses API(Codex 请求不会路由到它)
 
-  Qwen (通义千问):
+  Qwen (通义千问)(2026-08-20 已下线):
     - 通过 DashScope 的 OpenAI 兼容模式接入
     - 支持 stream_options.include_usage
     - 部分参数支持范围与 OpenAI 不同
 
   MiniMax (OpenAI 面):
-    - 共享 minimax(anthropic)的 key 池与模型列表
+    - 共享 minimax(anthropic)的 key 池与模型清单(DB provider_models)
     - M3 专属参数在 extra_body:thinking(adaptive/disabled)、reasoning_split、
       service_tier(standard/priority,1.5x 价格)
     - 原生支持 Responses API;输入含缓存 > 512k 时全项 ×2(官方悬崖)
+
+  MiMo (OpenAI 面):
+    - api(api.xiaomimimo.com/v1,sk- key)与 token_plan(token-plan-cn.xiaomimimo.com/v1,
+      tp- key)两套端点,key 互不通用
+    - 原生支持 Responses API;思考模式:chat 面 thinking.type、responses 面 reasoning.effort
+    - 429 = 限流或套餐额度耗尽(双义);402 = 按量余额不足;无官方余额接口 → probe 探测恢复
 
 以上差异由各 Provider 在 SendRequest 中自行处理，Gateway 核心不感知。
 */
@@ -1839,7 +1833,10 @@ func (p *OpenAICompatible) Close() error {
 }
 ```
 
-## 8.3 Anthropic 兼容 Provider（MiniMax / DeepSeek / GLM）
+## 8.3 Anthropic 兼容 Provider（MiniMax / DeepSeek / MiMo）
+
+> 2026-08-20:GLM 的 anthropic 面(glm-anthropic)随厂商下线删除。现存 anthropic 面:
+> minimax、deepseek-anthropic、mimo-anthropic、mimo-token-plan-anthropic。
 
 ```go
 // backend/internal/provider/minimax/minimax.go
@@ -2052,7 +2049,11 @@ func (p *MiniMax) Close() error {
 }
 ```
 
-## 8.4 Google 兼容 Provider（Gemini）
+## 8.4 Google 兼容 Provider（Gemini — 2026-08-20 已下线）
+
+> 2026-08-20:gemini 厂商包已删除(0 用量)。`provider/google` 协议层与 `ProtocolGoogle`
+> 仍保留在代码中(proxy/response.go、router、admin handler),但已无在册消费者 —
+> 本节为历史规格,仅作 Google 协议实现参照。
 
 ```go
 // backend/internal/provider/gemini/gemini.go
@@ -2166,8 +2167,9 @@ func (p *Gemini) extractUsage(body []byte) *provider.Usage {
            - trace_id, provider_name, model_id
            - input_tokens = Provider.Usage.PromptTokens
            - output_tokens = Provider.Usage.CompletionTokens
-           - cost = input_tokens * cost_per_1k_input / 1000
-                   + output_tokens * cost_per_1k_output / 1000
+           - cost = input_tokens * cost_per_million_input / 1_000_000
+                   + output_tokens * cost_per_million_output / 1_000_000
+                   (定价取 DB provider_models 三档每百万价格,见 §7.1)
            - latency_ms = 请求耗时
        7d. Usage Collector.Record(record)  // 异步
        7e. Metrics.Record(...)
@@ -2615,11 +2617,12 @@ docker-down:
 # 第十六部分：前端 Dashboard 详细设计
 
 > ⚠️ 本部分为早期线框图,与实际页面已有差异(2026-08 现状):
-> - 页面:`/overview` `/providers` `/provider-keys` `/keys` `/routing` `/usage` `/access-logs`
+> - 页面:`/overview` `/providers` `/provider-keys` `/keys` `/models` `/routing` `/usage` `/access-logs` `/inflight`
 > - Provider Keys 页面展示运行时 key 状态:ACTIVE / COOLING / **QUOTA_EXCEEDED** + 余额
 >   (percent/currency)+ **per-key 熔断状态**;**无 DISABLED 状态**
 > - Routing 页为 **catch_all 自动模式状态**(alias 路由表已退役)
-> - 线框图里的模型名/价格为旧数据,以 config.example.yaml 为准
+> - 线框图里的厂商/模型名/价格为旧数据:现存厂商只有 deepseek / minimax / mimo
+>   (线框图中的 GLM 等已下线);模型清单与定价以 DB provider_models(模型管理页 `/models`)为准,不再在 config.yaml
 
 ## 16.1 Overview 页面
 
@@ -2936,9 +2939,9 @@ Phase 1.8 — 更多 Provider
   │   ├── classifyError (Anthropic 格式)
   │   └── SendStreamRequest (SSE: event/data 格式)
   ├── MiniMax Provider（使用 Anthropic 兼容基础）
-  ├── GLM Provider（使用 OpenAI 兼容基础）
-  ├── Qwen Provider（使用 OpenAI 兼容基础）
-  ├── Kimi Provider（使用 OpenAI 兼容基础）
+  ├── GLM Provider（使用 OpenAI 兼容基础）[2026-08-20 已下线]
+  ├── Qwen Provider（使用 OpenAI 兼容基础）[2026-08-20 已下线]
+  ├── Kimi Provider（使用 OpenAI 兼容基础）[更早已删;2026-08-20 后另增 MiMo(openai+anthropic 双面)]
   └── 测试：多 Provider 切换 + 协议匹配
 
 Phase 1.9 — 前端基础
@@ -3045,9 +3048,9 @@ Gateway 本质 = 协议感知的透明代理（不是 Nginx，不是 LiteLLM）
   Usage Collector → 异步批量记录
 
 请求协议对应关系:
-  /v1/messages           → Anthropic → MiniMax, Kimi, GLM
-  /v1/chat/completions   → OpenAI    → DeepSeek, Qwen, MiniMax, Kimi, GLM
-  /v1beta/models/*       → Google    → Gemini
+  /v1/messages           → Anthropic → MiniMax, DeepSeek(anthropic 面), MiMo(anthropic 面)
+  /v1/chat/completions   → OpenAI    → DeepSeek, MiniMax(openai 面), MiMo(openai 面)
+  /v1beta/models/*       → Google    → Gemini(2026-08-20 已下线,协议层保留)
 
 Failover 规则:
   429 → 同 Provider 换 Key → 换 Provider
@@ -3081,6 +3084,10 @@ UUID:           google/uuid
 ---
 
 # 变更 2：替换原文档 4.1 config.yaml 中 redis 和相关部分
+
+> 历史变更记录。此稿含已删除厂商 glm / qwen / kimi / gemini 及已退役的 config 内嵌
+> `models:` / `keys:` 写法(2026-08-20 起:模型走 DB provider_models、key 走 provider_api_keys 表,
+> config 无 models 段)。当前配置示例以 §4.1 为准。
 
 ```yaml
 server:
@@ -3818,6 +3825,9 @@ func (a *Authenticator) Authenticate(r *http.Request) (*GatewayKey, error)
 
 # 变更 7：新增目录结构中的 state 包
 
+> 历史变更记录:下方目录树含已删除厂商目录 glm/ qwen/ kimi/ gemini(2026-08-20 下线)。
+> 当前目录结构以第三部分为准(现存厂商 deepseek / minimax / mimo + google 协议层)。
+
 在 `internal/` 目录下新增：
 
 ```
@@ -4223,9 +4233,9 @@ Gateway 本质 = 协议感知的透明代理（不是 Nginx，不是 LiteLLM）
   多实例 → PostgreSQL + RedisStore + Nginx
 
 请求协议对应关系:
-  /v1/messages           → Anthropic → MiniMax, Kimi, GLM
-  /v1/chat/completions   → OpenAI    → DeepSeek, Qwen, MiniMax, Kimi, GLM
-  /v1beta/models/*       → Google    → Gemini
+  /v1/messages           → Anthropic → MiniMax, DeepSeek(anthropic 面), MiMo(anthropic 面)
+  /v1/chat/completions   → OpenAI    → DeepSeek, MiniMax(openai 面), MiMo(openai 面)
+  /v1beta/models/*       → Google    → Gemini(2026-08-20 已下线,协议层保留)
 
 Failover 规则:
   429 → 同 Provider 换 Key → 换 Provider

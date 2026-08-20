@@ -17,13 +17,10 @@
 | **MiMo**(小米) | `mimo` | openai | api | probe | ✅ | `provider/mimo/mimo.go` |
 | | `mimo-token-plan` | openai | **token_plan** | probe | ✅ | `provider/mimo/mimo.go`(同 vendor) |
 | | `mimo-anthropic` | anthropic | api | probe | ❌ | `provider/mimo/anthropic.go` |
-| | `mimo-anthropic-token-plan` | anthropic | **token_plan** | probe | ❌ | `provider/mimo/anthropic.go`(同 vendor) |
-| **GLM**(智谱) | `glm` | openai | api | poll(滚动窗口) | ❌ | `provider/glm/glm.go` |
-| | `glm-anthropic` | anthropic | api | poll | ❌ | `provider/glm/anthropic.go` |
-| **qwen**(通义) | `qwen` | openai | api | probe | ❌ | `provider/qwen/qwen.go` |
-| **gemini** | `gemini` | google | api | probe | ❌ | `provider/gemini/gemini.go` |
+| | `mimo-token-plan-anthropic` | anthropic | **token_plan** | probe | ❌ | `provider/mimo/anthropic.go`(同 vendor) |
 
 > **kimi 已删除**(2026-08)。需要时按 `docs/provider厂商定制包指南.md` 加回。
+> **glm / qwen / gemini 已删除**(2026-08-20,历史用量 glm 53 次、qwen/gemini 0 次)。需要时按 `docs/provider厂商定制包指南.md` 加回。
 
 ---
 
@@ -137,80 +134,7 @@
 
 ---
 
-## 4. GLM(智谱 AI)
-
-- **官方文档**:<https://docs.bigmodel.cn>
-- **OpenAI 面**(注意): `POST https://open.bigmodel.cn/api/paas/v4/chat/completions`(端点已含版本前缀,**无 `/v1`**)
-- **Anthropic 面**: `POST https://open.bigmodel.cn/api/anthropic/v1/messages`
-- **Endpoint**: `https://open.bigmodel.cn/api/paas/v4`
-
-### 当前模型
-
-- `glm-5.2` — 旗舰,1M 上下文 / 128K 输出
-- `glm-5.1` / `glm-5` / `glm-5-turbo` / `glm-4.7` / `glm-4.6` / `glm-4.5`
-
-### 关键事实
-
-1. **思考模式**(`glm-5.2` 起):`thinking` + `reasoning_effort`(默认 max)
-2. **上下文缓存自动生效**,usage 结构与 OpenAI 一致
-3. **官方 `/responses` API 不支持** → 不配 `ResponsesPath`,`responses_api: false`
-4. **余额端点**:官方插件 `GET {host}/api/monitor/usage/quota/limit`(标准 API key 可用) → 注册 balancer,poll 模式,**滚动窗口重置后自动恢复**
-
-### 注意
-
-- GLM Coding Plan 套餐需配置专属 Coding 端点(见官方文档),本包只做标准 API 计费
-
----
-
-## 5. qwen(通义千问)
-
-- **官方文档**:<https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api>
-- **通过阿里云百炼 DashScope 的 OpenAI 兼容模式接入**
-- **Endpoint**: `https://dashscope.aliyuncs.com/compatible-mode/v1`
-
-### 当前模型(2026-07)
-
-- `qwen-plus`(商用主力)/ `qwen-turbo`(更快更便宜)/ `qwen-max`(旗舰)
-- `qwen-max-latest` / `qwen-long`(1M 长上下文)
-- `qwen-coder-plus` / `qwen-coder-turbo`
-- `qwen-vl-max` / `qwen-vl-plus`(多模态)
-- `qwen3-235b-a22b`(MoE)/ `qwen3-32b`(dense)/ `qwen3-max`(闭源旗舰)
-
-### 已知坑
-
-- 无官方余额 API → **probe 模式**(每次请求重探,充值即恢复)
-- 历史上用过 `qwen-turbo / qwen-plus / qwen-max` 等 alias,当前主推 qwen3 系列
-
----
-
-## 6. gemini(Google)
-
-- **官方文档**:<https://ai.google.dev/gemini-api/docs>
-- **协议**:Google Generative AI(`generateContent` / `streamGenerateContent`)
-- **鉴权**:`x-goog-api-key` header(**不是** `?key=` query,避免 key 进 URL 日志)
-- **Endpoint**: `https://generativelanguage.googleapis.com/v1beta`
-
-### 当前 Stable 模型
-
-- `gemini-2.5-flash` / `gemini-2.5-flash-lite` / `gemini-2.5-pro`
-- `gemini-3.5-flash` / `gemini-3.1-flash-lite`
-
-### 重要弃用
-
-- ❌ `gemini-2.0-flash` 已停用
-- ❌ Gemini 1.5 整个系列已弃用
-- ❌ Gemini 2.0 整个系列已 shut down
-
-### 关键事实
-
-1. **端点格式**:`POST {endpoint}/models/{model}:generateContent`
-2. **Body 格式**:`{contents: [{parts: [{text: "..."}], role: "user"}]}`
-3. **Usage 字段**:`promptTokenCount` / `candidatesTokenCount` / `totalTokenCount` / `cachedContentTokenCount` / `thoughtsTokenCount`
-4. **无官方余额 API** → **probe 模式**
-
----
-
-## 7. 厂商注册方式(代码)
+## 4. 厂商注册方式(代码)
 
 每个厂商包靠 `init()` 自注册到 `provider.Default()` Registry:
 
@@ -226,37 +150,35 @@ func init() {
 - `VendorFor(注册名)` 归一(key 绑定 / 白名单 / access log 都按厂商)
 - 同 vendor 共享 key 池(`server.buildKeyPools` 按 vendor 复用)
 
-**还要在 `cmd/gateway/main.go` 加 blank import**:
+**还要在 `provider/builtin/builtin.go` 加 blank import**(不要往 `cmd/gateway/main.go` 加):
 
 ```go
 _ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"  // 触发 init() 注册
 ```
 
 > 漏加 → Go 不编译该包 → `init()` 不跑 → `/api/v1/providers` 死活不出现它(踩坑 #10 的常见原因)
+> (2026-08-20 起只剩 3 个厂商的 blank import;gemini/qwen/glm 已随包删除)
 
 ---
 
-## 8. 共享 key 池 vs 独立池
+## 5. 共享 key 池 vs 独立池
 
 | 厂商 | 池类型 | 原因 |
 |---|---|---|
 | deepseek | 共享(`deepseek` + `deepseek-anthropic`) | 同 vendor 协议面 |
 | MiniMax | 共享(`minimax` + `minimax-openai`) | 同 vendor 协议面 |
 | MiMo | 共享(`mimo` + `mimo-anthropic` + 各自 token_plan) | 同 vendor 协议面 + tier 互斥 |
-| GLM | 共享(`glm` + `glm-anthropic`) | 同 vendor 协议面 |
-| qwen | 独立 | 单协议面 |
-| gemini | 独立 | 单协议面 |
 
 > 共享池意味着:同一把 key 既能给 anthropic 协议面用,也能给 openai 协议面用 — key 的 `Protocols` 字段标记可用协议(空 = 全部)。
 
 ---
 
-## 9. 余额恢复模式决策表
+## 6. 余额恢复模式决策表
 
 | 模式 | 何时用 | 行为 |
 |---|---|---|
-| **poll** | 厂商有官方余额 API(deepseek / MiniMax / GLM) | 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;连续 2 轮读到 0 才确认耗尽(防瞬态 0 误杀,踩坑 #9 的姊妹) |
-| **probe** | 厂商无官方余额 API(qwen / gemini) | 不永久标记,每次请求重探;充值即恢复(代价:每次请求先打上游,毫秒级) |
+| **poll** | 厂商有官方余额 API(deepseek / MiniMax) | 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;连续 2 轮读到 0 才确认耗尽(防瞬态 0 误杀,踩坑 #9 的姊妹) |
+| **probe** | 厂商无官方余额 API(mimo) | 不永久标记,每次请求重探;充值即恢复(代价:每次请求先打上游,毫秒级) |
 
 判定逻辑在 `server.buildKeyPools`(`server.go:251` `vendorHasBalancer`):
 
@@ -268,7 +190,7 @@ if !vendorHasBalancer(vendor) {
 
 ---
 
-## 10. 厂商接入清单(新增时)
+## 7. 厂商接入清单(新增时)
 
 新增厂商的 6 步见 `docs/provider厂商定制包指南.md`。关键节点:
 
@@ -276,5 +198,5 @@ if !vendorHasBalancer(vendor) {
 2. **Step 3 注册**:`RegisterGlobalWithProtocolVendor` 第 4 参数 vendor 别填错
 3. **Step 4 balancer**:有官方余额端点就写(每个注册名都要注册!)
 4. **config 块**:`billing_source` 与 vendor 内其他块保持一致
-5. **cmd/gateway/main.go**:blank import 漏一行就完蛋
+5. **`provider/builtin/builtin.go`**:blank import 漏一行就完蛋
 6. **测试**:`registry_test.go` 断言两个注册名 + Protocol/Vendor

@@ -101,11 +101,10 @@ auth:
 providers:
   minimax:
     enabled: true
-    billing_source: "token_plan"  # token_plan / api / free
+    billing_source: "token_plan"   # token_plan / api / free
     endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
     timeout: 60s
-    default_model: "MiniMax-M3"   # catch_all 自动模式用它承接
     responses_api: true           # 原生支持 /v1/responses
     force_thinking_disabled: false
     circuit_breaker:
@@ -113,18 +112,16 @@ providers:
       failure_window: 60s
       open_timeout: 60s
       half_open_requests: 2
-    models:
-      - id: "MiniMax-M3"
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.0001
-        cost_per_1k_cache_creation: 0.001
-      - id: "MiniMax-M2.7"
-        cost_per_1k_input: 0.0005
-        cost_per_1k_output: 0.001
 ```
 
-> `billing_source` 决定 tier 层级(`token_plan` 套餐耗尽自动降档到 `api`);同一厂商的所有块保持一致(共享 pool 按 tier 桶)
+> **没有 `models` 段、也没有 `default_model` 字段了**(2026-08-20 起):模型清单与
+> 定价的唯一真相源是 DB 表 `provider_models`(vendor 粒度)。模型 id 在前端「模型管理页」
+> 点「上游同步」从厂商 `/models` 端点拉取(sort_order 记上游顺序,默认模型 = sort_order
+> 最小者 = 上游首个,minimax 即 `MiniMax-M3`);价格在模型管理页手工填。
+> 相关端点:`GET /api/v1/providers/models` / `POST /api/v1/providers/sync-models` /
+> `PUT /api/v1/providers/models`。
+>
+> `billing_source` 决定 tier 层级(`token_plan` 套餐耗尽自动降档到 `api`);同一厂商的所有块保持一致(共享 pool 按 tier 桶)。
 
 ---
 
@@ -237,8 +234,8 @@ usage:
 ### 11.2 关键关系
 
 ```
-providers (Name)
-  ├── provider_models (ProviderName FK)
+providers (Name) — 表仍在但全程无人读写,保留仅为历史
+  ├── provider_models (按 vendor 维度,无 FK 关联本表 — 2026-08-20 移除跨命名空间外键)
   ├── provider_api_keys (ProviderName FK)
   └── usage_records (ProviderName FK)
 gateway_keys (ID)
@@ -261,10 +258,12 @@ access_logs (ProviderKeyID / GatewayKeyID 都是字符串,无 FK)
 ### 12.1 数据库迁移
 
 - `cmd/gateway/main.go` 启动时调 `database.Migrate(db)`
-- 唯一 schema 权威是 GORM AutoMigrate(database.Migrate 遍历 9 个模型 struct);
+- 唯一 schema 权威是 GORM AutoMigrate(database.Migrate 遍历 10 个模型 struct);
   已删后端 dormant 的 migrations/*.sql(此前与 struct 漂移且无代码执行)
 - 新增字段用 GORM 的 `AutoMigrate`(改 struct + `gorm:"column:..."` tag)
-- 大改直接改 struct,由 AutoMigrate 增加/改列(不维护独立 SQL 迁移)
+- **AutoMigrate 只加列不删列**:删结构体字段/关联时,必须同时手工
+  `ALTER TABLE ... DROP COLUMN / DROP CONSTRAINT`,否则生产库留下 NOT NULL 死列,
+  轻则 INSERT 全炸、重则启动崩溃循环(踩坑 #23,2026-08-20 网关全挂实录)
 
 ### 12.2 SQLite → PostgreSQL 迁移工具
 
@@ -301,8 +300,7 @@ return filepath.Join(filepath.Dir(dsn), "key-state.json")
 |---|---|
 | `providers.*.endpoint` | `manager` 重新加载 |
 | `providers.*.protocol` | 同上 |
-| `providers.*.models` | `usage` 重新计算 pricing |
-| `providers.*.cost_*` | 同上 |
+| `providers.*.models` | 已删除 — 模型/定价只来自 DB `provider_models`,热重载走 `LoadModelsFromStore`(2026-08-20) |
 | `routing.aliases` | `router` 重新加载 |
 | `routing.catch_all` | 同上 |
 | `keypool.*` | `pool` 重新构建(部分) |

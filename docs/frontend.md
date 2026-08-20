@@ -32,6 +32,7 @@
 | `/routing` | `Routing.vue` | 路由配置(默认策略 / catch_all / 链) |
 | `/usage` | `Usage.vue` | 用量统计含 `/usage/by_model/:model_id/providers` |
 | `/access-logs` | `AccessLogs.vue` | 接入日志 + 详情 + 导出 JSONL + 故障排查 |
+| `/models` | `ModelManager.vue` | 模型管理(上游同步 + 手工定价,按 vendor 分组) |
 
 ---
 
@@ -84,6 +85,14 @@
 
 - 非流式:`JSON.parse(body)` 读 `usage` → 显示 cache_read / cache_creation / input / output
 - 流式:body 是 SSE 拼接 → parse 失败 → 显示空 → **改去 Usage 页**
+
+### 3.8 Models(模型管理)
+
+- 按 vendor 分组的模型清单(来源:DB `provider_models`)
+- 「上游同步」按钮:`POST /api/v1/providers/sync-models {vendor}` — 拉上游
+  `/models` 端点填模型 id(sort_order 保上游顺序,默认模型 = 上游首个)
+- 手工定价:`PUT /api/v1/providers/models` 三档每百万价格(input / cache_read / output)
+- 注意:同步只带 model id 不带价格,同步后价格需手工填;未定价模型 cost 记 0
 
 ### 3.7.2 Key 名字("key-1" / "weige")
 
@@ -141,5 +150,6 @@ npm run build            # 输出 dist/
 | Routing | `GET /api/v1/routing` `PUT /api/v1/routing` |
 | Usage | `GET /api/v1/usage` `GET /api/v1/usage/by_model/:model/providers` |
 | AccessLogs | `GET /api/v1/access-logs` `GET /api/v1/access-logs/:id/detail` `GET /api/v1/access-logs/export` |
+| Models | `GET /api/v1/providers/models` `POST /api/v1/providers/sync-models` `PUT /api/v1/providers/models` |
 
 详细 API 文档见 `docs/api.md` / `docs/http-api.md`(若存在)。
