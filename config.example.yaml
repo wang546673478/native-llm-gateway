@@ -108,71 +108,6 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-  # --- 智谱 GLM (OpenAI 兼容) ---
-  # 文档:https://docs.bigmodel.cn
-  # 价格(2026-08):glm-5.2 输入 ¥8/M、输出 ¥28/M、缓存命中 ¥2/M(每百万 token)
-  # 上下文:1M tokens,最大输出 128K tokens
-  # 注意:GLM Coding Plan 套餐需专属 Coding 端点,本块为标准 API 计费
-  glm:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://open.bigmodel.cn/api/paas/v4"
-    protocol: "openai"
-    timeout: 60s
-    # 官方无 /responses API,Codex 请求不会路由到本厂商
-    responses_api: false
-    keys: []  # P30: 用 DB(provider_api_keys)管,这里留空
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # --- 智谱 GLM (Anthropic 兼容,给 Claude Code / Anthropic SDK 用户) ---
-  # 文档:https://docs.bigmodel.cn/cn/guide/develop/claude/introduction
-  # 端点:POST https://open.bigmodel.cn/api/anthropic/v1/messages
-  # 鉴权:x-api-key: {ZHIPU_API_KEY} / anthropic-version: 2023-06-01
-  # 与 glm 共用同一组 Provider Key(同一 vendor,key 池共享)
-  glm-anthropic:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://open.bigmodel.cn/api/anthropic"
-    protocol: "anthropic"
-    timeout: 60s
-    keys: []  # 与 glm 共享同一组 Provider Key
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # --- 通义千问 Qwen (OpenAI 兼容模式,DashScope) ---
-  # 文档:https://help.aliyun.com/zh/model-studio/completions
-  # 端点:https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
-  qwen:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    protocol: "openai"
-    timeout: 60s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # --- MiniMax (稀宇科技,Anthropic 兼容) ---
-  # 文档:https://platform.minimaxi.com/docs/api-reference/api-overview
-  # Anthropic 兼容端点(推荐):POST https://api.minimaxi.com/anthropic/v1/messages
-  # 鉴权:Authorization: Bearer <API_KEY>
-  # 额外 header:anthropic-version(由 anthropic_compatible.Base 自动加)
-  # M3 专属参数:thinking / reasoning_split / service_tier 通过 extra_body 传
   minimax:
     enabled: true
     billing_source: "token_plan"   # 包月套餐,优先路由,quota 用完自动降级到 api 层
@@ -281,27 +216,6 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
-  # --- Google Gemini (Google 协议) ---
-  # 文档:https://ai.google.dev/gemini-api/docs/models
-  # 端点:POST {endpoint}/models/{model}:generateContent
-  # 鉴权:x-goog-api-key header
-  # Body:{contents:[{parts:[{text:"..."}], role:"user"}]}
-  # Usage 字段名:promptTokenCount / candidatesTokenCount / totalTokenCount
-  # 注意:gemini-2.0-flash / gemini-1.5-pro 已 shut down / deprecated
-  gemini:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://generativelanguage.googleapis.com/v1beta"
-    protocol: "google"
-    timeout: 60s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-
-# 路由规则 — 唯一规则:catch_all(无路由表,alias/chains 已退役)
 routing:
   # 自动模式(catch_all: {} 空规则):所有 enabled provider 自动参与,
   #   - 客户端发任何 model 名(gpt-5 / qwen-plus / 任意探测名)→ 一律走这条链,

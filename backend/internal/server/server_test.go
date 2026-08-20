@@ -19,10 +19,8 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	// P-provider-vendor: init() 注册 deepseek / deepseek-anthropic(vendor=deepseek)
+	// TestVendorHasBalancer 也用它作"有 balancer"的正例
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
-	// TestVendorHasBalancer 用:glm 有 balancer(官方 monitor 端点)、qwen 没有
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/glm"
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/qwen"
 )
 
 // fakeProvider 最小 Provider 实现 — Manager.SetForTesting 用
@@ -179,17 +177,16 @@ func TestWebStatic(t *testing.T) {
 	}
 }
 
-// TestVendorHasBalancer — 有余额查询 balancer 的 vendor(deepseek/glm)→
-// poll 模式;无 balancer 的(qwen)→ probe 模式,配额耗尽不永久标记
+// TestVendorHasBalancer — 有余额查询 balancer 的 vendor(deepseek)→ poll 模式;
+// 没注册 balancer 的 → probe 模式,配额耗尽不永久标记。
+// 反例原本用 qwen,该包已于 2026-08-20 下线(当前在册厂商 deepseek/minimax/mimo
+// 都注册了 balancer),故改用一个未注册的名字来验证"查不到时返回 false"。
 func TestVendorHasBalancer(t *testing.T) {
 	if !vendorHasBalancer("deepseek") {
 		t.Error("deepseek: want has-balancer=true (both faces register balancers)")
 	}
-	if !vendorHasBalancer("glm") {
-		t.Error("glm: want has-balancer=true (official monitor quota endpoint)")
-	}
-	if vendorHasBalancer("qwen") {
-		t.Error("qwen: want has-balancer=false (no balance API)")
+	if vendorHasBalancer("__no_such_vendor__") {
+		t.Error("未注册 vendor: want has-balancer=false")
 	}
 }
 

@@ -169,10 +169,9 @@ func RegisterDefaultProbers() {
 	openaiP := newModelsProberOpenAI()
 	RegisterProber("__openai__", openaiP)
 	RegisterProber("__anthropic__", newModelsProberAnthropic())
-	gp := newModelsProberGoogle()
-	RegisterProber("__google__", gp)   // C:google 协议族(供按协议引用)
-	RegisterProber("gemini", gp)       // C:gemini(google 协议)name-key 直注册,避免误路由 __openai__
-	RegisterProber("qwen", openaiP)    // C:qwen base 已带 /v1,openai prober 已按 /v1 容忍
+	// google 协议族默认 prober 保留:gemini 已于 2026-08-20 下线,当前无 google
+	// 协议 provider,但 provider/google 协议层仍在,后续接入同协议厂商即复用。
+	RegisterProber("__google__", newModelsProberGoogle())
 }
 
 // init 注册默认 Prober

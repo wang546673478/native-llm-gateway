@@ -8,7 +8,8 @@
 // ⚠️ 新增/重命名时须与 backend 同步:
 //   - billing_source → backend/internal/keypool/billingsource.go
 //   - key status     → backend/internal/keypool/key.go
-//   - quota_kind     → backend/internal/provider/{mimo,glm}/balancer.go
+//   - quota_kind     → backend/internal/provider/{deepseek,mimo,minimax}/balancer.go
+//     (glm 面已于 2026-08-20 随 gemini/qwen 一起下线)
 
 // BillingSource 计费来源枚举(值须与 backend keypool.BillingSource 一致)
 export const BILLING_SOURCE = {
