@@ -144,11 +144,11 @@ func toManagerConfig(cfg *config.Config) *provider.ManagerConfig {
 		for _, m := range p.Models {
 			models = append(models, m.ID)
 			// P37 + P40: 把 cost + cache pricing 转给 Manager
+			// 过渡期:新字段名但值仍是旧千价数值(不再换算),Task 7 会彻底删 config 价格字段
 			modelCosts[m.ID] = provider.ModelCost{
-				CostPer1kInput:         m.CostPer1kInput,
-				CostPer1kOutput:        m.CostPer1kOutput,
-				CostPer1kCacheRead:     m.CostPer1kCacheRead,
-				CostPer1kCacheCreation: m.CostPer1kCacheCreation,
+				CostPerMillionInput:     m.CostPer1kInput,
+				CostPerMillionCacheRead: m.CostPer1kCacheRead,
+				CostPerMillionOutput:    m.CostPer1kOutput,
 			}
 		}
 		mcfg.Providers[name] = provider.ManagerProviderConfig{

@@ -511,13 +511,9 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 		for _, m := range p.Models {
 			models = append(models, m.ID)
 			modelCosts[m.ID] = provider.ModelCost{
-				CostPer1kInput:         m.CostPer1kInput,
-				CostPer1kOutput:        m.CostPer1kOutput,
-				CostPer1kCacheRead:     m.CostPer1kCacheRead,
-				CostPer1kCacheCreation: m.CostPer1kCacheCreation,
-				// P-quota-512k: 长上下文悬崖字段透传
-				LongContextInputThreshold: m.LongContextInputThreshold,
-				LongContextMultiplier:     m.LongContextMultiplier,
+				CostPerMillionInput:     m.CostPer1kInput,
+				CostPerMillionCacheRead: m.CostPer1kCacheRead,
+				CostPerMillionOutput:    m.CostPer1kOutput,
 			}
 		}
 		mcfg.Providers[name] = provider.ManagerProviderConfig{

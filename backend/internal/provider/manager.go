@@ -47,22 +47,14 @@ type ManagerProviderConfig struct {
 }
 
 // ModelCost 单个 model 的定价
-// P40: 新增 cache pricing 字段 — 单位 CNY (¥) / 1k tokens
-//   - CostPer1kInput:         普通输入(没命中 cache)
-//   - CostPer1kOutput:        输出
-//   - CostPer1kCacheRead:     cache 命中(读)— 最便宜,DeepSeek v4-flash ¥0.02/M
-//   - CostPer1kCacheCreation: 写入 cache(创建新单元)— 中等,通常 = input * 1.25(Anthropic)
-//
-// P-quota-512k: 长上下文悬崖(MiniMax M3 官方规则 — 输入含缓存 > 阈值,
-// 输入/输出/缓存读取全项乘 multiplier;阈值 0 = 不启用)。单位:threshold = tokens,
-// multiplier = 倍率(如 512000 / 2)。
+// 三档每百万 token 定价,单位 CNY (¥) / 1M tokens:
+//   - CostPerMillionInput:     输入(未缓存)每百万 token
+//   - CostPerMillionCacheRead: 缓存命中输入每百万 token;无此概念 = 0
+//   - CostPerMillionOutput:    输出每百万 token
 type ModelCost struct {
-	CostPer1kInput            float64
-	CostPer1kOutput           float64
-	CostPer1kCacheRead        float64
-	CostPer1kCacheCreation    float64
-	LongContextInputThreshold int64
-	LongContextMultiplier     float64
+	CostPerMillionInput     float64
+	CostPerMillionCacheRead float64
+	CostPerMillionOutput    float64
 }
 
 // ManagerCircuitConfig Circuit Breaker 配置
