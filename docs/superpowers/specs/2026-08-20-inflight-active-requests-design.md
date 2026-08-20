@@ -123,3 +123,4 @@ func (r *Registry) Snapshot() []*Snapshot                 // 只读列表,按 St
 
 - 实时 output token(需碰 `doStream` 循环)→ 二期,旁路刷 `SetTokens`。
 - Redis 多实例 → 替换 `Registry` 实现即可。
+- **服务端推送(SSE/WebSocket)** → 二期。本版用 1s 轮询:对于「秒级才变一次的 active 请求列表」轮询已够用(省下的是最多 1s 延迟,无感);推送真正的价值在「毫秒级变化的实时 token」,届时在 `inflight.Snapshot()` 窄接口上叠加订阅/广播面即可,不需推翻本轮数据模型。结论:纯技术可行,但本版性价比不高,主动后置。
