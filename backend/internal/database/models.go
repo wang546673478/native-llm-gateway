@@ -17,7 +17,12 @@ type Provider struct {
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 
-	Models []ProviderModel `gorm:"foreignKey:Vendor;references:Name" json:"models,omitempty"`
+	// 2026-08-20 移除 Models 关联(原 `foreignKey:Vendor;references:Name`)。
+	// 它让 AutoMigrate 建 provider_models.vendor → providers.name 外键,而两者
+	// 不是同一命名空间:vendor 是厂商名(deepseek/minimax/mimo),providers.name
+	// 是注册面名(deepseek-anthropic / minimax-openai / mimo-token-plan…)。
+	// providers 表全程无人读写(0 行),外键一建即违反 → 启动崩溃循环。
+	// ProviderModel 按 vendor 独立存,不依赖本表。
 }
 
 // TableName 显式指定表名
@@ -34,6 +39,12 @@ type ProviderModel struct {
 	CostPerMillionInput     float64 `gorm:"column:cost_per_million_input;not null;default:0" json:"cost_per_million_input"`
 	CostPerMillionCacheRead float64 `gorm:"column:cost_per_million_cache_read;not null;default:0" json:"cost_per_million_cache_read"`
 	CostPerMillionOutput    float64 `gorm:"column:cost_per_million_output;not null;default:0" json:"cost_per_million_output"`
+	// SortOrder 上游 ListModels 返回该模型的下标(0 起)。
+	// 上游把旗舰/推荐款排在最前(minimax 首个是 MiniMax-M3、mimo 是 mimo-v2.5、
+	// deepseek 是 deepseek-v4-flash),与改动前各厂商的默认模型完全一致 ——
+	// 所以默认模型取 sort_order 最小者,而不是 model_id 字典序:字典序会把
+	// MiniMax-M3 排到 MiniMax-M2 之后,让主力模型静默降级(2026-08-20 根因)。
+	SortOrder int `gorm:"column:sort_order;not null;default:0" json:"sort_order"`
 	// 同步元数据
 	SyncedAt *time.Time `gorm:"column:synced_at" json:"synced_at"`
 	Source   string     `gorm:"column:source;not null;default:'manual'" json:"source"` // "upstream" | "manual"

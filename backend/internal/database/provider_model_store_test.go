@@ -27,12 +27,12 @@ func TestProviderModelStore_UpsertPreservesPricing(t *testing.T) {
 
 	// 先有一笔手工价
 	if err := db.Create(&ProviderModel{
-		Vendor:                 "deepseek",
-		ModelID:                "deepseek-chat",
-		CostPerMillionInput:    0.27,
+		Vendor:                  "deepseek",
+		ModelID:                 "deepseek-chat",
+		CostPerMillionInput:     0.27,
 		CostPerMillionCacheRead: 0.07,
-		CostPerMillionOutput:   1.10,
-		Source:                 "manual",
+		CostPerMillionOutput:    1.10,
+		Source:                  "manual",
 	}).Error; err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -188,5 +188,58 @@ func TestProviderModelStore_UpsertSkipsEmptyModelID(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ModelID != "deepseek-chat" {
 		t.Fatalf("expected only deepseek-chat, got %+v", got)
+	}
+}
+
+// TestProviderModelStore_PreservesUpstreamOrder 守卫 2026-08-20 根因:
+// 默认模型 = 每个 vendor 的首行,必须保持上游 ListModels 的返回顺序
+// (上游把旗舰款排最前),不能退回 model_id 字典序 —— 那会让 MiniMax-M3
+// 排到 MiniMax-M2 之后,catch_all 模式下主力模型静默降级为基础款。
+func TestProviderModelStore_PreservesUpstreamOrder(t *testing.T) {
+	ctx := context.Background()
+	db := newProviderModelTestDB(t)
+	store := NewProviderModelStore(db)
+
+	// 真实的 minimax /v1/models 返回顺序:M3 在最前,字典序则相反
+	upstream := []string{
+		"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed",
+		"MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2",
+	}
+	if err := store.UpsertModels(ctx, "minimax", upstream); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := store.ListByVendor(ctx, "minimax")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != len(upstream) {
+		t.Fatalf("got %d models, want %d", len(got), len(upstream))
+	}
+	for i, want := range upstream {
+		if got[i].ModelID != want {
+			t.Fatalf("第 %d 个 = %q, want %q(上游顺序被打乱了,默认模型会选错)",
+				i, got[i].ModelID, want)
+		}
+	}
+	// 首行即默认模型,必须是旗舰 M3 而不是字典序最小的 MiniMax-M2
+	if got[0].ModelID != "MiniMax-M3" {
+		t.Errorf("默认模型 = %q, want MiniMax-M3", got[0].ModelID)
+	}
+
+	// All() 同样要保序(manager.LoadModelsFromStore 取每 vendor 首行作默认)
+	all, err := store.All(ctx)
+	if err != nil {
+		t.Fatalf("all: %v", err)
+	}
+	var firstMinimax string
+	for _, m := range all {
+		if m.Vendor == "minimax" {
+			firstMinimax = m.ModelID
+			break
+		}
+	}
+	if firstMinimax != "MiniMax-M3" {
+		t.Errorf("All() 中 minimax 首行 = %q, want MiniMax-M3", firstMinimax)
 	}
 }
