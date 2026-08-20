@@ -260,16 +260,16 @@ const columns: DataTableColumns<ProviderKeyView> = [
 async function load() {
   loading.value = true
   try {
-    // P-provider-vendor: 厂商聚合列表来自共享 store → 按 vendor.names 展开,
-    // 循环拉每个注册名的 api-keys
-    // (同 vendor 的多注册名共享同一 key 池,列表天然按 provider_name 相邻)
+    // P-provider-vendor: key 存在 vendor 名下(provider_name = vendor),不是注册面名下。
+    // 同 vendor 多注册面共享同一 key 池 → 按 vendor 名查一次即可,展开注册面名逐个查
+    // 反而会漏(注册面名如 rightapi-codex ≠ vendor 名 rightapi,查不到 key)。
     await provStore.load()
     providers.value = provStore.vendors
-    const allNames = provStore.vendors.flatMap(v => v.names.map(n => n.name))
+    const vendors = provStore.vendors.map(v => v.vendor)
     const allKeys = await Promise.all(
-      allNames.map(async name => {
+      vendors.map(async vendor => {
         try {
-          const r = await api.providerKeys.list(name)
+          const r = await api.providerKeys.list(vendor)
           return r.keys || []
         } catch (e) {
           return []
