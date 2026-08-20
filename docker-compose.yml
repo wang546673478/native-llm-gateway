@@ -7,8 +7,6 @@
 #   1. 复制 config.docker.example.yaml 为 config.yaml(docker 专用模板,容器路径已配好)
 #      - 只改 database.dsn 的密码(见下)与 providers 段
 #   2. 修改下方 POSTGRES_PASSWORD(必须与 config.yaml dsn 里的密码一致)
-#   3. 有历史数据(sqlite)时先跑迁移脚本:go run ./backend/scripts/sqlite2pg ...
-#      (详见 README「从 SQLite 迁移到 PostgreSQL」)
 #   ⚠️ config.yaml 含真实凭据 — 别提交进 git(.gitignore 已排除)
 
 services:

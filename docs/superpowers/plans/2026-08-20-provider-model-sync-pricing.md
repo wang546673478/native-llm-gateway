@@ -849,7 +849,6 @@ Expected: 全绿。删接口方法/字段导致编译错误的 test 范围，审
 - `cmd/gateway/integration_test.go:290` — `Models: []string{"deepseek-chat"}`(构造 `provider.ProviderConfig`,Task 7 删 `ProviderConfig.Models` 字段);`New` 工厂返回的 Provider 需补 `ListModels`。
 
 **不受影响(不要误改):**
-- `database.ProviderModel`(同名不同 struct)及其 test(`scripts/sqlite2pg/main_test.go:81,194`)——**保留**。
 - `provider_test.go` 里 `ModelCost`/`ComputeCost` 已由 Task 2 重写,本 task 不动。
 - `admin_test.go` 的 `ds.Models`(:141-142)是 dashboard 结构体字段,与本次无关。
 - `quotacheck` 的 mock `fakeProviderLookup`(只实现 `EndpointFor`,不碰 `Models`/`ListModels`)——**不受影响**。

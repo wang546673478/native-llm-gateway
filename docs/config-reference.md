@@ -265,19 +265,7 @@ access_logs (ProviderKeyID / GatewayKeyID 都是字符串,无 FK)
   `ALTER TABLE ... DROP COLUMN / DROP CONSTRAINT`,否则生产库留下 NOT NULL 死列,
   轻则 INSERT 全炸、重则启动崩溃循环(踩坑 #23,2026-08-20 网关全挂实录)
 
-### 12.2 SQLite → PostgreSQL 迁移工具
-
-`backend/scripts/sqlite2pg` — 独立工具,详见 `backend/scripts/sqlite2pg/README.md`(若有)。
-
-```
-go run ./backend/scripts/sqlite2pg \
-  -src /tmp/gateway-data/gateway.db \
-  -dst "postgres://gateway:password@localhost:5432/gateway"
-```
-
-校验工具会逐表列集合 → COUNT → 逐行逐字段对比(2µs 容差)→ setval 抽查。
-
-### 12.3 key-state.json 快照
+### 12.2 key-state.json 快照
 
 优雅关停时写,启动时恢复。**SQLite 在 DSN 目录,PG 在 cwd**(系统服务下即仓库根)。
 

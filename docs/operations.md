@@ -256,17 +256,6 @@ ALTER TABLE <表> DROP CONSTRAINT <约束名>;
 「起不来」的形式暴露。`migrations/00X.up.sql` 机制已废弃(2026-08-20 决定:
 保持 AutoMigrate 现状,靠 CLAUDE.md 提交前自检清单补「减法无人负责」的缺口)。
 
-### 6.3 数据库切换
-
-```bash
-# SQLite → PostgreSQL
-go run ./backend/scripts/sqlite2pg \
-  -src /tmp/gateway-data/gateway.db \
-  -dst "postgres://gateway:password@localhost:5432/gateway"
-```
-
-(详细见 `docs/subsystems.md` §1 + `backend/scripts/sqlite2pg/README.md` 若存在)
-
 ---
 
 ## 7. 常见故障

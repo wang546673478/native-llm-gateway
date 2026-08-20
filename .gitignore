@@ -26,4 +26,3 @@ key-state.json.backup-*
 .vscode/
 *.swp
 logs/
-backend/sqlite2pg

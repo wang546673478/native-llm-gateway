@@ -190,14 +190,7 @@ cp config.docker.example.yaml config.yaml
 
 # 2. 改 docker-compose.yml 里 postgres 的 POSTGRES_PASSWORD(与 dsn 一致)
 
-# 3. (可选)有 SQLite 历史数据时先迁移(迁移后自动一致性校验,exit 0 + VERIFY OK 才算过):
-cd backend && go run ./scripts/sqlite2pg -src /tmp/gateway-data/gateway.db \
-  -dst "postgres://gateway:你的密码@localhost:5432/gateway"
-#   校验维度:逐表列集合 → COUNT → 逐行逐字段对比(时间 2µs 容差)→ setval 抽查;
-#   敏感字段(key_hash/cookie)差异只打码输出。事后复核用 -verify-only(只读不写)。
-#   也可构建成独立二进制常驻:go build -o ~/llm-gateway-data/tools/sqlite2pg ./scripts/sqlite2pg
-
-# 4. 启动
+# 3. 启动
 docker compose up -d
 # 前端 + API 都在 http://<host>:8080
 ```
