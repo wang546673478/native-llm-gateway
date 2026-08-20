@@ -22,6 +22,7 @@ import (
 
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
+	"github.com/wang546673478/native-llm-gateway/internal/inflight"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
@@ -39,7 +40,11 @@ type Engine struct {
 	tokenRecorder TokenUsageRecorder  // P13: TPM 计数回调(可选)
 	authn         *auth.Authenticator // P19: Provider binding 检查
 	accessLog     *accesslog.Recorder // P67: 接入日志 Recorder(可选,启用时为非 nil)
-	quotaChecker  QuotaChecker        // token_plan 降档的配额探测(nil 时跳过探测)
+	// inflight 活跃请求内存快照(nil = 不启用)。与 AccessLog 同构 —
+	// server 注入,proxy 只通过窄接口(Put/SetProvider/Delete)读写,
+	// 不 import inflight 包内部实现。为「实时正在跑的对话」视图供数。
+	inflight     *inflight.Registry
+	quotaChecker QuotaChecker // token_plan 降档的配额探测(nil 时跳过探测)
 	maxRetry      int
 	// writeTimeout 流式写 deadline 的续期预算(取 server.write_timeout)。
 	// http.Server.WriteTimeout 是「响应整体绝对上限」,流式场景下长生成会被
@@ -78,6 +83,8 @@ type Config struct {
 	TokenRecorder TokenUsageRecorder  // P13: 可选
 	Authenticator *auth.Authenticator // P19: 可选,绑定 Provider 检查
 	AccessLog     *accesslog.Recorder // P67: 可选,nil 表示未启用
+	// Inflight 活跃请求内存快照(可选);nil = 不启用。
+	Inflight *inflight.Registry
 	// QuotaChecker token_plan 降档的配额探测;nil = 不探测(直接当未耗尽)
 	// 由 server 注入 quotacheck.CheckQuota wrapper,proxy 不直接依赖 quotacheck 包
 	QuotaChecker QuotaChecker
@@ -122,6 +129,7 @@ func NewEngine(cfg Config) *Engine {
 		tokenRecorder: cfg.TokenRecorder,
 		authn:         cfg.Authenticator,
 		accessLog:     cfg.AccessLog,
+		inflight:      cfg.Inflight,
 		quotaChecker:  cfg.QuotaChecker,
 		maxRetry:      cfg.MaxRetry,
 		writeTimeout:  cfg.WriteTimeout,
@@ -198,6 +206,11 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		gatewayValidation bool // status=400 是 gateway 自己设的(model 缺失 / 字段类型错),不是 upstream 返的
 	)
 	defer func() {
+		// inflight 清理独立于 accesslog:即使 accesslog 关闭,活跃请求也要移除。
+		// (Put 与 Delete 配对,成功/失败/panic 都经此 defer 收尾,防泄漏)
+		if e.inflight != nil {
+			e.inflight.Delete(traceID)
+		}
 		if entry == nil || e.accessLog == nil {
 			return
 		}
@@ -316,6 +329,23 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	}
 	if entry != nil {
 		entry.Protocol = req.Headers.Get("anthropic-version") // best-effort
+	}
+
+	// Inflight:请求已确定 model/is_stream/gateway key,即将开始路由 —
+	// 写入活跃请求快照(provider 此刻未知,由 attemptOne 里的 SetProvider 补)。
+	if e.inflight != nil {
+		gk := e.gkCtx.Get(c)
+		gkName := ""
+		if gk != nil {
+			gkName = gk.Name
+		}
+		e.inflight.Put(&inflight.Snapshot{
+			TraceID:        traceID,
+			StartedAt:      time.Now().UTC(),
+			Model:          model,
+			GatewayKeyName: gkName,
+			IsStream:       isStream,
+		})
 	}
 
 	// 4. 路由(failover iterator) — P34: 把 GatewayKey 绑定的 ProviderKeyIDs 传给 Router
@@ -1281,6 +1311,9 @@ func (e *Engine) attemptOne(
 	pv, ok := e.router.Manager().Get(result.ProviderName)
 	if !ok {
 		*outProviderName = result.ProviderName
+		if e.inflight != nil {
+			e.inflight.SetProvider(req.TraceID, result.ProviderName)
+		}
 		*lastErr = &provider.ProviderError{
 			ProviderName: result.ProviderName,
 			ErrorType:    provider.ErrorTypeConnection,
@@ -1296,9 +1329,15 @@ func (e *Engine) attemptOne(
 		if ok {
 			e.recordUsageWithTokens(req, result, time.Since(start), ttftMs, http.StatusOK, entryErrorType(entry), true, streamUsage)
 			*outProviderName = result.ProviderName
+			if e.inflight != nil {
+				e.inflight.SetProvider(req.TraceID, result.ProviderName)
+			}
 			return true
 		}
 		*outProviderName = result.ProviderName
+		if e.inflight != nil {
+			e.inflight.SetProvider(req.TraceID, result.ProviderName)
+		}
 		*lastErr = perr
 	} else {
 		resp, perr := e.doRequest(ctx, pv, req, result)
@@ -1306,9 +1345,15 @@ func (e *Engine) attemptOne(
 		if perr == nil && resp != nil {
 			e.writeNonStreamResponse(c, req, resp, result, time.Since(start), entry)
 			*outProviderName = result.ProviderName
+			if e.inflight != nil {
+				e.inflight.SetProvider(req.TraceID, result.ProviderName)
+			}
 			return true
 		}
 		*outProviderName = result.ProviderName
+		if e.inflight != nil {
+			e.inflight.SetProvider(req.TraceID, result.ProviderName)
+		}
 		*lastErr = perr
 	}
 	// P-failover-log: 失败尝试打日志 — 之前 failover 中间尝试完全无日志
