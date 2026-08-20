@@ -68,6 +68,36 @@
 
 ---
 
+## 2026-08-21 — 模型「全部同步」+ sqlite2pg 下线 + key/模型丢失恢复实录
+
+### 新增
+
+- **模型「全部同步」**:新端点 `POST /api/v1/providers/sync-all-models`,动态算出所有
+  已注册 vendor 逐个上游同步,单个失败不中断(逐 vendor 返回结果 + failed 统计)。
+  前端 ModelManager 顶部加「全部同步」按钮——加新 provider 后一键补全所有厂商模型,
+  无需逐个点。
+- `provider.Manager.Vendors()` + `provider.SyncAllVendorModels()`(vendor 经 `VendorFor`
+  归位去重,复用既有 `SyncVendorModels` 的「只走 openai 面」逻辑)
+
+### 变更(清理)
+
+- **下线 `sqlite2pg` 迁移工具**(切库已完成):删除 `backend/scripts/sqlite2pg/{main.go,main_test.go}`
+  及编译二进制、清理 `.gitignore` / README / docker-compose / docs 里的迁移指引。
+
+### 修复(排障挖出)
+
+- **key 表被清空后网关「静默跑」**:`sqlite2pg --clean` 默认 TRUNCATE 生产表(`provider_api_keys/gateway_keys/
+  provider_models/usage_records/access_logs`),运行中网关靠内存 pool 无感知、重启后才现形。从 08-20 每日 pg_dump 恢复。
+- **`test` key 503 no_route**:gateway key 白名单 `allowed_models` 命中的模型(如 `MiniMax-M3`/`mimo-v2.5-pro`)
+  因 `provider_models` 被清缺失 → 白名单过滤后无候选 → no_route。全量同步补回 16 行模型后恢复 200。
+
+### 踩坑
+
+- **#24:catch_all 自动模式下「模型白名单」也是候选来源** —— 单厂模型缺失会让该 key 静默 no_route,
+  与「provider 有没有 key」是两回事,排障时先查 `provider_models` 是否还留着白名单纯命中项。
+
+---
+
 ## 2026-08-20 — 模型/定价进 DB + 三厂商下线 + 网关全挂排障实录
 
 ### 新增

@@ -396,6 +396,42 @@ func TestSyncProviderModels(t *testing.T) {
 	}
 }
 
+// TestSyncAllProviderModels P-model-sync:"全部同步"走 ModelSyncAll 闭包,返回逐 vendor 结果 + failed 统计,reload 被调用。
+func TestSyncAllProviderModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reloaded := false
+	syncAllFn := func(ctx context.Context) ([]provider.VendorSyncResult, error) {
+		return []provider.VendorSyncResult{
+			{Vendor: "deepseek", SyncedModels: 2},
+			{Vendor: "mimo", Error: "mimo list failed"},
+			{Vendor: "minimax", SyncedModels: 1},
+		}, nil
+	}
+	reloadFn := func() error { reloaded = true; return nil }
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/providers/sync-all-models", nil)
+	(&Admin{ModelSyncAll: syncAllFn, ModelReload: reloadFn}).syncAllProviderModels(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Total  int `json:"total"`
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != 3 || body.Failed != 1 {
+		t.Fatalf("total=%d failed=%d, want total=3 failed=1", body.Total, body.Failed)
+	}
+	if !reloaded {
+		t.Fatal("ModelReload not called after sync-all")
+	}
+}
+
 // TestSaveProviderModelPricing P-model-sync:save 调 store.SavePricing 且 reload 被调用。
 func TestSaveProviderModelPricing(t *testing.T) {
 	gin.SetMode(gin.TestMode)

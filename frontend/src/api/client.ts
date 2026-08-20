@@ -378,6 +378,13 @@ export const api = {
       client
         .post<{ vendor: string; synced_models: number }>('/providers/sync-models', { vendor })
         .then(r => r.data),
+    // P-model-sync-all: 同步所有 vendor(逐厂商结果,单个失败不影响其它)
+    syncAll: () =>
+      client
+        .post<{ results: Array<{ vendor: string; synced_models: number; error?: string }>; total: number; failed: number }>(
+          '/providers/sync-all-models',
+        )
+        .then(r => r.data),
     save: (body: {
       vendor: string
       model_id: string

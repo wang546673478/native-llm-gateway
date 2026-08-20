@@ -89,8 +89,10 @@
 ### 3.8 Models(模型管理)
 
 - 按 vendor 分组的模型清单(来源:DB `provider_models`)
-- 「上游同步」按钮:`POST /api/v1/providers/sync-models {vendor}` — 拉上游
+- 「上游同步」按钮(单厂商):`POST /api/v1/providers/sync-models {vendor}` — 拉上游
   `/models` 端点填模型 id(sort_order 保上游顺序,默认模型 = 上游首个)
+- 「全部同步」按钮(顶部,2026-08-21 加):`POST /api/v1/providers/sync-all-models`
+  — 动态算所有 vendor 逐个同步,单个失败不中断,最后汇总提示失败的 vendor
 - 手工定价:`PUT /api/v1/providers/models` 三档每百万价格(input / cache_read / output)
 - 注意:同步只带 model id 不带价格,同步后价格需手工填;未定价模型 cost 记 0
 
@@ -150,6 +152,6 @@ npm run build            # 输出 dist/
 | Routing | `GET /api/v1/routing` `PUT /api/v1/routing` |
 | Usage | `GET /api/v1/usage` `GET /api/v1/usage/by_model/:model/providers` |
 | AccessLogs | `GET /api/v1/access-logs` `GET /api/v1/access-logs/:id/detail` `GET /api/v1/access-logs/export` |
-| Models | `GET /api/v1/providers/models` `POST /api/v1/providers/sync-models` `PUT /api/v1/providers/models` |
+| Models | `GET /api/v1/providers/models` `POST /api/v1/providers/sync-models` `POST /api/v1/providers/sync-all-models` `PUT /api/v1/providers/models` |
 
 详细 API 文档见 `docs/api.md` / `docs/http-api.md`(若存在)。

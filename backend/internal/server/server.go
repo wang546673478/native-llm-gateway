@@ -892,6 +892,9 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		func(ctx context.Context, vendor string) ([]string, error) {
 			return provider.SyncVendorModels(ctx, s.manager, vendor, database.NewProviderModelStore(s.db))
 		},
+		func(ctx context.Context) ([]provider.VendorSyncResult, error) {
+			return provider.SyncAllVendorModels(ctx, s.manager, database.NewProviderModelStore(s.db))
+		},
 		func() error {
 			return s.manager.LoadModelsFromStore(context.Background(), s.modelStoreAdapter)
 		},

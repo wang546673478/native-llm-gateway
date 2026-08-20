@@ -70,6 +70,8 @@ type Admin struct {
 	ModelStore dbpkg.ProviderModelStore
 	// ModelSync 由 server 注入封装好 store+manager(vendor 名),触发上游模型同步落库。
 	ModelSync func(ctx context.Context, vendor string) ([]string, error)
+	// ModelSyncAll 同步所有 vendor,返回逐 vendor 结果(单个失败不影响其它,见 provider.SyncAllVendorModels)。
+	ModelSyncAll func(ctx context.Context) ([]provider.VendorSyncResult, error)
 	// ModelReload 同步/定价变更后热刷 manager 内存(可选 nil)。
 	ModelReload func() error
 }
@@ -106,6 +108,7 @@ func NewAdmin(
 	inflightSnapshot func() []*inflight.Snapshot, // 可 nil(inflight 查询不可用)
 	modelStore dbpkg.ProviderModelStore, // 可 nil(模型管理不可用)
 	modelSync func(ctx context.Context, vendor string) ([]string, error), // 可 nil(sync 不可用)
+	modelSyncAll func(ctx context.Context) ([]provider.VendorSyncResult, error), // 可 nil(sync-all 不可用)
 	modelReload func() error, // 可 nil(不热刷 manager)
 ) *Admin {
 	return &Admin{
@@ -129,6 +132,7 @@ func NewAdmin(
 		InflightSnapshot:    inflightSnapshot,
 		ModelStore:          modelStore,
 		ModelSync:           modelSync,
+		ModelSyncAll:        modelSyncAll,
 		ModelReload:         modelReload,
 	}
 }
@@ -151,6 +155,7 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	// 否则 "models" 会被 :name 吞掉(变成 getProvider 的 name)。
 	r.GET("/providers/models", a.listProviderModels)
 	r.POST("/providers/sync-models", a.syncProviderModels)
+	r.POST("/providers/sync-all-models", a.syncAllProviderModels)
 	r.PUT("/providers/models", a.saveProviderModelPricing)
 	r.GET("/providers/:name", a.getProvider)
 	// P-mimo-quota: MIMO 控制台 cookie 查询/更新(cookie 约 1 天过期,过期后
@@ -347,6 +352,30 @@ func (a *Admin) syncProviderModels(c *gin.Context) {
 		_ = a.ModelReload()
 	}
 	c.JSON(http.StatusOK, gin.H{"vendor": body.Vendor, "synced_models": len(ids)})
+}
+
+// syncAllProviderModels POST /api/v1/providers/sync-all-models — 同步所有 vendor 的上游模型。
+// 逐个 vendor 调 ModelSyncAll,单个失败不中断整体,逐 vendor 返回结果 + 失败数。
+func (a *Admin) syncAllProviderModels(c *gin.Context) {
+	if a.ModelSyncAll == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "sync_unavailable"})
+		return
+	}
+	results, err := a.ModelSyncAll(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if a.ModelReload != nil {
+		_ = a.ModelReload()
+	}
+	failed := 0
+	for _, r := range results {
+		if r.Error != "" {
+			failed++
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"results": results, "total": len(results), "failed": failed})
 }
 
 // saveProviderModelPricing PUT /api/v1/providers/models {vendor, model_id, cost_per_million_*}.

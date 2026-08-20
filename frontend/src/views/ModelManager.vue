@@ -3,9 +3,14 @@
     <n-space vertical size="large">
       <n-card title="模型管理">
         <template #header-extra>
-          <n-tag :type="totalModels > 0 ? 'success' : 'default'" size="small">
-            {{ totalModels }} 个模型
-          </n-tag>
+          <n-space>
+            <n-button size="small" type="primary" :loading="syncingAll" @click="onSyncAll">
+              全部同步
+            </n-button>
+            <n-tag :type="totalModels > 0 ? 'success' : 'default'" size="small">
+              {{ totalModels }} 个模型
+            </n-tag>
+          </n-space>
         </template>
         <template #default>
           每个厂商的上游模型与三档每百万 token 定价(单位:元/百万 token)。价格可直接编辑,blur 时保存;「同步」从上游拉取该厂商最新模型清单。
@@ -52,6 +57,7 @@ const message = useMessage()
 const vendors = ref<Record<string, ProviderModelRow[]>>({})
 const loading = ref(true)
 const syncingVendor = ref<string | null>(null)
+const syncingAll = ref(false)
 
 const totalModels = computed(() =>
   Object.values(vendors.value).reduce((acc, rows) => acc + rows.length, 0),
@@ -88,6 +94,25 @@ async function onSync(vendor: string) {
     message.error(`同步失败: ${vendor}`)
   } finally {
     syncingVendor.value = null
+  }
+}
+
+async function onSyncAll() {
+  syncingAll.value = true
+  try {
+    const r = await api.models.syncAll()
+    if (r.failed > 0) {
+      const failedVendors = r.results.filter((x) => x.error).map((x) => `${x.vendor}(${x.error})`)
+      message.warning(`同步完成: ${r.total} 个厂商, ${r.failed} 个失败 — ${failedVendors.join('; ')}`)
+    } else {
+      message.success(`同步完成: ${r.total} 个厂商全部成功`)
+    }
+    await load()
+  } catch (e) {
+    console.error('sync-all failed', e)
+    message.error('全部同步失败')
+  } finally {
+    syncingAll.value = false
   }
 }
 

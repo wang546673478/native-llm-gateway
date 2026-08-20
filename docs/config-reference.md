@@ -118,7 +118,8 @@ providers:
 > 定价的唯一真相源是 DB 表 `provider_models`(vendor 粒度)。模型 id 在前端「模型管理页」
 > 点「上游同步」从厂商 `/models` 端点拉取(sort_order 记上游顺序,默认模型 = sort_order
 > 最小者 = 上游首个,minimax 即 `MiniMax-M3`);价格在模型管理页手工填。
-> 相关端点:`GET /api/v1/providers/models` / `POST /api/v1/providers/sync-models` /
+> 相关端点:`GET /api/v1/providers/models` / `POST /api/v1/providers/sync-models`(单厂商)/
+> `POST /api/v1/providers/sync-all-models`(全部厂商,动态算 vendor,单个失败不中断)/
 > `PUT /api/v1/providers/models`。
 >
 > `billing_source` 决定 tier 层级(`token_plan` 套餐耗尽自动降档到 `api`);同一厂商的所有块保持一致(共享 pool 按 tier 桶)。
