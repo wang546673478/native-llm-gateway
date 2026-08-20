@@ -588,15 +588,12 @@ func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) err
 			CostPerMillionCacheRead: r.CostPerMillionCacheRead,
 			CostPerMillionOutput:    r.CostPerMillionOutput,
 		}
-		// pricing 键仍用 "<注册面名>:<model_id>" — 这里 vendor 存的是厂商名,
-		// CostFor(注册面, model) 查询时需按 VendorFor 归位(见 Step 3)。
-		// 为兼容现有 CostFor(provider:=注册面),这里把定价按 vendor 存,
-		// CostFor 内先 VendorFor(provider) → vendor 再查。
+		// pricing 键统一改为 "<vendor>:<model_id>"(不是注册面名)。
+		// 代价:CostFor(Step 3) 与 ModelsFor(Task 7) 都必须先用 VendorFor 归位再查。
 		m.pricing[pricingKey(r.Vendor, r.ModelID)] = c
 		if _, ok := first[r.Vendor]; !ok {
 			first[r.Vendor] = r.ModelID
 		}
-		byVendor[r.Vendor] = append(byVendor[r.Vendor], r.ModelID)
 	}
 	// 给每个启用 provider 的 defaultModel + 内存 model 集按 VendorFor 归位
 	for name := range m.providers {
@@ -612,7 +609,28 @@ func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) err
 
 - [ ] **Step 3: 调整 `CostFor` / `DefaultModelFor` 用 vendor 归位**
 
-`CostFor(provider, model)` 改为先 `v := m.VendorFor(provider)`,再查 `m.pricing[pricingKey(v, model)]`(因为 Step 2 的 pricing 键是 vendor)。其余调用方(`proxy.go:875`)传的是 `result.ProviderName`(注册面),`VendorFor` 会把它归到厂商,正确。
+`CostFor(provider, model)` 改为先 `v := m.VendorFor(provider)`,再查 `m.pricing[pricingKey(v, model)]`(因为 Step 2 的 pricing 键是 vendor):
+
+```go
+func (m *Manager) CostFor(provider, model string) ModelCost {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v := m.VendorFor(provider)
+	if c, ok := m.pricing[pricingKey(v, model)]; ok {
+		return c
+	}
+	return ModelCost{}
+}
+```
+
+其余调用方(`proxy.go:875`)传的是 `result.ProviderName`(注册面),`VendorFor` 会把它归到厂商,正确。
+
+> ⚠️ **键一致性硬约束(三处必须同时改,否则静默错误)**:
+> 1. `LoadModelsFromStore` 用 `pricingKey(r.Vendor, r.ModelID)` 存(Step 2);
+> 2. `CostFor` 用 `VendorFor(provider)` 后 `pricingKey(vendor, model)` 查(本 Step);
+> 3. `LoadFromConfig` 里原来的 `m.pricing[pricingKey(name, modelID)]`(name=注册面)整段删除,否则与 DB 源不一致残留;
+> 4. `ModelsFor`(Task 7)按 `pricingKey(vendor:model)` 前缀查。
+> 若任一漏改:`CostFor` 归位缺失 → 返回零价 → **计费全 0**;`ModelsFor` 前缀错 → **路由无候选 → 503**。此为"编译通过但运行错"的最高风险点,须写一条 `CostFor`(传注册面名→命中 vendor 价)的断言测试。
 
 - [ ] **Step 4: server 装配层加 store 适配 + 注入**
 
@@ -654,16 +672,21 @@ git commit -am "feat(provider): manager 改从 DB provider_models 读 models/pri
 ### Task 7: 删 config `models` 段 + 清理 `DefaultModels` 常量
 
 **Files:**
-- Modify: `backend/internal/config/config.go`(`Provider.Models` 字段 + `ProviderModel` struct;见 Notes 是否彻底删)
-- Modify: `backend/cmd/gateway/main.go`(`toManagerConfig`,删 Models/ModelCosts)
-- Modify: `backend/internal/server/server.go`(`toManagerConfigForReload`,删 Models/ModelCosts)
-- Modify: 6 厂商包(`deepseek`/`glm`/`mimo`/`minimax`/`qwen`/`gemini` 的 `var DefaultModels` + `Models()` fallback)
-- Modify: `config.yaml` / `config.example.yaml` / `config.docker.example.yaml`(删 `models` 段)
-- Test: 相关 test 调整
+- Modify: `backend/internal/config/config.go`(删 `Provider.Models` 字段 + `config.ProviderModel` struct)
+- Modify: `backend/cmd/gateway/main.go`(`toManagerConfig`,删 Models/ModelCosts 投影)
+- Modify: `backend/internal/server/server.go`(`toManagerConfigForReload`,删 Models/ModelCosts 投影)
+- Modify: `backend/internal/provider/lookup.go`(`ProviderLookup` 接口加 `ModelsFor`)
+- Modify: `backend/internal/provider/manager.go`(删 `ManagerProviderConfig.Models`/`ModelCosts` 字段、`LoadFromConfig`/`ReloadPricing` 里对它们的消费、加 `ModelsFor`)
+- Modify: `backend/internal/provider/provider.go`(删 `Provider` 接口的 `Models()` 方法)
+- Modify: 6 厂商包(`deepseek`/`glm`/`mimo`/`minimax`/`qwen`/`gemini` 的 `var DefaultModels` + `Models()` 实现)
+- Modify: `backend/internal/router/router.go`(3 处 `p.Models()` → `manager.ModelsFor`)
+- Modify: `backend/internal/api/http/handler/admin.go`(3 处 `p.Models()` → `manager.ModelsFor`)
+- Modify: `config.yaml` / `config.example.yaml` / `config.docker.example.yaml`(删每个 `providers.<name>.models` 段)
+- Test: 相关 test 同步删(见 Step 6)
 
 **Interfaces:**
-- Consumes: Task 6 的 DB 读路径已就绪。
-- Produces: config 不再有任何模型/价格字段;`Models()` 全部改为「从 manager 注入/或 return cfg.Models(已删)」。
+- Consumes: Task 6 的 DB 读路径 + `ModelsFor`(本 task Step 4)。
+- Produces: config 不再有任何模型/价格字段;`Provider` 接口删 `Models()`;`ProviderLookup` 接口新增 `ModelsFor`;`ManagerProviderConfig` 删 `Models`/`ModelCosts`。
 
 - [ ] **Step 1: 删 config struct 的 Models + ProviderModel**
 
@@ -673,23 +696,45 @@ git commit -am "feat(provider): manager 改从 DB provider_models 读 models/pri
 
 `toManagerConfig`/`toManagerConfigForReload` 里 `models := ...; modelCosts := ...; Models: models; ModelCosts: modelCosts` 全部删除,并对 `ManagerProviderConfig` struct(manager.go)删掉 `Models []string` 与 `ModelCosts map[string]ModelCost` 两字段(它们不再有来源)。
 
-- [ ] **Step 3: 删厂商包 DefaultModels + Models() fallback**
+- [ ] **Step 3: 删厂商包 `DefaultModels` 常量 + `Models()` 实现**
 
-6 个厂商包里 `var DefaultModels = []string{...}` 与 `Models()` 的 fallback 分支删除。`Models()` 现在语义是「返回该面承载的模型」——但既然 manager 从 DB 读,`Models()` 这个 Provider 接口方法本身是否需要保留?
+6 个厂商包里 `var DefaultModels = []string{...}` 常量整段删除,并删除该包 openai/anthropic 面的 `Models()` 方法实现。删除清单(逐文件):
 
-本计划决定:**保留 `Models()` 接口方法**,但让 wrapper 改为从「注入的模型集」返回,而非 cfg。最简做法:wrapper 里不再持模型表,`Models()` 改为返回空(或有意义的实现),而路由层的 `p.Models()` 调用点(Task 6 判定)改为向 manager 问。
+| 文件 | `DefaultModels` | `Models()` 方法 |
+|---|---|---|
+| `deepseek/deepseek.go` | `:49` | `:88`(`*Provider`) |
+| `deepseek/anthropic.go` | —(复用 deepseek.go 的) | `:69`(`*AnthropicProvider`) |
+| `glm/glm.go` | `:46` | `:83`(`*Provider`) |
+| `glm/anthropic.go` | — | `:62`(`*AnthropicProvider`) |
+| `mimo/mimo.go` | `:63` | `:110`(`*Provider`) |
+| `mimo/anthropic.go` | — | `:83`(`*AnthropicProvider`) |
+| `minimax/minimax.go` | `:44` | `:80`(`*Provider`) |
+| `minimax/openai.go` | — | `:74`(`*OpenAIProvider`) |
+| `qwen/qwen.go` | `:25` | `:65`(`*Provider`) |
+| `gemini/gemini.go` | `:33` | `:66`(`*Provider`) |
 
-> 关键:路由 `router.go` 里 `p.Models()` 有 3 处(`:180`、`:349`、`:407`)。它们真正要的是「这个面能跑的模型」。既然 manager 从 DB 读,最干净是给 `Manager` 加一个 `ModelsFor(name) []string`(从 DB modelSet/vendor 归位),然后 router 改用 `manager.ModelsFor` 替代 `p.Models()`。但要动 router。为控制本 plan 范围,**本例保留 `p.Models()`**,让 provider wrapper 通过「传入的 `cfg.Models`」仍有来源 —— 但 cfg.Models 已删。
+- [ ] **Step 4: 删 `Provider.Models()` 接口方法 + 迁移全部 7 个消费点**
 
-为消除这个矛盾,采用**最直接方案**(也是 spec §4.4 的意图):删掉接口方法 `Models()` 本身,把路由层的 3 处 `p.Models()` 改为 `r.manager.ModelsFor(name)`。这样彻底去掉「per-provider 模型」的过时通道,符合低耦合(模型集是 manager 的 DB 数据,不该散在各自 provider 里)。
+删除 `provider.Provider` 接口里的 `Models() []string` 方法(`provider.go:182`),并在 `manager.go` 加 `ModelsFor(name)`(见下)。
 
-- [ ] **Step 4: manager 加 `ModelsFor(name)` + 路由改用**
-
-`manager.go` 加:
+**先把 `ModelsFor` 加进 `ProviderLookup` 接口**(`lookup.go`),否则 router 的 `r.manager`(类型 `provider.ProviderLookup`)和 proxy 的 `e.router.Manager()` 都无法调用它:
 
 ```go
-// ModelsFor 返回某注册面的可用模型 id(db 按 vendor 归位)。
-// 未同步/无数据 → 空切片。
+// lookup.go 的 ProviderLookup 接口追加一行:
+	// ModelsFor 返回某注册面按 vendor 归位后的模型 id 列表(见 Manager.ModelsFor)。
+	ModelsFor(name string) []string
+```
+
+> ⚠️ 这个接口方法必须加,否则 `router.go` 三处的 `r.manager.ModelsFor(...)` 编译不过。proxy 侧没用 `ModelsFor`,但 `proxy_test` 里若 mock 了 `*Manager`,需确认 `Manager` 已实现该方法(它会实现,因为要满足 `ProviderLookup`)。
+
+`ModelsFor` 实现(语义 = 按 vendor 读 DB 清单,各协议面共享同一份):
+
+```go
+// ModelsFor 返回某注册面的可用模型 id。
+// 语义(方案 A):vendor 是模型归属的唯一维度 — 同一 vendor 下所有协议面
+// (openai/anthropic/token-plan...)共享同一份模型清单,天然等价于"每个面自己的清单"
+// (因为 DB 按 vendor 存、各面不单独声明)。经 VendorFor 归位后返回该 vendor 的清单。
+// 未同步/无数据 → 空切片。排序确定(按 model 名字典序)。
 func (m *Manager) ModelsFor(name string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -697,10 +742,12 @@ func (m *Manager) ModelsFor(name string) []string {
 	out := make([]string, 0)
 	seen := map[string]bool{}
 	for k := range m.pricing {
-		// pricingKey = vendor:model;拆出 vendor
-		if strings.HasPrefix(k, v+":") {
+		if strings.HasPrefix(k, v+":") { // pricingKey = vendor:model
 			model := strings.TrimPrefix(k, v+":")
-			if !seen[model] { seen[model] = true; out = append(out, model) }
+			if !seen[model] {
+				seen[model] = true
+				out = append(out, model)
+			}
 		}
 	}
 	sort.Strings(out)
@@ -708,13 +755,21 @@ func (m *Manager) ModelsFor(name string) []string {
 }
 ```
 
-(依托 Task 6 已把 pricing 按 vendor 存。)
+**关键约束(方案 A 的前提,必须写进 spec)**:同一 vendor 下所有协议面共享同一份模型清单。当前 config 里 minimax/mimo/deepseek/glm 各面本就声明同一批——迁移到 DB 按 vendor 存后,这一前提成立。若未来某厂商需要「openai 面和 anthropic 面支持不同模型」,需回到 per-注册面存储。**加一条断言测试**:构造 vendor=minimax 的 DB 行,断言 `ModelsFor("minimax")`、`ModelsFor("minimax-openai")` 返回同一清单。
 
-`router.go` 3 处:
-- `:180` `picked := pickAllowedModel(p.Models(), o.AllowedModels)` → `pickAllowedModel(r.manager.ModelsFor(name), o.AllowedModels)`
-- `:349`、`:407` 同类替换 `p.Models()` → `r.manager.ModelsFor(name)`(确认 `name`/`pv.Name()` 变量在作用域内)。
+**逐条替换全部 7 个消费点(一个不漏):**
 
-删除 `provider.Provider` 接口里的 `Models() []string` 方法,并删除 6 厂商包所有 `Models()` 实现与 `DefaultModels` 常量。
+| # | 文件:行 | 现状 | 改为 |
+|---|---|---|---|
+| 1 | `router.go:180`(热路径 `routeCatchAllAuto`) | `pickAllowedModel(p.Models(), o.AllowedModels)` | `pickAllowedModel(r.manager.ModelsFor(name), o.AllowedModels)` |
+| 2 | `router.go:349`(`routeDirectModelWithOpts`) | `for _, m := range p.Models()` | `for _, m := range r.manager.ModelsFor(name)` |
+| 3 | `router.go:407`(`filterCandidates`) | `pickAllowedModel(pv.Models(), o.AllowedModels)` | `pickAllowedModel(r.manager.ModelsFor(pv.Name()), o.AllowedModels)` |
+| 4 | `admin.go:191`(`listRegisteredProviders`) | `models = p.Models()` | `models = a.Manager.ModelsFor(name)` |
+| 5 | `admin.go:231`(`listProviders`) | `entry.Models = append(entry.Models, p.Models()...)` | `entry.Models = append(entry.Models, a.Manager.ModelsFor(name)...)` |
+| 6 | `admin.go:283`(`getProvider`) | `"models": p.Models()` | `"models": a.Manager.ModelsFor(name)` |
+| 7 | `manager.go:183`(`LoadFromConfig` 日志) | `zap.Int("models", len(p.Models()))` | 直接删除该日志字段(此处在 `m.mu` 锁内,`ModelsFor` 再取 RLock 会死锁)。改为 `zap.String("provider", name)` 不带 models 计数,或整行删除。 |
+
+> ⚠️ **死锁警告**:`LoadFromConfig` 全程持有 `m.mu.Lock()`。第 7 处若直接调用 `m.ModelsFor(name)`(它取 `m.mu.RLock()`)会造成**自己锁自己 → 死锁**。正确做法:第 7 处**直接删除该日志字段**,或改为不取锁的本地变量(如 `len(pcfg.Models)` 在 config 删除前已无意义 → 直接删掉整行日志,或改为 `zap.String("provider", name)` 不带 models 计数)。
 
 - [ ] **Step 5: 删三个 config 模板的 models 段**
 
@@ -723,12 +778,26 @@ func (m *Manager) ModelsFor(name string) []string {
 - [ ] **Step 6: 跑全量 + 修 test**
 
 Run: `cd /home/hhhh/llm-gateway && make test && make vet && make build`
-Expected: 全绿;删接口方法/字段导致的所有编译错误逐处修(尤其 manager_test.go / router_test.go 里的 `fakeProvider.Models()`、admin_test.go 的 fakeProvider)。
+Expected: 全绿。删接口方法/字段导致编译错误的 test 范围，审计结果如下（逐个修）:
+
+**必须改的 test(删 `Models()` 方法 / 删 `Models`/`ModelCosts` 字段):**
+- `internal/router/router_test.go` — 顶部的 `fakeProvider`(约 `:24` 有 `Models() []string` 方法)要删 `Models()` 方法;`:55`、`:91` 的 `Models: p.Models()`(填 `ManagerProviderConfig.Models`,字段已删);`:833-834` 的 `Models: []string{...}`。
+- `internal/provider/manager_test.go` — `:48` `Models: []string{"m1"}` 删除;fakeProvider 若有 `Models()` 也删。
+- `internal/proxy/proxy_test.go` — `:139`、`:502` 的 `Models: p.models`、`:1126-1127`、`:1284-1285` 的 `Models: [...]`;`proxy_test` 里的 `fakeProvider`/`Manager` mock 若实现 `Models()` 且现在 mock 的是 `ProviderLookup`,需改 mock 使其实现新的 `ModelsFor`(否则 `ProviderLookup` 接口断言失败)。
+- `internal/api/http/handler/admin_test.go` — `fakeProvider`(`:23-38` 里 `Models() []string`)删 `Models()` 方法。
+- `cmd/gateway/integration_test.go` — `:290` `Models: []string{"deepseek-chat"}`(构造 `provider.ProviderConfig`,删该字段)。
+
+**不受影响(不要误改):**
+- `database.ProviderModel`(同名不同 struct)及其 test(`scripts/sqlite2pg/main_test.go:81,194`)——**保留**。
+- `provider_test.go` 里 `ModelCost`/`ComputeCost` 的用例——Task 2 已经改过,本 task 不再动。
+- `admin_test.go` 的 `ds.Models`(:141-142)是 dashboard 结构体字段,与本次无关。
+
+**注意:`ProviderLookup` 接口加了 `ModelsFor`,任何在 test 里手写 mock 实现 `ProviderLookup` 的地方都要补 `ModelsFor` 方法,否则编译失败。** `grep -rn "ProviderLookup\|var _.*=.*Manager\|ModelsFor" --include="*_test.go"` 定位。
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git commit -am "refactor: 删 config models 段 + DefaultModels 常量,模型集改由 manager 从 DB 读"
+git commit -am "refactor: 删 config models 段 + DefaultModels 常量,模型集改由 manager.ModelsFor 从 DB 读"
 ```
 
 ---

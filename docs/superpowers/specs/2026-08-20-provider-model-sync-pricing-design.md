@@ -68,7 +68,9 @@ Gateway 当前的「厂商有哪些模型」由两层硬编码来源提供,都�
 | `synced_at` | time | 最近一次同步时间 |
 | `source` | string | `"upstream"`(同步)/ `"manual"`(手工录入);可选 |
 
-> **厂商 → 注册面的读取映射**:`manager` 读 DB 时,把 `vendor` 行的模型清单应用到该厂商的**所有注册面**(通过 `Registry.VendorFor` / manager 现有 `VendorFor(name)` 归位)。即 `Models(注册面)` / `CostFor(注册面, modelId)` 运行时按 `VendorFor(name) → vendor` 再查 DB。
+> **厂商 → 注册面的读取映射(方案 A 显式约束)**:同一 vendor 下所有协议面(openai/anthropic/token-plan 等)**共享同一份模型清单**——DB 只按 vendor 存一行,不按注册面冗余。`manager.ModelsFor(注册面)` / `CostFor(注册面, modelId)` 运行时先经 `VendorFor(name) → vendor` 归位,再查该 vendor 的清单。这天然等价于「每个面自己的清单」,前提是**同一 vendor 各面模型清单必须相同**——当前 minimax/mimo/deepseek/glm 各面本就声明同一批,故成立。若未来某厂商需「openai 面与 anthropic 面支持不同模型」,须回到 per-注册面存储(那是另一个设计,不在本 spec 范围内)。
+
+> **新接口方法 `ModelsFor(name) []string`** 是本次新增、会加进 `provider.ProviderLookup` 窄接口(否则 `router.manager`(接口类型)与 `proxy.Manager()` 无法调用)。它返回经 vendor 归位后的模型 id 列表,替代被删除的 `Provider.Models()`。
 
 删除的旧字段:`cost_per_1k_input` / `cost_per_1k_output` / `cost_per_1k_cache_read` / `cost_per_1k_cache_creation` / `long_context_input_threshold` / `long_context_multiplier`。
 
