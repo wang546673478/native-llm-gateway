@@ -161,6 +161,21 @@ export interface AccessLogStatsResp {
   active_keys: number
 }
 
+// P-inflight: 一条活跃请求的内存快照(与后端 inflight.Snapshot + listInflight 对齐)
+export interface InflightRequest {
+  trace_id: string
+  started_at: string
+  model: string
+  provider_name: string
+  gateway_key_name: string
+  is_stream: boolean
+  elapsed_ms: number
+}
+
+export interface InflightResp {
+  requests: InflightRequest[]
+}
+
 // AggregateResult P65: 通用聚合列(独立类型,只含聚合指标)
 //   - dashboard.total 用此类型(不含 provider/model)
 //   - 之前误用 AggregateRow 表达 total,本次拆分清楚
@@ -337,4 +352,6 @@ export const api = {
     set: (enabled: boolean) =>
       client.put<{ enabled: boolean }>('/fingerprint', { enabled }).then(r => r.data),
   },
+  // P-inflight: 实时活跃请求列表
+  inflight: () => client.get<InflightResp>('/inflight').then(r => r.data),
 }

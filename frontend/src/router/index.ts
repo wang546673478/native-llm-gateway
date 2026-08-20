@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/routing', component: () => import('../views/Routing.vue') },
     { path: '/usage', component: () => import('../views/Usage.vue') },
     { path: '/access-logs', name: 'access-logs', component: () => import('../views/AccessLogs.vue') },
+    { path: '/inflight', name: 'inflight', component: () => import('../views/Inflight.vue') },
   ],
 })
 

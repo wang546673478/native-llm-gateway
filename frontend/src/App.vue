@@ -56,6 +56,7 @@ const currentTitle = computed(() => {
     '/routing': '路由规则',
     '/usage': '用量',
     '/access-logs': 'Access Logs',
+    '/inflight': '活跃请求',
   }
   return map[route.path] ?? 'LLM Gateway'
 })
@@ -72,6 +73,7 @@ const menuOptions: MenuOption[] = [
   { key: '/routing', label: renderMenuLabel('/routing', '路由规则') },
   { key: '/usage', label: renderMenuLabel('/usage', '用量') },
   { key: '/access-logs', label: renderMenuLabel('/access-logs', '📋 Access Logs') },
+  { key: '/inflight', label: renderMenuLabel('/inflight', '⚡ 活跃请求') },
 ]
 
 function onMenuSelect(key: string) {
