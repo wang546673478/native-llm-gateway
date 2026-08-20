@@ -66,6 +66,7 @@
 | config 改了不改三个模板 | 必须同步改 config.yaml / example / docker |
 | 新 provider 忘了 blank import | `cmd/gateway/main.go` 加一行 |
 | 流式请求在详情页找 token | 去 Usage 页 |
+| 删结构体字段就当改完了 | 手工 DROP COLUMN(AutoMigrate 只加不删) |
 | SQLite 单写者扛高并发 | 生产用 PostgreSQL |
 
 ---
@@ -185,6 +186,7 @@ sudo systemctl start llm-gateway # systemd 托管
 - [ ] config 改了?三个模板都改了吗?
 - [ ] 新 provider 加了 blank import 吗?
 - [ ] 新字段有 GORM tag + migration 吗?
+- [ ] **删了 GORM 结构体字段/关联吗?→ 必须手工 `ALTER TABLE ... DROP COLUMN`** —— AutoMigrate 只加不删,留下的 NOT NULL 死列会让 INSERT 全炸(踩坑 #23)
 - [ ] `make test` 是绿的吗?
 - [ ] `make vet` 是绿的吗?
 
