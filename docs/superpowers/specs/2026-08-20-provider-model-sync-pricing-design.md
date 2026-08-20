@@ -161,6 +161,8 @@ cost = (promptTokens/1e6)*Input + (cacheReadTokens/1e6)*CacheRead + (completionT
 - 三档计价、每百万 token、无缓存概念填 0、未定价可用 —— 不动 `ComputeCost` 的调用方,只收敛内部字段与底数。
 - **价格不迁移**:config 旧 `cost_per_1k_*` 全部作废,由用户在新页面手工重录;不做任何「旧价自动带入」逻辑。
 - usage/accesslog 的 `Cost` 字段原样保留,不在本设计改动。
+- **历史 `usage_records.cost` 口径跳变(已确认接受)**:本设计把定价单位从「每千 token」改成「每百万 token」(定价数值也全部手工重填),新写入的 `cost` 与历史存量 `cost` 口径不同,`SUM(cost)` 聚合 / dashboard `TotalCost` 会有一段时间新旧混显。**不追平历史**——价格本就作废重填,历史只是"过去的价格记录"。这是已知、接受的行为变化。
+- **长上下文悬崖(MiniMax M3 >512k ×2)与缓存写入价计费行为消失**:`ComputeCost` 删除 `LongContext` 分支与 `CacheCreation` 计费后,这两类计费行为失效。这是 spec §2/§3「砍掉 MiniMax 特殊定价 + 舍缓存写入」的落实,已确认。
 
 ## 6. 边界与后续
 

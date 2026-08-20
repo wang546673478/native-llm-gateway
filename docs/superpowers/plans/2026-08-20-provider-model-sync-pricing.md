@@ -833,17 +833,26 @@ func (m *Manager) ModelsFor(name string) []string {
 Run: `cd /home/hhhh/llm-gateway && make test && make vet && make build`
 Expected: 全绿。删接口方法/字段导致编译错误的 test 范围，审计结果如下（逐个修）:
 
-**必须改的 test(删 `Models()` 方法 / 删 `Models`/`ModelCosts` 字段):**
-- `internal/router/router_test.go` — 顶部的 `fakeProvider`(约 `:24` 有 `Models() []string` 方法)要删 `Models()` 方法;`:55`、`:91` 的 `Models: p.Models()`(填 `ManagerProviderConfig.Models`,字段已删);`:833-834` 的 `Models: []string{...}`。
-- `internal/provider/manager_test.go` — `:48` `Models: []string{"m1"}` 删除;fakeProvider 若有 `Models()` 也删。
-- `internal/proxy/proxy_test.go` — `:139`、`:502` 的 `Models: p.models`、`:1126-1127`、`:1284-1285` 的 `Models: [...]`;`proxy_test` 里的 `fakeProvider`/`Manager` mock 若实现 `Models()` 且现在 mock 的是 `ProviderLookup`,需改 mock 使其实现新的 `ModelsFor`(否则 `ProviderLookup` 接口断言失败)。
-- `internal/api/http/handler/admin_test.go` — `fakeProvider`(`:23-38` 里 `Models() []string`)删 `Models()` 方法。
-- `cmd/gateway/integration_test.go` — `:290` `Models: []string{"deepseek-chat"}`(构造 `provider.ProviderConfig`,删该字段)。
+**必须改的 test(删 `Models()` 方法 / 删 `Models`/`ModelCosts` 字段 / 补 `ListModels`):**
+
+> 注意:Task 3(加 `ListModels`)就会让下面**所有 5 个 fakeProvider 因缺 `ListModels` 方法而编译失败**(需补方法);Task 7(删 `Models()`)再进一步删它们的方法。两个 task 都要处理 fake。
+
+**5 个各自独立的 `fakeProvider`(每包一份,补 `ListModels` + 删 `Models()`):**
+- `internal/proxy/proxy_test.go:30-124` — `fakeProvider`(`Models()` @ :55);`Models: p.models` @ :139/:502,`Models: [...]` @ :1126-1127/:1284-1285
+- `internal/router/router_test.go:16-33` — `fakeProvider`(`Models()` @ :24);`Models: p.Models()` @ :55/:91,`Models: [...]` @ :833-834
+- `internal/server/server_test.go:28-42` — `fakeProvider`(`Models()` @ :33)
+- `internal/api/http/handler/admin_test.go:21-38` — `fakeProvider`(`Models()` @ :29)
+- `internal/provider/manager_test.go:15-32` — `fakeProviderForEndpoint`(`Models()` @ :23);`Models: []string{"m1"}` @ :48
+
+**其它受影响 test:**
+- `internal/provider/provider_test.go:40-106` — `TestComputeCost` 用 `CostPer1k*`/`LongContext*` 字段,Task 2 整个重写(见 Task 2 Step 4)。
+- `cmd/gateway/integration_test.go:290` — `Models: []string{"deepseek-chat"}`(构造 `provider.ProviderConfig`,Task 7 删 `ProviderConfig.Models` 字段);`New` 工厂返回的 Provider 需补 `ListModels`。
 
 **不受影响(不要误改):**
 - `database.ProviderModel`(同名不同 struct)及其 test(`scripts/sqlite2pg/main_test.go:81,194`)——**保留**。
-- `provider_test.go` 里 `ModelCost`/`ComputeCost` 的用例——Task 2 已经改过,本 task 不再动。
+- `provider_test.go` 里 `ModelCost`/`ComputeCost` 已由 Task 2 重写,本 task 不动。
 - `admin_test.go` 的 `ds.Models`(:141-142)是 dashboard 结构体字段,与本次无关。
+- `quotacheck` 的 mock `fakeProviderLookup`(只实现 `EndpointFor`,不碰 `Models`/`ListModels`)——**不受影响**。
 
 **注意:`ProviderLookup` 接口加了 `ModelsFor`,任何在 test 里手写 mock 实现 `ProviderLookup` 的地方都要补 `ModelsFor` 方法,否则编译失败。** `grep -rn "ProviderLookup\|var _.*=.*Manager\|ModelsFor" --include="*_test.go"` 定位。
 
