@@ -38,6 +38,18 @@ type Config struct {
 	// (如 minimax-openai 的 https://api.minimaxi.com/v1)覆盖为 /responses。
 	// 不支持 Responses API 的 provider(ResponsesAPI=false)不会收到此类请求
 	ResponsesPath string
+	// ModelsPath 是模型列表端点的路径(GET,供 ListModels / HealthCheck 用)。
+	// 默认 /v1/models;endpoint 已含版本前缀的 provider(如 minimax-openai 的
+	// https://api.minimaxi.com/v1、mimo 的 .../v1、glm 的 .../paas/v4)必须
+	// 覆盖为 /models —— 否则拼出 /v1/v1/models 这类不存在的路径,上游回
+	// HTML 404 / 空 body,同步报出的却是 "decode models: invalid character '<'"
+	// 之类与真因无关的错(2026-08-20 根因)。与 ResponsesPath 同一套约定。
+	ModelsPath string
+	// BillingSource P47 计费面(token_plan / api / free),空 = 不限定。
+	// ListModels / HealthCheck 用它按面取 key:同 vendor 多个面共享 key 池,
+	// 但 key 与端点绑定(mimo 的 tp- key 只在 token-plan 端点有效,发到 api
+	// 端点必 401)。不限定就会走 TierOrder 拿到别的面的 key(2026-08-20 实测)。
+	BillingSource string
 	// ModelsOverride 若非空,覆盖 cfg.Models(用于 DeepSeek v4 时代)
 	ModelsOverride []string
 	// StreamUsage 控制是否在流式请求里加 stream_options.include_usage=true
@@ -67,6 +79,9 @@ func NewBase(cfg Config) *Base {
 	}
 	if cfg.ResponsesPath == "" {
 		cfg.ResponsesPath = "/v1/responses"
+	}
+	if cfg.ModelsPath == "" {
+		cfg.ModelsPath = "/v1/models"
 	}
 	// 默认开启 stream_options.include_usage:让流式响应最后一个 chunk 带 usage,
 	// Gateway 才能正确计费。OpenAI 兼容家族(DeepSeek/Qwen/Kimi/GLM)都支持。
@@ -360,12 +375,12 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	hctx, cancel := context.WithTimeout(ctx, hcTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(hctx, http.MethodGet,
-		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/models", nil)
+		strings.TrimRight(b.cfg.Endpoint, "/")+b.cfg.ModelsPath, nil)
 	if err != nil {
 		return err
 	}
 	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)); err == nil { // P-provider-vendor: 按本包协议过滤
+		if k, err := b.acquireOwnFaceKey(); err == nil { // P-provider-vendor: 按本面(协议+计费源)取 key
 			req.Header.Set("Authorization", "Bearer "+k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
 		}
@@ -382,15 +397,28 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// ListModels 调 GET {endpoint}/v1/models 拉上游模型 id 列表。
+// acquireOwnFaceKey 取一把「属于本面」的 key。
+// BillingSource 非空 → 只从该 tier 取;否则回退按协议取(TierOrder 顺序)。
+// 为什么不能一律用 AcquireForProtocol:同 vendor 的多个协议面共享 key 池,
+// 而 key 与端点是绑定的 —— mimo 的 tp- key 发到 api 端点、sk- key 发到
+// token-plan 端点都会 401(2026-08-20 实测 2×2 全矩阵)。
+func (b *Base) acquireOwnFaceKey() (*keypool.Key, error) {
+	proto := string(provider.ProtocolOpenAI)
+	if b.cfg.BillingSource != "" {
+		return b.cfg.Pool.AcquireFromTier(b.cfg.BillingSource, nil, proto)
+	}
+	return b.cfg.Pool.AcquireForProtocol(proto)
+}
+
+// ListModels 调 GET {endpoint}{ModelsPath} 拉上游模型 id 列表。
 func (b *Base) ListModels(ctx context.Context) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/models", nil)
+		strings.TrimRight(b.cfg.Endpoint, "/")+b.cfg.ModelsPath, nil)
 	if err != nil {
 		return nil, err
 	}
 	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)); err == nil {
+		if k, err := b.acquireOwnFaceKey(); err == nil {
 			req.Header.Set("Authorization", "Bearer "+k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
 		}
@@ -400,6 +428,13 @@ func (b *Base) ListModels(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// 先判状态码再解码:路径/鉴权错时上游回的是 HTML 404 或空 body,
+	// 直接解码会把真因(404)埋成 "decode models: invalid character '<'"。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		return nil, fmt.Errorf("list models: %s %s → status %d: %s",
+			req.Method, req.URL.Path, resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
 	var out struct {
 		Data []struct {
 			ID string `json:"id"`

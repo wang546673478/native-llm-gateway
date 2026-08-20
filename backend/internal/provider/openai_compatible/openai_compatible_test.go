@@ -606,3 +606,67 @@ func TestListModels(t *testing.T) {
 		t.Errorf("ListModels = %v, want [a b] (empty id filtered)", got)
 	}
 }
+
+// TestListModels_ModelsPathOverride 守卫 2026-08-20 根因:endpoint 已含版本前缀的
+// 厂商(minimax-openai / mimo / glm)必须用 ModelsPath 覆盖成 /models,否则拼出
+// /v1/v1/models 这类不存在的路径,上游回 HTML 404,同步报的却是
+// "decode models: invalid character '<'" —— 与真因完全无关,极难排查。
+func TestListModels_ModelsPathOverride(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Path != "/v1/models" { // 只认这一条,拼错就走 404 分支
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(404)
+			w.Write([]byte("<html>404 page not found</html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[{"id":"MiniMax-M3"}]}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	// 模拟 minimax-openai:endpoint 自带 /v1,ModelsPath 覆盖为 /models
+	b := NewBase(Config{
+		Name: "vendor-openai", Endpoint: upstream.URL + "/v1",
+		ModelsPath: "/models", Timeout: 5 * time.Second, Pool: pool,
+	})
+
+	got, err := b.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if gotPath != "/v1/models" {
+		t.Errorf("请求路径 = %q, want /v1/models(而不是双前缀 /v1/v1/models)", gotPath)
+	}
+	if len(got) != 1 || got[0] != "MiniMax-M3" {
+		t.Errorf("ListModels = %v, want [MiniMax-M3]", got)
+	}
+}
+
+// TestListModels_NonJSONBodyReportsStatus 守卫:上游回 HTML/空 body 时必须报出
+// 状态码和路径,而不是把真因埋进 "decode models: ..." 的 JSON 解析错里。
+func TestListModels_NonJSONBodyReportsStatus(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(404)
+		w.Write([]byte("<html>404 page not found</html>"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	_, err := b.ListModels(context.Background())
+	if err == nil {
+		t.Fatal("ListModels 应当报错")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("err = %v, want 含状态码 404", err)
+	}
+	if strings.Contains(err.Error(), "decode models") {
+		t.Errorf("err = %v, 不应把 404 埋成 decode 错", err)
+	}
+}

@@ -33,8 +33,9 @@ import (
 )
 
 const (
-	openaiName     = "minimax-openai"
-	openaiChatPath = "/chat/completions" // base 已含 /v1,不要再拼
+	openaiName       = "minimax-openai"
+	openaiChatPath   = "/chat/completions" // base 已含 /v1,不要再拼
+	openaiModelsPath = "/models"           // 同上:base 已含 /v1
 	// P-responses: endpoint 已含 /v1(https://api.minimaxi.com/v1)→ 透传 /responses
 	// 不拼 /v1,否则双前缀。MiniMax 官方原生支持 Responses API(Codex)
 	openaiResponsesPath = "/responses"
@@ -62,6 +63,8 @@ func NewOpenAI(cfg provider.ProviderConfig) (provider.Provider, error) {
 			Timeout:       cfg.Timeout,
 			ChatPath:      openaiChatPath,
 			ResponsesPath: openaiResponsesPath, // P-responses
+			ModelsPath:    openaiModelsPath,    // base 已含 /v1,不要再拼
+			BillingSource: cfg.BillingSource,   // 按本面计费源取 key
 			StreamUsage:   true,                // MiniMax 支持 stream_options.include_usage
 			Pool:          cfg.Pool,
 		}),

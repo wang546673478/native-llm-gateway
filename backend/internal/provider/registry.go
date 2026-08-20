@@ -29,6 +29,12 @@ type ProviderConfig struct {
 	// ForceThinkingDisabled P-deepseek-thinking: 上行前强制 thinking=disabled
 	// (DeepSeek /anthropic 在 thinking 模式下校验历史 thinking 块,compact 会触发 400)
 	ForceThinkingDisabled bool
+	// BillingSource P47 计费面(token_plan / api / free)。
+	// 用于「按面取 key」:同 vendor 的多个面共享一个 key 池,但 key 与端点是绑定的
+	// (mimo 实测:tp- key 只在 token-plan 端点有效、sk- key 只在 api 端点有效,
+	// 交叉调用一律 401)。ListModels/HealthCheck 必须按本面的计费源取 key,
+	// 不能用 AcquireForProtocol —— 它按 TierOrder 取,永远先给 token_plan 的 key。
+	BillingSource string
 }
 
 // RegisteredInfo 单个注册名的注册元数据(vendor 用于前端按厂商聚合)

@@ -133,6 +133,13 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			continue
 		}
 
+		// P47: 计费面 — 既登记到 m.billingSources,也透传进工厂配置
+		// (provider 层按面取 key 要用,见 ProviderConfig.BillingSource)
+		bs := pcfg.BillingSource
+		if bs == "" {
+			bs = "api"
+		}
+
 		factoryCfg := ProviderConfig{
 			Name:             name,
 			Endpoint:         pcfg.Endpoint,
@@ -144,13 +151,9 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			OpenTimeout:      pcfg.Circuit.OpenTimeout,
 			// P-deepseek-thinking: 透传到 provider 工厂(deepseek-anthropic 用)
 			ForceThinkingDisabled: pcfg.ForceThinkingDisabled,
+			BillingSource:         bs,
 		}
 
-		// P47: 填充 billing_source
-		bs := pcfg.BillingSource
-		if bs == "" {
-			bs = "api"
-		}
 		m.billingSources[name] = bs
 		// P-responses: Responses API 能力标记
 		m.responsesAPI[name] = pcfg.ResponsesAPI
@@ -330,7 +333,11 @@ func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 
 // LoadModelsFromStore 从 DB provider_models 读入 pricing 与 defaultModels。
 // pricing 键统一为 "<vendor>:<model_id>"(经 VendorFor 归位,不是注册面名);
-// defaultModels 取每个 vendor 的首个 model_id(All 已按 vendor/model_id 排序,确定性)。
+// defaultModels 取每个 vendor 的首个 model_id —— All 按 (vendor, sort_order) 排,
+// sort_order 是上游 ListModels 的返回下标,上游把旗舰款排最前(minimax=M3、
+// mimo=mimo-v2.5、deepseek=v4-flash),与改动前的默认模型一致。
+// 不能改回 model_id 字典序:那会把 MiniMax-M3 排到 MiniMax-M2 之后,
+// catch_all 模式下主力模型静默降级(2026-08-20 根因)。
 // 首次启动(server.New,LoadFromConfig 之后)与热重载(Reload)都走这里。
 // DB 为空时只打警告,不 panic —— 计费全 0、候选为空,等首次同步 Task 5 拉取填表。
 func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) error {
