@@ -37,6 +37,13 @@ type Admin struct {
 	Manager   *provider.Manager
 	Registry  *provider.Registry
 	Pools     map[string]*keypool.Pool
+	// PoolLookup 动态读最新 pool(由 server 注入 s.poolFor,带锁读最新 s.pools)。
+	// Pools 是启动时拍下的旧 map —— ReloadProviderPool 会用新 map 整体替换 s.pools,
+	// 但不回头更新 admin.Pools,导致「运行中加 key」的厂商在 /providers 显示陈旧零值。
+	// 优先用 PoolLookup(动态),nil 时退回 Pools(静态,测试/单测用)。
+	PoolLookup func(providerName string) (*keypool.Pool, bool)
+	// PoolsSnapshot 动态读全部最新 pools(同样由 server 注入,供 dashboard keypools)。
+	PoolsSnapshot func() map[string]*keypool.Pool
 	Router    *router.Router
 	Usage     *usage.Repository
 	Aliases   map[string]router.AliasConfig
@@ -135,6 +142,25 @@ func NewAdmin(
 		ModelSyncAll:        modelSyncAll,
 		ModelReload:         modelReload,
 	}
+}
+
+// pool 取注册面名对应的 pool。优先走动态 PoolLookup(读最新 s.pools),
+// nil 时退回静态 Pools(测试直接构造 Admin 时用)。
+func (a *Admin) pool(name string) (*keypool.Pool, bool) {
+	if a.PoolLookup != nil {
+		return a.PoolLookup(name)
+	}
+	p, ok := a.Pools[name]
+	return p, ok
+}
+
+// poolsSnapshot 取全部 pools(去重前后都是 map[注册面名]*Pool)。
+// 优先动态 PoolsSnapshot,nil 退回静态 Pools。
+func (a *Admin) poolsSnapshot() map[string]*keypool.Pool {
+	if a.PoolsSnapshot != nil {
+		return a.PoolsSnapshot()
+	}
+	return a.Pools
 }
 
 // GatewayKeyInfo 用于管理 API 返回的 Gateway Key 信息(不含密钥明文)
@@ -253,7 +279,7 @@ func (a *Admin) listProviders(c *gin.Context) {
 		}
 		entry.Names = append(entry.Names, gin.H{"name": name, "protocol": string(p.Protocol())})
 		entry.Models = append(entry.Models, a.Manager.ModelsFor(name)...)
-		if pool, ok := a.Pools[name]; ok && entry.KeyPool == nil {
+		if pool, ok := a.pool(name); ok && entry.KeyPool == nil {
 			st := pool.Status()
 			entry.KeyPool = &st
 		}
@@ -306,7 +332,7 @@ func (a *Admin) getProvider(c *gin.Context) {
 		"protocol": string(p.Protocol()),
 		"models":   a.Manager.ModelsFor(name),
 	}
-	if pool, ok := a.Pools[name]; ok {
+	if pool, ok := a.pool(name); ok {
 		info["key_pool"] = pool.Status()
 	}
 	c.JSON(http.StatusOK, info)
@@ -742,7 +768,7 @@ func (a *Admin) dashboard(c *gin.Context) {
 		"by_model":          rows, // P65: 重命名 by_provider_model → by_model
 		"by_billing_source": byBilling,
 		"providers_count":   len(a.Manager.GetAll()),
-		"keypools":          poolStatuses(a.Pools),
+		"keypools":          poolStatuses(a.poolsSnapshot()),
 	})
 }
 

@@ -301,6 +301,19 @@ func (s *Server) poolFor(providerName string) (*keypool.Pool, bool) {
 	return pool, ok
 }
 
+// poolSnapshot 返回全部最新 pools 的浅拷贝(供 admin 注入,读路加锁)。
+// 浅拷贝够用:map 里的 *keypool.Pool 是共享指针,读方只需「拿到最新 map 的键值快照」;
+// ReloadProviderPool 会整体替换 s.pools(而非就地改某条目),浅拷贝没有迭代中并发写风险。
+func (s *Server) poolSnapshot() map[string]*keypool.Pool {
+	s.poolsMu.RLock()
+	defer s.poolsMu.RUnlock()
+	out := make(map[string]*keypool.Pool, len(s.pools))
+	for k, v := range s.pools {
+		out[k] = v
+	}
+	return out
+}
+
 // buildKeyPools 为每个 enabled Provider 构造一个 KeyPool
 // P30:key 从 DB (provider_api_keys 表) 读,不用 config.yaml
 func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[string]*keypool.Pool {
@@ -899,6 +912,11 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 			return s.manager.LoadModelsFromStore(context.Background(), s.modelStoreAdapter)
 		},
 	)
+	// P-provider-vendor: 让 admin 动态读最新 pools —— ReloadProviderPool 会整体替换
+	// s.pools(新 map)但不动 NewAdmin 拍下的旧 map 引用,导致「运行中加 key」的厂商
+	// 在 /providers 显示陈旧零值。注入带锁读最新 s.pools 的闭包修正(见 poolFor/poolSnapshot)。
+	admin.PoolLookup = s.poolFor
+	admin.PoolsSnapshot = s.poolSnapshot
 	admin.Register(r.Group("/api/v1"))
 
 	// P16: Gateway Keys CRUD handler

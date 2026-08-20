@@ -222,6 +222,51 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  # --- Right Code (API 中转站, https://rightapi.ai/) ---
+  rightapi-codex:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://rightapi.ai/codex/v1"
+    protocol: "openai"
+    timeout: 60s
+    responses_api: true
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  rightapi-grok:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://rightapi.ai/grok/v1"
+    protocol: "openai"
+    timeout: 60s
+    responses_api: true
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  rightapi-claude:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://rightapi.ai/claude"
+    protocol: "anthropic"
+    timeout: 60s
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
 routing:
   # 自动模式(catch_all: {} 空规则):所有 enabled provider 自动参与,
   #   - 客户端发任何 model 名(gpt-5 / qwen-plus / 任意探测名)→ 一律走这条链,

@@ -17,4 +17,5 @@ import (
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/mimo"
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/rightapi"
 )
