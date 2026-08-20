@@ -139,25 +139,11 @@ func toManagerConfig(cfg *config.Config) *provider.ManagerConfig {
 	}
 	for name, p := range cfg.Providers {
 		proto, _ := provider.ParseProtocol(p.Protocol) // config.validate() 已确保合法
-		models := make([]string, 0, len(p.Models))
-		modelCosts := make(map[string]provider.ModelCost, len(p.Models))
-		for _, m := range p.Models {
-			models = append(models, m.ID)
-			// P37 + P40: 把 cost + cache pricing 转给 Manager
-			// 过渡期:新字段名但值仍是旧千价数值(不再换算),Task 7 会彻底删 config 价格字段
-			modelCosts[m.ID] = provider.ModelCost{
-				CostPerMillionInput:     m.CostPer1kInput,
-				CostPerMillionCacheRead: m.CostPer1kCacheRead,
-				CostPerMillionOutput:    m.CostPer1kOutput,
-			}
-		}
 		mcfg.Providers[name] = provider.ManagerProviderConfig{
-			Enabled:    p.Enabled,
-			Endpoint:   p.Endpoint,
-			Protocol:   proto,
-			Timeout:    p.Timeout,
-			Models:     models,
-			ModelCosts: modelCosts, // P37
+			Enabled:  p.Enabled,
+			Endpoint: p.Endpoint,
+			Protocol: proto,
+			Timeout:  p.Timeout,
 			// P47: 计费来源,默认 api(没标就当 api)
 			BillingSource: defaultStr(p.BillingSource, "api"),
 			// P-catch-all: 默认模型(catch_all 自动模式用)

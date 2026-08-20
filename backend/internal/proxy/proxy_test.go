@@ -52,7 +52,6 @@ type fakeProvider struct {
 
 func (p *fakeProvider) Name() string                { return p.name }
 func (p *fakeProvider) Protocol() provider.Protocol { return p.proto }
-func (p *fakeProvider) Models() []string            { return p.models }
 
 func (p *fakeProvider) recordCall(req *provider.Request) {
 	p.mu.Lock()
@@ -157,7 +156,7 @@ func buildEngine(t *testing.T, p *fakeProvider, aliases map[string]router.AliasC
 	mgr := provider.NewManager(reg, zap.NewNop())
 	mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
 		Providers: map[string]provider.ManagerProviderConfig{
-			p.Name(): {Enabled: true, Protocol: p.Protocol(), Models: p.models},
+			p.Name(): {Enabled: true, Protocol: p.Protocol()},
 		},
 	})
 
@@ -520,7 +519,7 @@ func buildEngineMulti(t *testing.T, providers []*fakeProvider, pools map[string]
 	cfg := provider.ManagerConfig{Providers: map[string]provider.ManagerProviderConfig{}}
 	for _, p := range providers {
 		cfg.Providers[p.Name()] = provider.ManagerProviderConfig{
-			Enabled: true, Protocol: p.Protocol(), Models: p.models,
+			Enabled: true, Protocol: p.Protocol(),
 		}
 	}
 	if err := mgr.LoadFromConfig(context.Background(), &cfg); err != nil {
@@ -1144,8 +1143,8 @@ func TestProxy_WhitelistSkipsCandidates(t *testing.T) {
 	mgr := provider.NewManager(reg, zap.NewNop())
 	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
 		Providers: map[string]provider.ManagerProviderConfig{
-			"pa": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-a"}},
-			"pb": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"model-b"}},
+			"pa": {Enabled: true, Protocol: provider.ProtocolOpenAI},
+			"pb": {Enabled: true, Protocol: provider.ProtocolOpenAI},
 		},
 	}); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)
@@ -1302,8 +1301,8 @@ func TestProxy_CatchAll_ModelNotFoundFailsOver(t *testing.T) {
 	}
 	mgr := provider.NewManager(reg, zap.NewNop())
 	provCfg := map[string]provider.ManagerProviderConfig{
-		"mimo-token-plan-anthropic": {Enabled: true, Protocol: strict.Protocol(), Models: strict.models},
-		"minimax":                   {Enabled: true, Protocol: lenient.Protocol(), Models: lenient.models},
+		"mimo-token-plan-anthropic": {Enabled: true, Protocol: strict.Protocol()},
+		"minimax":                   {Enabled: true, Protocol: lenient.Protocol()},
 	}
 	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{Providers: provCfg}); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)

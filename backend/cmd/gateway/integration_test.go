@@ -287,7 +287,6 @@ func mustNewDeepSeek(endpoint string, pool *keypool.Pool) provider.Provider {
 		Endpoint: endpoint,
 		Protocol: provider.ProtocolOpenAI,
 		Timeout:  5 * time.Second,
-		Models:   []string{"deepseek-chat"},
 		Pool:     pool,
 	}
 	p, err := provider.Default().Create("deepseek", cfg)

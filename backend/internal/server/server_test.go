@@ -30,7 +30,6 @@ type fakeProvider struct{ name string }
 
 func (f *fakeProvider) Name() string                { return f.name }
 func (f *fakeProvider) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
-func (f *fakeProvider) Models() []string            { return nil }
 func (f *fakeProvider) SendRequest(context.Context, *provider.Request) (*provider.Response, error) {
 	return nil, nil
 }

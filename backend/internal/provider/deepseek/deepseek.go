@@ -43,14 +43,6 @@ const (
 	ChatPath = "/chat/completions"
 )
 
-// 默认模型列表(2026-07 最新版)
-// 注:deepseek-chat / deepseek-reasoner 已于 2026/07/24 弃用,Gateway
-// 不再默认导出;老用户配置仍可用,但建议尽快迁移到 v4
-var DefaultModels = []string{
-	"deepseek-v4-flash",
-	"deepseek-v4-pro",
-}
-
 // Provider DeepSeek Provider
 type Provider struct {
 	base *openai_compatible.Base
@@ -83,14 +75,6 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 
 func (p *Provider) Name() string                { return name }
 func (p *Provider) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
-
-// Models 返回 cfg 里配置的模型;若为空,返回 DeepSeek v4 默认列表
-func (p *Provider) Models() []string {
-	if len(p.cfg.Models) > 0 {
-		return p.cfg.Models
-	}
-	return DefaultModels
-}
 
 func (p *Provider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)

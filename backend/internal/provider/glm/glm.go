@@ -41,13 +41,6 @@ const (
 	ChatPath = "/chat/completions"
 )
 
-// DefaultModels 默认模型列表(2026-08 官方在售文本模型)
-// glm-5.2 为旗舰(1M 上下文 / 128K 输出),其余按代际排序
-var DefaultModels = []string{
-	"glm-5.2",
-	"glm-4.6",
-}
-
 // Provider GLM Provider(仅 OpenAI 协议面)
 type Provider struct {
 	base *openai_compatible.Base
@@ -78,14 +71,6 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 
 func (p *Provider) Name() string                { return name }
 func (p *Provider) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
-
-// Models 返回 cfg 里配置的模型;若为空,返回 GLM 默认列表
-func (p *Provider) Models() []string {
-	if len(p.cfg.Models) > 0 {
-		return p.cfg.Models
-	}
-	return DefaultModels
-}
 
 func (p *Provider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)

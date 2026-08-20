@@ -166,7 +166,6 @@ func ComputeCost(c ModelCost, u *Usage) float64 {
 type Provider interface {
 	Name() string
 	Protocol() Protocol
-	Models() []string
 
 	// SetPool 注入 KeyPool(server 启动时 / ReloadProviderPool 热重载时调用)。
 	// 列进接口而非可选 type-assert:任何 Provider 实现都必须可注入 pool,

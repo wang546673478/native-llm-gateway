@@ -80,13 +80,6 @@ func newAnthropic(cfg provider.ProviderConfig, regName string) (provider.Provide
 func (p *AnthropicProvider) Name() string                { return anthropicName }
 func (p *AnthropicProvider) Protocol() provider.Protocol { return provider.ProtocolAnthropic }
 
-func (p *AnthropicProvider) Models() []string {
-	if len(p.cfg.Models) > 0 {
-		return p.cfg.Models
-	}
-	return DefaultModels // 与 openai 面共用(同包变量)
-}
-
 func (p *AnthropicProvider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)
 }

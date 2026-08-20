@@ -20,7 +20,6 @@ func (p *fakeProviderForEndpoint) Name() string { return p.name }
 func (p *fakeProviderForEndpoint) Protocol() Protocol {
 	return ProtocolOpenAI
 }
-func (p *fakeProviderForEndpoint) Models() []string { return []string{"m1"} }
 func (p *fakeProviderForEndpoint) SendRequest(ctx context.Context, req *Request) (*Response, error) {
 	return nil, nil
 }
@@ -48,7 +47,6 @@ func TestManager_EndpointFor(t *testing.T) {
 				Enabled:  true,
 				Endpoint: "https://fake.example/v1",
 				Protocol: ProtocolOpenAI,
-				Models:   []string{"m1"},
 			},
 		},
 	}
@@ -97,7 +95,6 @@ func TestManager_LoadModelsFromStore(t *testing.T) {
 				Enabled:  true,
 				Endpoint: "https://minimax.example/v1",
 				Protocol: ProtocolOpenAI,
-				Models:   []string{"MiniMax-M3"},
 			},
 		},
 	}
@@ -133,7 +130,7 @@ func TestManager_LoadModelsFromStore_Empty(t *testing.T) {
 	mgr := NewManager(reg, zap.NewNop())
 	cfg := &ManagerConfig{
 		Providers: map[string]ManagerProviderConfig{
-			"fake": {Enabled: true, Endpoint: "https://fake.example/v1", Protocol: ProtocolOpenAI, Models: []string{"m1"}},
+			"fake": {Enabled: true, Endpoint: "https://fake.example/v1", Protocol: ProtocolOpenAI},
 		},
 	}
 	if err := mgr.LoadFromConfig(context.Background(), cfg); err != nil {
@@ -148,4 +145,52 @@ func TestManager_LoadModelsFromStore_Empty(t *testing.T) {
 	if got := mgr.DefaultModelFor("fake"); got != "" {
 		t.Errorf("DefaultModelFor(fake) = %q, want empty", got)
 	}
+}
+
+// TestManager_ModelsFor_SharedAcrossProtocolFaces 方案 A 前提的守卫测试:同一 vendor
+// 下所有协议面共享同一份模型清单 — ModelsFor("minimax") 与 ModelsFor("minimax-openai")
+// 经 VendorFor 归到 vendor "minimax" 后返回同一清单(排序确定)。
+func TestManager_ModelsFor_SharedAcrossProtocolFaces(t *testing.T) {
+	reg := NewRegistry()
+	reg.RegisterWithProtocolVendor("minimax", func(cfg ProviderConfig) (Provider, error) {
+		return &fakeProviderForEndpoint{name: "minimax"}, nil
+	}, ProtocolAnthropic, "minimax")
+	reg.RegisterWithProtocolVendor("minimax-openai", func(cfg ProviderConfig) (Provider, error) {
+		return &fakeProviderForEndpoint{name: "minimax-openai"}, nil
+	}, ProtocolOpenAI, "minimax")
+	mgr := NewManager(reg, zap.NewNop())
+	cfg := &ManagerConfig{
+		Providers: map[string]ManagerProviderConfig{
+			"minimax":        {Enabled: true, Endpoint: "https://minimax.example/anthropic", Protocol: ProtocolAnthropic},
+			"minimax-openai": {Enabled: true, Endpoint: "https://minimax.example/v1", Protocol: ProtocolOpenAI},
+		},
+	}
+	if err := mgr.LoadFromConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("LoadFromConfig: %v", err)
+	}
+	// 喂 vendor=minimax 的 DB 行(两协议面共享同一 vendor)
+	_ = mgr.LoadModelsFromStore(context.Background(), fakeModelStore{rows: []DBModelRow{
+		{Vendor: "minimax", ModelID: "MiniMax-M3"},
+		{Vendor: "minimax", ModelID: "MiniMax-M2.5"},
+	}})
+
+	want := []string{"MiniMax-M2.5", "MiniMax-M3"} // 字典序
+	if got := mgr.ModelsFor("minimax"); !equalStrings(got, want) {
+		t.Errorf("ModelsFor(minimax) = %v, want %v", got, want)
+	}
+	if got := mgr.ModelsFor("minimax-openai"); !equalStrings(got, want) {
+		t.Errorf("ModelsFor(minimax-openai) = %v, want %v(与 minimax 面共享)", got, want)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -114,7 +114,6 @@ type Provider struct {
 	Endpoint       string            `mapstructure:"endpoint"`
 	Protocol       string            `mapstructure:"protocol"`
 	Timeout        time.Duration     `mapstructure:"timeout"`
-	Models         []ProviderModel   `mapstructure:"models"`
 	Keys           []ProviderKey     `mapstructure:"keys"`
 	CircuitBreaker CircuitBreakerCfg `mapstructure:"circuit_breaker"`
 	// DefaultModel P-catch-all: catch_all 自动模式(catch_all: {})下,
@@ -141,25 +140,6 @@ type Provider struct {
 	// 鉴权而非 API key。启动时注入 balancer;空 = balancer 停用(错误码驱动)。
 	// 敏感凭据:只放 gitignored 的本地 config.yaml,不放 config.example.yaml
 	QuotaCookie string `mapstructure:"quota_cookie"`
-}
-
-// ProviderModel Provider 模型声明
-// P40: 加 cache pricing 字段,支持 prefix caching 精细计费
-//   - CostPer1kCacheRead:     cache 命中(读)— DeepSeek ¥0.02-0.025/M 级别
-//   - CostPer1kCacheCreation: cache 写入(创建)— 比 input 略贵,Anthropic 1.25x input
-//
-// P-quota-512k: 长上下文悬崖(MiniMax M3 官方规则)
-//   - LongContextInputThreshold: 输入含缓存超过该 token 数时,全项乘 multiplier;0 = 不启用
-//   - LongContextMultiplier:     超阈值后的倍率(M3 = 2,官方永久规则)
-type ProviderModel struct {
-	ID                        string   `mapstructure:"id"`
-	Aliases                   []string `mapstructure:"aliases"`
-	CostPer1kInput            float64  `mapstructure:"cost_per_1k_input"`
-	CostPer1kOutput           float64  `mapstructure:"cost_per_1k_output"`
-	CostPer1kCacheRead        float64  `mapstructure:"cost_per_1k_cache_read"`
-	CostPer1kCacheCreation    float64  `mapstructure:"cost_per_1k_cache_creation"`
-	LongContextInputThreshold int64    `mapstructure:"long_context_input_threshold"`
-	LongContextMultiplier     float64  `mapstructure:"long_context_multiplier"`
 }
 
 // ProviderKey Provider 的 API Key

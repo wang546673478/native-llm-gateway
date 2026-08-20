@@ -5,6 +5,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,15 +31,11 @@ type ManagerProviderConfig struct {
 	Endpoint string
 	Protocol Protocol
 	Timeout  time.Duration
-	Models   []string
 	Circuit  ManagerCircuitConfig
-	// P37: 模型定价表(对应 config.yaml 中 providers.<name>.models[].cost_per_1k_input/output)
-	// 索引:model id → (cost_per_1k_input, cost_per_1k_output),单位 USD
-	ModelCosts map[string]ModelCost
 	// P47: 计费来源 — token_plan / api / free
 	BillingSource string
 	// P-catch-all: catch_all 自动模式下该 provider 承接未知模型名的默认模型。
-	// 空 = 取 Models 第一个
+	// 空 = 取 DB provider_models 该 vendor 的首个模型(LoadModelsFromStore 填充)。
 	DefaultModel string
 	// P-responses: 原生支持 OpenAI Responses API(/v1/responses 透传)
 	ResponsesAPI bool
@@ -143,7 +141,6 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			Endpoint:         pcfg.Endpoint,
 			Protocol:         pcfg.Protocol,
 			Timeout:          resolveProviderTimeout(pcfg.Timeout, cfg.DefaultTimeout),
-			Models:           pcfg.Models,
 			Pool:             cfg.Pools[name],
 			FailureThreshold: pcfg.Circuit.FailureThreshold,
 			FailureWindow:    pcfg.Circuit.FailureWindow,
@@ -180,8 +177,7 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 		} else {
 			m.logger.Info("provider loaded",
 				zap.String("provider", name),
-				zap.String("protocol", string(p.Protocol())),
-				zap.Int("models", len(p.Models())))
+				zap.String("protocol", string(p.Protocol())))
 		}
 		cancel()
 
@@ -270,6 +266,30 @@ func (m *Manager) BillingSourceFor(provider string) string {
 // vendor 未声明时 registry 返回 name 本身(单协议厂商,天然一致)。
 func (m *Manager) VendorFor(name string) string {
 	return m.registry.VendorFor(name)
+}
+
+// ModelsFor 返回某注册面的可用模型 id。
+// 语义(方案 A):vendor 是模型归属的唯一维度 — 同一 vendor 下所有协议面
+// (openai/anthropic/token-plan...)共享同一份模型清单,天然等价于"每个面自己的清单"
+// (因为 DB 按 vendor 存、各面不单独声明)。经 VendorFor 归位后返回该 vendor 的清单。
+// 未同步/无数据 → 空切片。排序确定(按 model 名字典序)。
+func (m *Manager) ModelsFor(name string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v := m.VendorFor(name)
+	out := make([]string, 0)
+	seen := map[string]bool{}
+	for k := range m.pricing {
+		if strings.HasPrefix(k, v+":") { // pricingKey = vendor:model
+			model := strings.TrimPrefix(k, v+":")
+			if !seen[model] {
+				seen[model] = true
+				out = append(out, model)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // pricingKey 内部 hash key

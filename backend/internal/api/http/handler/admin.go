@@ -187,8 +187,8 @@ func (a *Admin) listRegisteredProviders(c *gin.Context) {
 		}
 		// P27: 也带上 models,前端可用来做"允许模型"下拉
 		models := []string{}
-		if p, ok := loaded[name]; ok {
-			models = p.Models()
+		if _, ok := loaded[name]; ok {
+			models = a.Manager.ModelsFor(name)
 		}
 		out = append(out, gin.H{
 			"name":     name,
@@ -228,7 +228,7 @@ func (a *Admin) listProviders(c *gin.Context) {
 			order = append(order, v)
 		}
 		entry.Names = append(entry.Names, gin.H{"name": name, "protocol": string(p.Protocol())})
-		entry.Models = append(entry.Models, p.Models()...)
+		entry.Models = append(entry.Models, a.Manager.ModelsFor(name)...)
 		if pool, ok := a.Pools[name]; ok && entry.KeyPool == nil {
 			st := pool.Status()
 			entry.KeyPool = &st
@@ -280,7 +280,7 @@ func (a *Admin) getProvider(c *gin.Context) {
 	info := gin.H{
 		"name":     name,
 		"protocol": string(p.Protocol()),
-		"models":   p.Models(),
+		"models":   a.Manager.ModelsFor(name),
 	}
 	if pool, ok := a.Pools[name]; ok {
 		info["key_pool"] = pool.Status()

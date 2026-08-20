@@ -19,9 +19,8 @@ type fakeModelsProvider struct {
 	listErr  error
 }
 
-func (p *fakeModelsProvider) Name() string     { return p.name }
+func (p *fakeModelsProvider) Name() string       { return p.name }
 func (p *fakeModelsProvider) Protocol() Protocol { return p.protocol }
-func (p *fakeModelsProvider) Models() []string { return p.models }
 func (p *fakeModelsProvider) SendRequest(ctx context.Context, req *Request) (*Response, error) {
 	return nil, nil
 }

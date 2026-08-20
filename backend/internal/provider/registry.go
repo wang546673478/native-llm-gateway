@@ -22,7 +22,6 @@ type ProviderConfig struct {
 	Endpoint         string
 	Protocol         Protocol
 	Timeout          time.Duration
-	Models           []string
 	Pool             *keypool.Pool // 具体类型 — provider 已 import keypool(SetPool 用),原 interface{} "避免循环" 注释已过时
 	FailureThreshold int
 	FailureWindow    time.Duration

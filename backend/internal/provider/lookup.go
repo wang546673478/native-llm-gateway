@@ -24,4 +24,6 @@ type ProviderLookup interface {
 	// VendorFor 查注册名的厂商(vendor)。路由 Level 2 排序的改写键是厂商名
 	// (route_order provider 作用域),而候选是注册面名,需归 vendor 再查改写。
 	VendorFor(name string) string
+	// ModelsFor 返回某注册面按 vendor 归位后的模型 id 列表(见 Manager.ModelsFor)。
+	ModelsFor(name string) []string
 }

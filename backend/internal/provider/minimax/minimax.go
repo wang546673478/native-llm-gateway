@@ -39,19 +39,6 @@ const (
 	ChatPath        = "/v1/messages"
 )
 
-// DefaultModels MiniMax 当前可用模型(2026-07)
-// 完整列表见 https://platform.minimaxi.com/docs/api-reference/api-overview
-var DefaultModels = []string{
-	"MiniMax-M3",             // 1M tokens,旗舰
-	"MiniMax-M2.7",           // 204,800
-	"MiniMax-M2.7-highspeed", // 204,800,更便宜更快
-	"MiniMax-M2.5",           // 204,800
-	"MiniMax-M2.5-highspeed", // 204,800
-	"MiniMax-M2.1",           // 204,800(早期稳定版)
-	"MiniMax-M2.1-highspeed",
-	"MiniMax-M2", // 204,800(基础)
-}
-
 type Provider struct {
 	base *anthropic_compatible.Base
 	cfg  provider.ProviderConfig
@@ -77,7 +64,6 @@ func New(cfg provider.ProviderConfig) (provider.Provider, error) {
 
 func (p *Provider) Name() string                { return name }
 func (p *Provider) Protocol() provider.Protocol { return provider.ProtocolAnthropic }
-func (p *Provider) Models() []string            { return p.cfg.Models }
 func (p *Provider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)
 }

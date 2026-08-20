@@ -80,21 +80,6 @@ providers:
     timeout: 60s
     # 原生支持 OpenAI Responses API(Codex 透传)
     responses_api: true
-    models:
-      # v4-flash: 官方价(元/百万 tokens,按@高峰时段)——未命中 3.0、命中 0.10、输出 9.0
-      - id: "deepseek-v4-flash"
-        aliases: ["coding-model", "chat-model"]
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.009
-        cost_per_1k_cache_read: 0.0001
-        cost_per_1k_cache_creation: 0.0
-      # v4-pro: 官方价(元/百万 tokens,按@高峰时段)——未命中 9.0、命中 0.30、输出 27.0,支持 thinking
-      - id: "deepseek-v4-pro"
-        aliases: ["pro-model"]
-        cost_per_1k_input: 0.009
-        cost_per_1k_output: 0.027
-        cost_per_1k_cache_read: 0.0003
-        cost_per_1k_cache_creation: 0.0
     # P41 DeepSeek 支持的 API 特性(都通过 body 透传,Gateway 不需特殊处理):
     #   - Thinking 模式:extra_body={"thinking":{"type":"enabled"}}(v4-pro)
     #   - Tool use / function calling:OpenAI 标准 tools 数组
@@ -121,19 +106,6 @@ providers:
     endpoint: "https://api.deepseek.com/anthropic"
     protocol: "anthropic"
     timeout: 90s
-    models:
-      - id: "deepseek-v4-flash"
-        aliases: []
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.009
-        cost_per_1k_cache_read: 0.0001
-        cost_per_1k_cache_creation: 0.0
-      - id: "deepseek-v4-pro"
-        aliases: []
-        cost_per_1k_input: 0.009
-        cost_per_1k_output: 0.027
-        cost_per_1k_cache_read: 0.0003
-        cost_per_1k_cache_creation: 0.0
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -155,18 +127,6 @@ providers:
     timeout: 60s
     # 官方无 /responses API,Codex 请求不会路由到本厂商
     responses_api: false
-    models:
-      # glm-5.2:旗舰,1M 上下文/128K 输出;支持思考模式(thinking + reasoning_effort,
-      # 默认 max),响应带 reasoning_content;上下文缓存自动生效
-      # 价格按 ¥/1k:输入 0.008、输出 0.028、缓存命中 0.002
-      - id: "glm-5.2"
-        aliases: []
-        cost_per_1k_input: 0.008
-        cost_per_1k_output: 0.028
-        cost_per_1k_cache_read: 0.002
-        cost_per_1k_cache_creation: 0.0
-      # 其余在售文本模型(glm-5.1 / glm-5 / glm-5-turbo / glm-4.7 / glm-4.6 / glm-4.5)
-      # 按官方价格页 https://bigmodel.cn/pricing 补价格后加入列表
     keys: []  # P30: 用 DB(provider_api_keys)管,这里留空
     circuit_breaker:
       failure_threshold: 5
@@ -187,13 +147,6 @@ providers:
     endpoint: "https://open.bigmodel.cn/api/anthropic"
     protocol: "anthropic"
     timeout: 60s
-    models:
-      - id: "glm-5.2"
-        aliases: []
-        cost_per_1k_input: 0.008
-        cost_per_1k_output: 0.028
-        cost_per_1k_cache_read: 0.002
-        cost_per_1k_cache_creation: 0.0
     keys: []  # 与 glm 共享同一组 Provider Key
     circuit_breaker:
       failure_threshold: 5
@@ -212,35 +165,6 @@ providers:
     endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     protocol: "openai"
     timeout: 60s
-    models:
-      - id: "qwen-plus"             # 商用主力
-        aliases: []
-        cost_per_1k_input: 0.0058
-        cost_per_1k_output: 0.0144
-      - id: "qwen-turbo"            # 更快更便宜
-        aliases: []
-        cost_per_1k_input: 0.00216
-        cost_per_1k_output: 0.0043
-      - id: "qwen-max"              # 旗舰
-        aliases: []
-        cost_per_1k_input: 0.144
-        cost_per_1k_output: 0.432
-      - id: "qwen-coder-plus"       # 代码
-        aliases: ["qwen-coder"]
-        cost_per_1k_input: 0.0252
-        cost_per_1k_output: 0.0504
-      - id: "qwen-long"             # 长上下文(1M tokens)
-        aliases: []
-        cost_per_1k_input: 0.0036
-        cost_per_1k_output: 0.0144
-      - id: "qwen-vl-max"           # 多模态视觉
-        aliases: []
-        cost_per_1k_input: 0.0216
-        cost_per_1k_output: 0.0648
-      - id: "qwen3-235b-a22b"       # Qwen3 旗舰 MoE
-        aliases: []
-        cost_per_1k_input: 0.0288
-        cost_per_1k_output: 0.0864
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -261,58 +185,6 @@ providers:
     endpoint: "https://api.minimaxi.com/anthropic"
     protocol: "anthropic"
     timeout: 30s
-    models:
-      - id: "MiniMax-M3"              # 1M tokens,旗舰
-        aliases: ["MiniMax"]
-        cost_per_1k_input: 0.0021
-        cost_per_1k_output: 0.0084
-        # P-provider-vendor: 缓存价(文档 2026-08-04)— M3 仅自动缓存(读 0.42 元/M),无主动缓存
-        cost_per_1k_cache_read: 0.00042
-        # P-quota-512k: 官方悬崖 — 输入含缓存 > 512k 时输入/输出/缓存全项 ×2(永久五折后价)
-        long_context_input_threshold: 512000
-        long_context_multiplier: 2
-      - id: "MiniMax-M2.7"            # 204,800
-        aliases: []
-        cost_per_1k_input: 0.0021
-        cost_per_1k_output: 0.0084
-        cost_per_1k_cache_read: 0.00042
-        cost_per_1k_cache_creation: 0.002625
-      - id: "MiniMax-M2.7-highspeed"  # 204,800,更快
-        aliases: []
-        cost_per_1k_input: 0.0042
-        cost_per_1k_output: 0.0168
-        cost_per_1k_cache_read: 0.00042
-        cost_per_1k_cache_creation: 0.002625
-      - id: "MiniMax-M2.5"            # 204,800
-        aliases: []
-        cost_per_1k_input: 0.0021
-        cost_per_1k_output: 0.0084
-        cost_per_1k_cache_read: 0.00021
-        cost_per_1k_cache_creation: 0.002625
-      - id: "MiniMax-M2.5-highspeed"
-        aliases: []
-        cost_per_1k_input: 0.0042
-        cost_per_1k_output: 0.0168
-        cost_per_1k_cache_read: 0.00021
-        cost_per_1k_cache_creation: 0.002625
-      - id: "MiniMax-M2.1"            # 204,800 早期稳定
-        aliases: []
-        cost_per_1k_input: 0.0021
-        cost_per_1k_output: 0.0084
-        cost_per_1k_cache_read: 0.00021
-        cost_per_1k_cache_creation: 0.002625
-      - id: "MiniMax-M2.1-highspeed"
-        aliases: []
-        cost_per_1k_input: 0.0042
-        cost_per_1k_output: 0.0168
-        cost_per_1k_cache_read: 0.00021
-        cost_per_1k_cache_creation: 0.002625
-      - id: "MiniMax-M2"              # 204,800 基础
-        aliases: []
-        cost_per_1k_input: 0.0021
-        cost_per_1k_output: 0.0084
-        cost_per_1k_cache_read: 0.00021
-        cost_per_1k_cache_creation: 0.002625
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -328,14 +200,6 @@ providers:
     protocol: "openai"
     timeout: 30s
     responses_api: true
-    models:
-      - id: "MiniMax-M3"            # 与 minimax(anthropic)共享模型列表
-        aliases: []
-        cost_per_1k_input: 0.0021
-        cost_per_1k_output: 0.0084
-        cost_per_1k_cache_read: 0.00042
-        long_context_input_threshold: 512000
-        long_context_multiplier: 2
     keys: []  # 与 minimax 共享同一组 Provider Key
     circuit_breaker:
       failure_threshold: 5
@@ -369,17 +233,6 @@ providers:
     #   → F12 → 复制任意请求的完整 Cookie header 值(含 api-platform_serviceToken=...)
     #   过期后轮询自动退化(错误码驱动,保守安全),重新抓取填上重启即可
     # quota_cookie: ""
-    models:
-      - id: "mimo-v2.5-pro"
-        aliases: []
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-        cost_per_1k_cache_read: 0.000025
-      - id: "mimo-v2.5"
-        aliases: ["mimo"]
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.00002
     default_model: "mimo-v2.5"     # 便宜优先,pro 按需显式指定
     circuit_breaker:
       failure_threshold: 5
@@ -396,17 +249,6 @@ providers:
     endpoint: "https://api.xiaomimimo.com/anthropic"
     protocol: "anthropic"
     timeout: 60s
-    models:
-      - id: "mimo-v2.5-pro"
-        aliases: []
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-        cost_per_1k_cache_read: 0.000025
-      - id: "mimo-v2.5"
-        aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.00002
     default_model: "mimo-v2.5"
     # force_thinking_disabled: true  # 若 Claude Code compact 后 400(thinking 块未回传)再开,与 DeepSeek 同款
     circuit_breaker:
@@ -425,17 +267,6 @@ providers:
     protocol: "openai"
     timeout: 60s
     responses_api: true
-    models:
-      - id: "mimo-v2.5-pro"
-        aliases: []
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-        cost_per_1k_cache_read: 0.000025
-      - id: "mimo-v2.5"
-        aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.00002
     default_model: "mimo-v2.5"
     circuit_breaker:
       failure_threshold: 5
@@ -451,17 +282,6 @@ providers:
     endpoint: "https://token-plan-cn.xiaomimimo.com/anthropic"
     protocol: "anthropic"
     timeout: 60s
-    models:
-      - id: "mimo-v2.5-pro"
-        aliases: []
-        cost_per_1k_input: 0.003
-        cost_per_1k_output: 0.006
-        cost_per_1k_cache_read: 0.000025
-      - id: "mimo-v2.5"
-        aliases: []
-        cost_per_1k_input: 0.001
-        cost_per_1k_output: 0.002
-        cost_per_1k_cache_read: 0.00002
     default_model: "mimo-v2.5"
     circuit_breaker:
       failure_threshold: 5
@@ -484,27 +304,6 @@ providers:
     endpoint: "https://generativelanguage.googleapis.com/v1beta"
     protocol: "google"
     timeout: 60s
-    models:
-      - id: "gemini-2.5-flash"           # stable 推荐
-        aliases: ["gemini-flash"]
-        cost_per_1k_input: 0.00054
-        cost_per_1k_output: 0.00216
-      - id: "gemini-2.5-flash-lite"      # stable 便宜
-        aliases: []
-        cost_per_1k_input: 0.00027
-        cost_per_1k_output: 0.00108
-      - id: "gemini-2.5-pro"             # stable 强
-        aliases: ["gemini-pro"]
-        cost_per_1k_input: 0.009
-        cost_per_1k_output: 0.036
-      - id: "gemini-3.5-flash"           # stable 新
-        aliases: []
-        cost_per_1k_input: 0.00072
-        cost_per_1k_output: 0.00288
-      - id: "gemini-3.1-flash-lite"      # stable
-        aliases: []
-        cost_per_1k_input: 0.00018
-        cost_per_1k_output: 0.00072
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s

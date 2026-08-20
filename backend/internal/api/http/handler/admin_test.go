@@ -26,7 +26,6 @@ type fakeProvider struct {
 
 func (f *fakeProvider) Name() string                { return f.name }
 func (f *fakeProvider) Protocol() provider.Protocol { return f.protocol }
-func (f *fakeProvider) Models() []string            { return f.models }
 func (f *fakeProvider) SendRequest(context.Context, *provider.Request) (*provider.Response, error) {
 	return nil, nil
 }
@@ -37,8 +36,26 @@ func (f *fakeProvider) HealthCheck(context.Context) error { return nil }
 func (f *fakeProvider) ListModels(context.Context) ([]string, error) {
 	return nil, nil
 }
-func (f *fakeProvider) SetPool(*keypool.Pool)             {}
-func (f *fakeProvider) Close() error                      { return nil }
+func (f *fakeProvider) SetPool(*keypool.Pool) {}
+func (f *fakeProvider) Close() error          { return nil }
+
+// fakeModelStore 最小 provider.ModelStore 实现(listProviders 喂 models 用)。
+type fakeModelStore struct {
+	rows []provider.DBModelRow
+}
+
+func (s fakeModelStore) All(ctx context.Context) ([]provider.DBModelRow, error) {
+	return s.rows, nil
+}
+func (s fakeModelStore) ListByVendor(ctx context.Context, vendor string) ([]provider.DBModelRow, error) {
+	var out []provider.DBModelRow
+	for _, r := range s.rows {
+		if r.Vendor == vendor {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
 
 // TestListProviders_VendorAggregation P-provider-vendor:
 // GET /providers 按 vendor 聚合 — deepseek 双注册名归一个 vendor,names 排序确定,
@@ -60,17 +77,23 @@ func TestListProviders_VendorAggregation(t *testing.T) {
 	}, nil, keypool.Config{})
 	qwenPool := keypool.NewPool("qwen", nil, nil, keypool.Config{})
 
-	// Manager:SetForTesting 塞 3 个 fake provider
-	mgr := provider.NewManager(provider.NewRegistry(), zap.NewNop())
-	mgr.SetForTesting("deepseek", &fakeProvider{name: "deepseek", protocol: provider.ProtocolOpenAI, models: []string{"deepseek-v4-flash", "deepseek-v4-pro"}})
-	mgr.SetForTesting("deepseek-anthropic", &fakeProvider{name: "deepseek-anthropic", protocol: provider.ProtocolAnthropic, models: []string{"deepseek-v4-flash", "deepseek-v4-pro"}})
-	mgr.SetForTesting("qwen", &fakeProvider{name: "qwen", protocol: provider.ProtocolOpenAI, models: []string{"qwen-plus"}})
-
-	// Registry:vendor 元数据
+	// Registry:vendor 元数据(deepseek 与 deepseek-anthropic 同 vendor)
 	reg := provider.NewRegistry()
 	reg.RegisterWithProtocolVendor("deepseek", func(provider.ProviderConfig) (provider.Provider, error) { return nil, nil }, provider.ProtocolOpenAI, "deepseek")
 	reg.RegisterWithProtocolVendor("deepseek-anthropic", func(provider.ProviderConfig) (provider.Provider, error) { return nil, nil }, provider.ProtocolAnthropic, "deepseek")
 	reg.RegisterWithProtocolVendor("qwen", func(provider.ProviderConfig) (provider.Provider, error) { return nil, nil }, provider.ProtocolOpenAI, "qwen")
+
+	// Manager:SetForTesting 塞 3 个 fake provider(用带 vendor 的 registry,ModelsFor 才能归位)
+	mgr := provider.NewManager(reg, zap.NewNop())
+	mgr.SetForTesting("deepseek", &fakeProvider{name: "deepseek", protocol: provider.ProtocolOpenAI, models: []string{"deepseek-v4-flash", "deepseek-v4-pro"}})
+	mgr.SetForTesting("deepseek-anthropic", &fakeProvider{name: "deepseek-anthropic", protocol: provider.ProtocolAnthropic, models: []string{"deepseek-v4-flash", "deepseek-v4-pro"}})
+	mgr.SetForTesting("qwen", &fakeProvider{name: "qwen", protocol: provider.ProtocolOpenAI, models: []string{"qwen-plus"}})
+	// Task 6:models 改 DB 来源,须显式喂 store(否则 listProviders 的 ModelsFor 返回空)。
+	_ = mgr.LoadModelsFromStore(context.Background(), fakeModelStore{rows: []provider.DBModelRow{
+		{Vendor: "deepseek", ModelID: "deepseek-v4-flash"},
+		{Vendor: "deepseek", ModelID: "deepseek-v4-pro"},
+		{Vendor: "qwen", ModelID: "qwen-plus"},
+	}})
 
 	a := &Admin{
 		Manager:  mgr,

@@ -21,7 +21,6 @@ type fakeProvider struct {
 
 func (p *fakeProvider) Name() string                { return p.name }
 func (p *fakeProvider) Protocol() provider.Protocol { return p.proto }
-func (p *fakeProvider) Models() []string            { return p.models }
 func (p *fakeProvider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return nil, nil
 }
@@ -62,15 +61,15 @@ func loadModelsFromProviders(mgr *provider.Manager, rows []provider.DBModelRow) 
 }
 
 // modelRowsFromProviders 从 providers(+每个 provider 的 vendor)构造 DBModelRow 清单。
-// 每个 provider 的 Models 全部投影(首个为 defaultModel)。
-func modelRowsFromProviders(vendors map[string]string, ps ...provider.Provider) []provider.DBModelRow {
+// 每个 provider 的 models 全部投影(首个为 defaultModel)。
+func modelRowsFromProviders(vendors map[string]string, ps ...*fakeProvider) []provider.DBModelRow {
 	var rows []provider.DBModelRow
 	for _, p := range ps {
 		v := vendors[p.Name()]
 		if v == "" {
 			v = p.Name()
 		}
-		for _, m := range p.Models() {
+		for _, m := range p.models {
 			rows = append(rows, provider.DBModelRow{Vendor: v, ModelID: m})
 		}
 	}
@@ -79,7 +78,7 @@ func modelRowsFromProviders(vendors map[string]string, ps ...provider.Provider) 
 
 // newFakeManager 构造一个带 fake providers 的 Manager
 // 每个测试独立 Registry,避免污染全局
-func newFakeManager(t *testing.T, ps ...provider.Provider) *provider.Manager {
+func newFakeManager(t *testing.T, ps ...*fakeProvider) *provider.Manager {
 	t.Helper()
 	reg := provider.NewRegistry()
 	for _, p := range ps {
@@ -97,7 +96,6 @@ func newFakeManager(t *testing.T, ps ...provider.Provider) *provider.Manager {
 			Enabled:  true,
 			Endpoint: "http://example.com",
 			Protocol: p.Protocol(),
-			Models:   p.Models(),
 		}
 	}
 	if err := mgr.LoadFromConfig(context.Background(), cfg); err != nil {
@@ -110,7 +108,7 @@ func newFakeManager(t *testing.T, ps ...provider.Provider) *provider.Manager {
 // newFakeManagerWithVendors 构造带 vendor 元数据的 Manager(测试「面名 ≠ vendor」的排序)。
 // 与 newFakeManager 的区别:用 RegisterWithProtocolVendor 显式声明每个面的 vendor,
 // 模拟可多协议面共享 key 池的厂商(mimo-token-plan-anthropic → vendor mimio 等)。
-func newFakeManagerWithVendors(t *testing.T, vendors map[string]string, ps ...provider.Provider) *provider.Manager {
+func newFakeManagerWithVendors(t *testing.T, vendors map[string]string, ps ...*fakeProvider) *provider.Manager {
 	t.Helper()
 	reg := provider.NewRegistry()
 	for _, p := range ps {
@@ -134,7 +132,6 @@ func newFakeManagerWithVendors(t *testing.T, vendors map[string]string, ps ...pr
 			Enabled:       true,
 			Endpoint:      "http://example.com",
 			Protocol:      p.Protocol(),
-			Models:        p.Models(),
 			BillingSource: "token_plan",
 		}
 	}
@@ -877,8 +874,8 @@ func TestRouter_CatchAllAuto_ResponsesFilter(t *testing.T) {
 	// 标记能力:deepseek 支持,qwen 不支持
 	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{
 		Providers: map[string]provider.ManagerProviderConfig{
-			"deepseek": {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"deepseek-v4-flash"}, ResponsesAPI: true},
-			"qwen":     {Enabled: true, Protocol: provider.ProtocolOpenAI, Models: []string{"qwen-plus"}},
+			"deepseek": {Enabled: true, Protocol: provider.ProtocolOpenAI, ResponsesAPI: true},
+			"qwen":     {Enabled: true, Protocol: provider.ProtocolOpenAI},
 		},
 	}); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)

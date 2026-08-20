@@ -58,13 +58,6 @@ const (
 	responsesPath = "/responses"
 )
 
-// DefaultModels 默认模型列表(2026-08-06 官方最新)
-// v2 系列(mimo-v2-pro / mimo-v2-omni / mimo-v2-flash)已弃用,不列出
-var DefaultModels = []string{
-	"mimo-v2.5-pro",
-	"mimo-v2.5",
-}
-
 // Provider MiMo Provider(OpenAI 协议面)
 type Provider struct {
 	base *openai_compatible.Base
@@ -105,14 +98,6 @@ func newOpenAI(cfg provider.ProviderConfig, regName string) (provider.Provider, 
 
 func (p *Provider) Name() string                { return name }
 func (p *Provider) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
-
-// Models 返回 cfg 里配置的模型;若为空,返回 MIMO v2.5 默认列表
-func (p *Provider) Models() []string {
-	if len(p.cfg.Models) > 0 {
-		return p.cfg.Models
-	}
-	return DefaultModels
-}
 
 func (p *Provider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)

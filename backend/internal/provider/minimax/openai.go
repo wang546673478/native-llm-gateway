@@ -71,12 +71,6 @@ func NewOpenAI(cfg provider.ProviderConfig) (provider.Provider, error) {
 
 func (p *OpenAIProvider) Name() string                { return openaiName }
 func (p *OpenAIProvider) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
-func (p *OpenAIProvider) Models() []string {
-	if len(p.cfg.Models) > 0 {
-		return p.cfg.Models
-	}
-	return DefaultModels // 与 anthropic 面共用(同包变量,内容相同)
-}
 
 func (p *OpenAIProvider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)

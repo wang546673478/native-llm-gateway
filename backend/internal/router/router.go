@@ -177,7 +177,7 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		model := r.manager.DefaultModelFor(name)
 		// P-whitelist-select: 白名单参与选择(非空且非通配)
 		if len(o.AllowedModels) > 0 && !sliceContains(o.AllowedModels, "*") {
-			picked := pickAllowedModel(p.Models(), o.AllowedModels)
+			picked := pickAllowedModel(r.manager.ModelsFor(name), o.AllowedModels)
 			if picked == "" {
 				continue // 该 provider 声明的模型都不在白名单 → 不参与
 			}
@@ -346,7 +346,7 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 	reqProto := detectProtocol(req.Path)
 	candidates := make([]ProviderRoute, 0)
 	for name, p := range r.manager.GetAll() {
-		for _, m := range p.Models() {
+		for _, m := range r.manager.ModelsFor(name) {
 			if m != modelID {
 				continue
 			}
@@ -404,7 +404,7 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		// 白名单校验逐个跳过,全部跳过时 handleAllFailed 返 403 model_not_allowed
 		// (删候选会让 proxy 无候选 → 503 no_route,语义错误)
 		if whitelistSelect {
-			if picked := pickAllowedModel(pv.Models(), o.AllowedModels); picked != "" {
+			if picked := pickAllowedModel(r.manager.ModelsFor(pv.Name()), o.AllowedModels); picked != "" {
 				p.Model = picked
 			}
 		}
