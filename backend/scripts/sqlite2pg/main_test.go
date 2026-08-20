@@ -79,8 +79,8 @@ func seed(t *testing.T, src, dst *gorm.DB) {
 		{Name: "minimax", Protocol: "openai", Endpoint: "https://api.minimax.chat", Enabled: true, Timeout: 60, BillingSource: "token_plan", CreatedAt: t0, UpdatedAt: t0},
 	}
 	models := []database.ProviderModel{
-		{ProviderName: "deepseek", ModelID: "deepseek-v4-flash", CostPer1kInput: 0.00042, CostPer1kOutput: 0.00168, CreatedAt: t0},
-		{ProviderName: "deepseek", ModelID: "deepseek-v4-pro", CostPer1kInput: 0.5, CostPer1kOutput: 2.0, CreatedAt: t0.Add(time.Second)},
+		{Vendor: "deepseek", ModelID: "deepseek-v4-flash", CostPerMillionInput: 0.42, CostPerMillionOutput: 1.68, CreatedAt: t0},
+		{Vendor: "deepseek", ModelID: "deepseek-v4-pro", CostPerMillionInput: 0.5, CostPerMillionOutput: 2.0, CreatedAt: t0.Add(time.Second)},
 	}
 	keys := []database.GatewayKey{
 		{Name: "k1", KeyHash: "sk-abcdef1234567890", Providers: "[]", AllowedModels: `["*"]`, RPM: 100, TPM: 500000, Enabled: true, CreatedAt: t0, UpdatedAt: t0},

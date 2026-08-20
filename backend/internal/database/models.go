@@ -17,23 +17,28 @@ type Provider struct {
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 
-	Models []ProviderModel `gorm:"foreignKey:ProviderName;references:Name" json:"models,omitempty"`
+	Models []ProviderModel `gorm:"foreignKey:Vendor;references:Name" json:"models,omitempty"`
 }
 
 // TableName 显式指定表名
 func (Provider) TableName() string { return "providers" }
 
-// ProviderModel Provider 的模型声明
+// ProviderModel 厂商在售模型 + 手工定价(每百万 token)。
+// 粒度 = vendor(厂商),不是注册面(openai/anthropic 面共享同一批模型)。
+// 模型清单来自上游 /v1/models 同步,价格由用户在模型管理页手工填写。
 type ProviderModel struct {
-	ID              uint    `gorm:"primaryKey;autoIncrement" json:"id"`
-	ProviderName    string  `gorm:"column:provider_name;uniqueIndex:idx_provider_model;not null" json:"provider_name"`
-	ModelID         string  `gorm:"column:model_id;uniqueIndex:idx_provider_model;not null" json:"model_id"`
-	CostPer1kInput  float64 `gorm:"column:cost_per_1k_input;not null;default:0" json:"cost_per_1k_input"`
-	CostPer1kOutput float64 `gorm:"column:cost_per_1k_output;not null;default:0" json:"cost_per_1k_output"`
-	// P40: cache pricing 字段 — GORM AutoMigrate 会自动加列
-	CostPer1kCacheRead     float64   `gorm:"column:cost_per_1k_cache_read;not null;default:0" json:"cost_per_1k_cache_read"`
-	CostPer1kCacheCreation float64   `gorm:"column:cost_per_1k_cache_creation;not null;default:0" json:"cost_per_1k_cache_creation"`
-	CreatedAt              time.Time `json:"created_at"`
+	ID     uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	Vendor string `gorm:"column:vendor;uniqueIndex:idx_vendor_model;not null" json:"vendor"`
+	ModelID string `gorm:"column:model_id;uniqueIndex:idx_vendor_model;not null" json:"model_id"`
+	// 每百万 token 价;0 = 未填(未定价模型仍可用)
+	CostPerMillionInput     float64 `gorm:"column:cost_per_million_input;not null;default:0" json:"cost_per_million_input"`
+	CostPerMillionCacheRead float64 `gorm:"column:cost_per_million_cache_read;not null;default:0" json:"cost_per_million_cache_read"`
+	CostPerMillionOutput    float64 `gorm:"column:cost_per_million_output;not null;default:0" json:"cost_per_million_output"`
+	// 同步元数据
+	SyncedAt *time.Time `gorm:"column:synced_at" json:"synced_at"`
+	Source   string     `gorm:"column:source;not null;default:'manual'" json:"source"` // "upstream" | "manual"
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // TableName

@@ -1,10 +1,12 @@
 package database
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 func TestMigrateProviderVendorKeys(t *testing.T) {
@@ -63,10 +65,95 @@ func TestMigrateProviderVendorKeys(t *testing.T) {
 		t.Fatalf("query2: %v", err)
 	}
 	for i, w := range want {
-		if all2[i].ProviderName != w.provider || all2[i].Protocols != w.protocols {
-			t.Errorf("idempotent row %d = (%s, %q), want (%s, %q)",
-				i, all2[i].ProviderName, all2[i].Protocols, w.provider, w.protocols)
+		if all[i].ProviderName != w.provider || all[i].Protocols != w.protocols {
+			t.Errorf("row %d = (%s, %q), want (%s, %q)",
+				i, all[i].ProviderName, all[i].Protocols, w.provider, w.protocols)
 		}
+	}
+}
+
+func TestProviderModelSchema(t *testing.T) {
+	// 表名
+	if got := (ProviderModel{}).TableName(); got != "provider_models" {
+		t.Errorf("TableName() = %q, want %q", got, "provider_models")
+	}
+
+	// GORM tag:vendor + model_id 复合唯一 idx_vendor_model,字段含 cost_per_million_input
+	s, err := schema.Parse(&ProviderModel{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+
+	var vendorField, modelField *schema.Field
+	for _, f := range s.Fields {
+		if f.DBName == "vendor" {
+			vendorField = f
+		}
+		if f.DBName == "model_id" {
+			modelField = f
+		}
+	}
+	if vendorField == nil || modelField == nil {
+		t.Fatalf("missing vendor/model_id fields: vendor=%v model=%v", vendorField != nil, modelField != nil)
+	}
+	for _, idx := range s.ParseIndexes() {
+		if idx.Name == "idx_vendor_model" {
+			var cols []string
+			for _, c := range idx.Fields {
+				cols = append(cols, c.DBName)
+			}
+			if len(cols) != 2 || cols[0] != "vendor" || cols[1] != "model_id" {
+				t.Errorf("idx_vendor_model columns = %v, want [vendor model_id]", cols)
+			}
+			if idx.Class != "UNIQUE" {
+				t.Errorf("idx_vendor_model should be unique, got class %q", idx.Class)
+			}
+		}
+	}
+
+	foundMillion := false
+	for _, f := range s.Fields {
+		if f.DBName == "cost_per_million_input" {
+			foundMillion = true
+		}
+	}
+	if !foundMillion {
+		t.Errorf("missing cost_per_million_input column")
+	}
+
+	// 功能性验证:唯一约束生效,同 vendor+model_id 二次插入报错
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&ProviderModel{}); err != nil {
+		t.Fatalf("auto migrate: %v", err)
+	}
+
+	row := ProviderModel{
+		Vendor:                 "deepseek",
+		ModelID:                "deepseek-chat",
+		CostPerMillionInput:    0.27,
+		CostPerMillionOutput:   1.10,
+		CostPerMillionCacheRead: 0.07,
+		Source:                 "upstream",
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create row: %v", err)
+	}
+
+	var out ProviderModel
+	if err := db.Where("vendor = ? AND model_id = ?", "deepseek", "deepseek-chat").First(&out).Error; err != nil {
+		t.Fatalf("query row: %v", err)
+	}
+	if out.CostPerMillionInput != 0.27 || out.CostPerMillionOutput != 1.10 || out.Source != "upstream" {
+		t.Errorf("roundtrip mismatch: %+v", out)
+	}
+
+	// duplicate vendor+model_id should violate unique index
+	dup := ProviderModel{Vendor: "deepseek", ModelID: "deepseek-chat"}
+	if err := db.Create(&dup).Error; err == nil {
+		t.Errorf("expected unique constraint violation on duplicate (vendor, model_id)")
 	}
 }
 
