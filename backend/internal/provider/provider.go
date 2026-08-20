@@ -185,9 +185,17 @@ type Provider interface {
 	// HealthCheck 健康检查
 	HealthCheck(ctx context.Context) error
 
+	// ListModels 返回上游当前在售模型 id 列表。
+	// 不支持(如 anthropic 面)返回 ErrListModelsNotSupported。
+	ListModels(ctx context.Context) ([]string, error)
+
 	// Close 清理资源
 	Close() error
 }
+
+// ErrListModelsNotSupported 该协议面不提供模型列表能力。
+// 同步层收到它时,回退到同 vendor 的 OpenAI 面去查。
+var ErrListModelsNotSupported = errors.New("provider: list models not supported")
 
 // ErrorType 错误分类
 type ErrorType string

@@ -34,6 +34,9 @@ func (f *fakeProvider) SendStreamRequest(context.Context, *provider.Request) (<-
 	return nil, nil, nil
 }
 func (f *fakeProvider) HealthCheck(context.Context) error { return nil }
+func (f *fakeProvider) ListModels(context.Context) ([]string, error) {
+	return nil, nil
+}
 func (f *fakeProvider) SetPool(*keypool.Pool)             {}
 func (f *fakeProvider) Close() error                      { return nil }
 

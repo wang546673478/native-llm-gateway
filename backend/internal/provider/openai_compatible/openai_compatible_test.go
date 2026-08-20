@@ -582,3 +582,27 @@ func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
 		t.Errorf("quota_exceeded keys = %d, want 1", got)
 	}
 }
+
+func TestListModels(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[{"id":"a"},{"id":"b"},{"id":""}]}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	got, err := b.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("ListModels = %v, want [a b] (empty id filtered)", got)
+	}
+}

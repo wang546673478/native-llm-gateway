@@ -39,6 +39,9 @@ func (f *fakeProvider) SendStreamRequest(context.Context, *provider.Request) (<-
 }
 func (f *fakeProvider) SetPool(*keypool.Pool)             {}
 func (f *fakeProvider) HealthCheck(context.Context) error { return nil }
+func (f *fakeProvider) ListModels(context.Context) ([]string, error) {
+	return nil, nil
+}
 func (f *fakeProvider) Close() error                      { return nil }
 
 // newReloadTestServer 构造可测 ReloadProviderPool 的 Server:

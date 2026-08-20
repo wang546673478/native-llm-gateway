@@ -253,6 +253,42 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// ListModels GET {endpoint}/models,返回 models/* 去前缀后的模型 id。
+func (b *Base) ListModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(b.cfg.Endpoint, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if b.cfg.Pool != nil {
+		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolGoogle)); err == nil {
+			req.Header.Set("x-goog-api-key", k.Key)
+			defer b.cfg.Pool.ReportSuccess(k)
+		}
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	ids := make([]string, 0, len(out.Models))
+	for _, m := range out.Models {
+		id := strings.TrimPrefix(m.Name, "models/")
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // Close
 func (b *Base) Close() error {
 	b.client.CloseIdleConnections()

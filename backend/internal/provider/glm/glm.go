@@ -99,6 +99,10 @@ func (p *Provider) HealthCheck(ctx context.Context) error {
 	return p.base.HealthCheck(ctx)
 }
 
+func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
+	return p.base.ListModels(ctx)
+}
+
 // SetPool P30:注入 KeyPool(从 DB 读)
 func (p *Provider) SetPool(pool *keypool.Pool) {
 	p.base.SetPool(pool)

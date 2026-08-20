@@ -29,6 +29,9 @@ func (p *fakeProvider) SendStreamRequest(ctx context.Context, req *provider.Requ
 	return nil, nil, nil
 }
 func (p *fakeProvider) HealthCheck(ctx context.Context) error { return nil }
+func (p *fakeProvider) ListModels(ctx context.Context) ([]string, error) {
+	return nil, nil
+}
 func (p *fakeProvider) SetPool(*keypool.Pool)                 {}
 func (p *fakeProvider) Close() error                          { return nil }
 

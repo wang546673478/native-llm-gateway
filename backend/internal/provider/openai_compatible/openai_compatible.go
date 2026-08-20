@@ -382,6 +382,41 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// ListModels 调 GET {endpoint}/v1/models 拉上游模型 id 列表。
+func (b *Base) ListModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if b.cfg.Pool != nil {
+		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)); err == nil {
+			req.Header.Set("Authorization", "Bearer "+k.Key)
+			defer b.cfg.Pool.ReportSuccess(k)
+		}
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids, nil
+}
+
 // Close 释放 http client
 func (b *Base) Close() error {
 	b.client.CloseIdleConnections()

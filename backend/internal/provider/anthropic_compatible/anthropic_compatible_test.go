@@ -552,3 +552,14 @@ func TestSendRequest_UsesRouteKey_429OnlyCooldownsThatKey(t *testing.T) {
 		t.Errorf("ks[0] status = %q, want ACTIVE (healthy key must not be cooldowned)", ks[0].Status)
 	}
 }
+
+func TestListModels_NotSupported(t *testing.T) {
+	b := NewBase(Config{Name: "test", Endpoint: "http://example.com"})
+	got, err := b.ListModels(context.Background())
+	if !errors.Is(err, provider.ErrListModelsNotSupported) {
+		t.Errorf("err = %v, want ErrListModelsNotSupported", err)
+	}
+	if got != nil {
+		t.Errorf("models = %v, want nil", got)
+	}
+}

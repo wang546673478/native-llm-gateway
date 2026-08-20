@@ -78,6 +78,10 @@ func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
 	return p.base.HealthCheck(ctx)
 }
 
+func (p *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
+	return p.base.ListModels(ctx)
+}
+
 func (p *AnthropicProvider) SetPool(pool *keypool.Pool) {
 	p.base.SetPool(pool)
 }

@@ -85,6 +85,9 @@ func (p *OpenAIProvider) SendStreamRequest(ctx context.Context, req *provider.Re
 	return p.base.SendStreamRequest(ctx, req)
 }
 func (p *OpenAIProvider) HealthCheck(ctx context.Context) error { return p.base.HealthCheck(ctx) }
+func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
+	return p.base.ListModels(ctx)
+}
 
 func (p *OpenAIProvider) SetPool(pool *keypool.Pool) {
 	p.base.SetPool(pool)

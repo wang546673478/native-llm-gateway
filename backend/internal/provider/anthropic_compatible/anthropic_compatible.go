@@ -538,6 +538,11 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// ListModels anthropic 协议面无模型列表端点 → NotSupported。
+func (b *Base) ListModels(ctx context.Context) ([]string, error) {
+	return nil, provider.ErrListModelsNotSupported
+}
+
 // Close 释放 http client
 func (b *Base) Close() error {
 	b.client.CloseIdleConnections()
