@@ -252,7 +252,7 @@ providers:
   rightapi-claude:
     enabled: true
     billing_source: "api"
-    endpoint: "https://rightapi.ai/claude"
+    endpoint: "https://rightapi.ai/claude-aws"
     protocol: "anthropic"
     timeout: 60s
     circuit_breaker:

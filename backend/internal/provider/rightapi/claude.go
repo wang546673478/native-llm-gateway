@@ -1,8 +1,13 @@
 // Package rightapi — claude 渠道（Anthropic 协议面，注册名 "rightapi-claude"）。
 //
-// 端点 https://rightapi.ai/claude（不含 /v1，anthropic base 拼 /v1/messages）：
-//   - /v1/messages → Anthropic Messages API（Claude Code 走这里）
-//   - 模型：claude-opus-5 / claude-sonnet-4-6 / claude-fable-5 / claude-haiku-4-5 等
+// 端点由 config 提供（不含 /v1，anthropic base 拼 /v1/messages）。Right Code 的
+// Claude 有多个渠道，endpoint 换一下即可切换：
+//   - AWSQ 逆向渠道：https://rightapi.ai/claude-aws（当前配置）
+//   - 官渠：        https://rightapi.ai/claude
+//   - 官渠特惠：    https://rightapi.ai/claude-sale
+//
+// 模型：claude-opus-5 / claude-sonnet-4-6 / claude-haiku-4-5 等（各渠道略有差异，
+// claude-aws 比官渠少 claude-fable-5）。
 //
 // 鉴权兼容 Authorization: Bearer <key> 或 x-api-key。
 //
