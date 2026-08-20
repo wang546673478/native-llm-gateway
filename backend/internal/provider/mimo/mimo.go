@@ -30,9 +30,9 @@
 //  12. 定价(¥/M tokens,国内):mimo-v2.5-pro cache命中 ¥0.025 / 未命中 ¥3.00 / 输出 ¥6.00;
 //     mimo-v2.5 cache命中 ¥0.02 / 未命中 ¥1.00 / 输出 ¥2.00(÷1000 进 cost_per_1k)
 //
-// 实现策略:继承 openai_compatible.Base,端点已含 /v1 → ChatPath 用默认
-// /v1/chat/completions,ResponsesPath 覆盖为 /responses;启用 StreamUsage
-// 让流式末尾带 usage。anthropic 协议实现在 anthropic.go。
+// 实现策略:继承 openai_compatible.Base,端点已含 /v1 → Chat/Responses/Models
+// 三个路径都覆盖成不带 /v1 的相对路径;启用 StreamUsage 让流式末尾带 usage。
+// anthropic 协议实现在 anthropic.go。
 package mimo
 
 import (
@@ -53,9 +53,13 @@ const (
 	DefaultEndpoint = "https://api.xiaomimimo.com/v1"
 	// DefaultTokenPlanEndpoint Token Plan 官方 base URL(已含 /v1;套餐专用 tp- key)
 	DefaultTokenPlanEndpoint = "https://token-plan-cn.xiaomimimo.com/v1"
-	// ChatPath 留空用默认 /v1/chat/completions(端点已含 /v1)
-	// ResponsesPath 端点已含 /v1 → 相对路径 /responses
+	// 以下三个路径都相对于「已含 /v1 的 endpoint」,一律不带 /v1 前缀 ——
+	// 早期 ChatPath 留空吃默认 /v1/chat/completions,拼出 /v1/v1/chat/completions,
+	// 导致 mimo / mimo-token-plan 两个 openai 面从未成功过(usage_records 0 条),
+	// 流量全靠 anthropic 面兜着才没暴露(2026-08-20 查同步问题时顺带发现)。
+	chatPath      = "/chat/completions"
 	responsesPath = "/responses"
+	modelsPath    = "/models"
 )
 
 // Provider MiMo Provider(OpenAI 协议面)
@@ -87,9 +91,13 @@ func newOpenAI(cfg provider.ProviderConfig, regName string) (provider.Provider, 
 			Name:          regName,
 			Endpoint:      cfg.Endpoint,
 			Timeout:       cfg.Timeout,
-			ChatPath:      "",            // 端点已含 /v1 → 默认 /v1/chat/completions
+			ChatPath:      chatPath,      // 端点已含 /v1 → 不再拼 /v1
 			ResponsesPath: responsesPath, // 原生支持 Responses API,端点已含 /v1 → /responses
-			StreamUsage:   true,          // 流式末尾带 usage,网关才能记账
+			ModelsPath:    modelsPath,    // 同上:端点已含 /v1 → /models
+			// mimo 两个 openai 面端点不同且 key 与端点绑定(tp- ↔ token-plan、
+			// sk- ↔ api,交叉必 401)→ ListModels/HealthCheck 必须按本面计费源取 key
+			BillingSource: cfg.BillingSource,
+			StreamUsage:   true, // 流式末尾带 usage,网关才能记账
 			Pool:          cfg.Pool,
 		}),
 		cfg: cfg,
