@@ -233,7 +233,6 @@ providers:
     #   → F12 → 复制任意请求的完整 Cookie header 值(含 api-platform_serviceToken=...)
     #   过期后轮询自动退化(错误码驱动,保守安全),重新抓取填上重启即可
     # quota_cookie: ""
-    default_model: "mimo-v2.5"     # 便宜优先,pro 按需显式指定
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -249,7 +248,6 @@ providers:
     endpoint: "https://api.xiaomimimo.com/anthropic"
     protocol: "anthropic"
     timeout: 60s
-    default_model: "mimo-v2.5"
     # force_thinking_disabled: true  # 若 Claude Code compact 后 400(thinking 块未回传)再开,与 DeepSeek 同款
     circuit_breaker:
       failure_threshold: 5
@@ -267,7 +265,6 @@ providers:
     protocol: "openai"
     timeout: 60s
     responses_api: true
-    default_model: "mimo-v2.5"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -282,7 +279,6 @@ providers:
     endpoint: "https://token-plan-cn.xiaomimimo.com/anthropic"
     protocol: "anthropic"
     timeout: 60s
-    default_model: "mimo-v2.5"
     circuit_breaker:
       failure_threshold: 5
       failure_window: 60s
@@ -317,7 +313,7 @@ routing:
   #   - 客户端发任何 model 名(gpt-5 / qwen-plus / 任意探测名)→ 一律走这条链,
   #     客户端模型名只是标签,不参与路由决策(真实名也不直连声明它的 provider)
   #   - 协议面按请求路径过滤(/v1/messages → anthropic 面,/v1/chat/completions → openai 面)
-  #   - 每个 provider 用它的默认模型承接:显式 default_model 或 models 第一个声明
+  #   - 每个 provider 用它的默认模型承接(DB provider_models 该厂商首个 model_id)
   #   - tier 计费自动(token_plan → api → free):token plan 额度耗尽 → 自动切 api
   #     计费的 provider,无需改配置;没 key 的 provider 自动跳过
   #   - 同 tier 桶内候选按 name 确定性排序(自动模式无优先级概念)

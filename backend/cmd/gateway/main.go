@@ -146,8 +146,6 @@ func toManagerConfig(cfg *config.Config) *provider.ManagerConfig {
 			Timeout:  p.Timeout,
 			// P47: 计费来源,默认 api(没标就当 api)
 			BillingSource: defaultStr(p.BillingSource, "api"),
-			// P-catch-all: 默认模型(catch_all 自动模式用)
-			DefaultModel: p.DefaultModel,
 			// P-responses: Responses API 能力(/v1/responses 透传)
 			ResponsesAPI: p.ResponsesAPI,
 			// P-deepseek-thinking: 强制 thinking=disabled(DeepSeek /anthropic 校验)

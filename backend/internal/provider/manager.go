@@ -34,9 +34,6 @@ type ManagerProviderConfig struct {
 	Circuit  ManagerCircuitConfig
 	// P47: 计费来源 — token_plan / api / free
 	BillingSource string
-	// P-catch-all: catch_all 自动模式下该 provider 承接未知模型名的默认模型。
-	// 空 = 取 DB provider_models 该 vendor 的首个模型(LoadModelsFromStore 填充)。
-	DefaultModel string
 	// P-responses: 原生支持 OpenAI Responses API(/v1/responses 透传)
 	ResponsesAPI bool
 	// P-deepseek-thinking: 上行前强制 thinking=disabled(DeepSeek /anthropic

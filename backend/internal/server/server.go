@@ -567,8 +567,6 @@ func toManagerConfigForReload(cfg *config.Config, pools map[string]*keypool.Pool
 			Timeout:  p.Timeout,
 			// P47: 计费来源 — 热重载时也带上
 			BillingSource: defaultBillingSource(p.BillingSource),
-			// P-catch-all: 默认模型 — 热重载时同步
-			DefaultModel: p.DefaultModel,
 			// P-responses: Responses API 能力 — 热重载时同步
 			ResponsesAPI: p.ResponsesAPI,
 			// P-deepseek-thinking: 强制 thinking=disabled — 热重载时同步

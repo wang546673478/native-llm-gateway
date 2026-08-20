@@ -116,10 +116,6 @@ type Provider struct {
 	Timeout        time.Duration     `mapstructure:"timeout"`
 	Keys           []ProviderKey     `mapstructure:"keys"`
 	CircuitBreaker CircuitBreakerCfg `mapstructure:"circuit_breaker"`
-	// DefaultModel P-catch-all: catch_all 自动模式(catch_all: {})下,
-	// 该 provider 用哪个模型承接未知模型名的请求。
-	// 空 = 取 models 列表第一个声明。其他路由路径不涉及此字段
-	DefaultModel string `mapstructure:"default_model"`
 	// ResponsesAPI P-responses: 原生支持 OpenAI Responses API(/v1/responses)。
 	// true 的 provider 才会收到 Codex 等客户端的 /responses 透传请求
 	// (DeepSeek / MiniMax 官方支持;Qwen / Gemini 等不支持)
