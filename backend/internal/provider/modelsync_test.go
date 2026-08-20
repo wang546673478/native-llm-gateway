@@ -103,7 +103,10 @@ func TestSyncVendorModels_FindsOpenAIFace(t *testing.T) {
 	}
 }
 
-func TestSyncVendorModels_NoOpenAIFace(t *testing.T) {
+// TestSyncVendorModels_AnthropicOnlyFace P-model-sync: 多面聚合后,只有 anthropic 面、
+// 但该面 ListModels 能返回模型的 vendor 也能同步(旧逻辑只认 openai 面,会漏)。
+// 这是 rightapi claude 渠道(anthropic 面有自定义 ListModels)需要的语义。
+func TestSyncVendorModels_AnthropicOnlyFace(t *testing.T) {
 	anthropicOnly := &fakeModelsProvider{
 		name:     "glm-anthropic",
 		protocol: ProtocolAnthropic,
@@ -117,16 +120,21 @@ func TestSyncVendorModels_NoOpenAIFace(t *testing.T) {
 	mgr.SetForTesting("glm-anthropic", anthropicOnly)
 
 	store := &fakeModelSyncStore{}
-	_, err := SyncVendorModels(context.Background(), mgr, "glm", store)
-	if err == nil {
-		t.Fatal("expected error for vendor with no openai face, got nil")
+	ids, err := SyncVendorModels(context.Background(), mgr, "glm", store)
+	if err != nil {
+		t.Fatalf("SyncVendorModels: %v", err)
 	}
-	if store.calls != 0 {
-		t.Errorf("store calls = %d, want 0 (should not upsert on error)", store.calls)
+	if !reflect.DeepEqual(ids, []string{"glm-4"}) {
+		t.Errorf("ids = %v, want [glm-4]", ids)
+	}
+	if store.calls != 1 {
+		t.Fatalf("store calls = %d, want 1", store.calls)
 	}
 }
 
-func TestSyncVendorModels_ListModelsError(t *testing.T) {
+// TestSyncVendorModels_AllFacesFail P-model-sync: 所有面 ListModels 都失败(或被跳过)→
+// 报「无可用模型列表面」通用错误,且不 upsert。
+func TestSyncVendorModels_AllFacesFail(t *testing.T) {
 	boom := errors.New("upstream list failed")
 	openai := &fakeModelsProvider{
 		name:     "minimax",
@@ -143,11 +151,36 @@ func TestSyncVendorModels_ListModelsError(t *testing.T) {
 
 	store := &fakeModelSyncStore{}
 	_, err := SyncVendorModels(context.Background(), mgr, "minimax", store)
-	if !errors.Is(err, boom) {
-		t.Errorf("err = %v, want wrapped upstream error", err)
+	if err == nil {
+		t.Fatal("expected error when every face fails, got nil")
 	}
 	if store.calls != 0 {
-		t.Errorf("store calls = %d, want 0 (should not upsert on ListModels error)", store.calls)
+		t.Errorf("store calls = %d, want 0 (should not upsert when all faces fail)", store.calls)
+	}
+}
+
+// TestSyncVendorModels_MergesFaces P-model-sync: 同一 vendor 多个面各自有模型列表时,
+// 合并去重到同一 vendor 名下(如 rightapi 的 codex[gpt-*] + claude[claude-*])。
+func TestSyncVendorModels_MergesFaces(t *testing.T) {
+	codexFace := &fakeModelsProvider{name: "rc-codex", protocol: ProtocolOpenAI, models: []string{"gpt-5.4", "gpt-5.5"}}
+	claudeFace := &fakeModelsProvider{name: "rc-claude", protocol: ProtocolAnthropic, models: []string{"claude-opus-5", "gpt-5.5"}} // gpt-5.5 与 codex 重复,去重
+	reg := NewRegistry()
+	mgr := NewManager(reg, zap.NewNop())
+	reg.RegisterWithProtocolVendor("rc-codex", func(cfg ProviderConfig) (Provider, error) { return codexFace, nil }, ProtocolOpenAI, "rightapi")
+	reg.RegisterWithProtocolVendor("rc-claude", func(cfg ProviderConfig) (Provider, error) { return claudeFace, nil }, ProtocolAnthropic, "rightapi")
+	mgr.SetForTesting("rc-codex", codexFace)
+	mgr.SetForTesting("rc-claude", claudeFace)
+
+	store := &fakeModelSyncStore{}
+	ids, err := SyncVendorModels(context.Background(), mgr, "rightapi", store)
+	if err != nil {
+		t.Fatalf("SyncVendorModels: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"gpt-5.4", "gpt-5.5", "claude-opus-5"}) {
+		t.Errorf("ids = %v, want [gpt-5.4 gpt-5.5 claude-opus-5] (merged, deduped)", ids)
+	}
+	if store.calls != 1 {
+		t.Fatalf("store calls = %d, want 1 (single upsert for merged list)", store.calls)
 	}
 }
 

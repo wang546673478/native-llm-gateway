@@ -15,32 +15,42 @@ type ModelSyncStore interface {
 }
 
 // SyncVendorModels 拉某厂商上游在售模型并落库。
-// 优先用 vendor 的 OpenAI 面;若无 openai 面则跳过(返回 nil)。
-// 单个面 ListModels 返回 ErrListModelsNotSupported 时,换同 vendor 的 openai 面。
+// 遍历该 vendor 的所有注册面,逐个调 ListModels 合并去重;单个面返回
+// ErrListModelsNotSupported / 其它错误时继续试其它面(不中断整体)。
+// 这样"同一 vendor 多协议面各自有模型端点"的中转站厂商(如 rightapi 的
+// codex/grok/claude 三面各有一份 /v1/models)能合并到同一 vendor 名下;
+// 而 deepseek/minimax/mimo 的 anthropic 面返回 NotSupported 直接跳过,行为不变。
 func SyncVendorModels(ctx context.Context, m *Manager, vendor string, store ModelSyncStore) ([]string, error) {
-	names := m.Names()
-	var openaiFace string
-	for _, n := range names {
-		if m.VendorFor(n) == vendor {
-			if p, ok := m.Get(n); ok && p.Protocol() == ProtocolOpenAI {
-				openaiFace = n
-				break
+	var merged []string
+	seen := make(map[string]bool)
+	for _, n := range m.Names() {
+		if m.VendorFor(n) != vendor {
+			continue
+		}
+		p, ok := m.Get(n)
+		if !ok {
+			continue
+		}
+		ids, err := p.ListModels(ctx)
+		if err != nil {
+			// 该面不支持模型列表(NotSupported)或拉取失败 → 跳过,由其它面兜底。
+			continue
+		}
+		for _, id := range ids {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				merged = append(merged, id)
 			}
 		}
 	}
-	if openaiFace == "" {
-		// 没有 openai 面 → 无法同步(当前 6 vendor 都有,防御性返回)
-		return nil, fmt.Errorf("vendor %q has no openai-compatible face to sync models", vendor)
+	if len(merged) == 0 {
+		// 所有面都拉不到模型(既无 openai 面,或全部 NotSupported/failed)。
+		return nil, fmt.Errorf("vendor %q has no face with a working model list", vendor)
 	}
-	p, _ := m.Get(openaiFace)
-	ids, err := p.ListModels(ctx)
-	if err != nil {
+	if err := store.UpsertModels(ctx, vendor, merged); err != nil {
 		return nil, err
 	}
-	if err := store.UpsertModels(ctx, vendor, ids); err != nil {
-		return nil, err
-	}
-	return ids, nil
+	return merged, nil
 }
 
 // VendorSyncResult 单个 vendor 的同步结果(用于"全部同步"逐厂商汇报)。
