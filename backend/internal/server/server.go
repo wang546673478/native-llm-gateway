@@ -886,6 +886,17 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		},
 		// P-inflight: 活跃请求快照只读闭包(handler 通过它读 proxy 写入的活跃请求)
 		func() []*inflight.Snapshot { return s.inflightR.Snapshot() },
+		// P-model-sync: 模型管理页三端点依赖。
+		//   ModelStore = database.ProviderModelStore(UpsertModels/SavePricing/All,有写方法),
+		//   与 ModelReload 读回内存用的 s.modelStoreAdapter(provider.ModelStore,只读)是两回事:
+		//   sync 落库必须用 dbStore(提供 UpsertModels),manager 读回内存用 adapter。
+		database.NewProviderModelStore(s.db),
+		func(ctx context.Context, vendor string) ([]string, error) {
+			return provider.SyncVendorModels(ctx, s.manager, vendor, database.NewProviderModelStore(s.db))
+		},
+		func() error {
+			return s.manager.LoadModelsFromStore(context.Background(), s.modelStoreAdapter)
+		},
 	)
 	admin.Register(r.Group("/api/v1"))
 

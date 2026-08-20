@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/inflight"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
@@ -283,5 +285,138 @@ func TestListInflight(t *testing.T) {
 	}
 	if r.ElapsedMs < 0 {
 		t.Errorf("elapsed_ms = %d, want >= 0", r.ElapsedMs)
+	}
+}
+
+// fakeProviderModelStore 最小 database.ProviderModelStore 实现(模型管理端点测试替身)。
+type fakeProviderModelStore struct {
+	rows        []dbpkg.ProviderModel
+	savedVendor string
+	savedModel  string
+}
+
+func (s *fakeProviderModelStore) All(ctx context.Context) ([]dbpkg.ProviderModel, error) {
+	return s.rows, nil
+}
+func (s *fakeProviderModelStore) ListByVendor(ctx context.Context, vendor string) ([]dbpkg.ProviderModel, error) {
+	var out []dbpkg.ProviderModel
+	for _, r := range s.rows {
+		if r.Vendor == vendor {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+func (s *fakeProviderModelStore) UpsertModels(ctx context.Context, vendor string, modelIDs []string) error {
+	return nil
+}
+func (s *fakeProviderModelStore) SavePricing(ctx context.Context, vendor, modelID string, input, cacheRead, output float64) error {
+	s.savedVendor = vendor
+	s.savedModel = modelID
+	return nil
+}
+
+// TestListProviderModels_ModelStoreNil P-model-sync:ModelStore=nil → 503。
+func TestListProviderModels_ModelStoreNil(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/providers/models", nil)
+	(&Admin{}).listProviderModels(ginCtx)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+// TestListProviderModels_Grouped P-model-sync:list 按 vendor 分组返回。
+func TestListProviderModels_Grouped(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &fakeProviderModelStore{rows: []dbpkg.ProviderModel{
+		{Vendor: "deepseek", ModelID: "deepseek-v4-flash"},
+		{Vendor: "deepseek", ModelID: "deepseek-v4-pro"},
+		{Vendor: "qwen", ModelID: "qwen-plus"},
+	}}
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/providers/models", nil)
+	(&Admin{ModelStore: store}).listProviderModels(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Vendors map[string][]dbpkg.ProviderModel `json:"vendors"`
+		Count   int                              `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != 2 {
+		t.Fatalf("count = %d, want 2", body.Count)
+	}
+	if len(body.Vendors["deepseek"]) != 2 || len(body.Vendors["qwen"]) != 1 {
+		t.Fatalf("vendors grouping = %+v, want deepseek(2) + qwen(1)", body.Vendors)
+	}
+}
+
+// TestSyncProviderModels P-model-sync:sync 走闭包返回 model 数,且 reload 被调用。
+func TestSyncProviderModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reloaded := false
+	syncFn := func(ctx context.Context, vendor string) ([]string, error) {
+		if vendor != "deepseek" {
+			t.Fatalf("vendor = %q, want deepseek", vendor)
+		}
+		return []string{"m1", "m2", "m3"}, nil
+	}
+	reloadFn := func() error { reloaded = true; return nil }
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/providers/sync-models",
+		strings.NewReader(`{"vendor":"deepseek"}`))
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+	(&Admin{ModelSync: syncFn, ModelReload: reloadFn}).syncProviderModels(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Vendor       string `json:"vendor"`
+		SyncedModels int    `json:"synced_models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.SyncedModels != 3 {
+		t.Fatalf("synced_models = %d, want 3", body.SyncedModels)
+	}
+	if !reloaded {
+		t.Fatal("ModelReload not called after sync")
+	}
+}
+
+// TestSaveProviderModelPricing P-model-sync:save 调 store.SavePricing 且 reload 被调用。
+func TestSaveProviderModelPricing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &fakeProviderModelStore{}
+	reloaded := false
+	reloadFn := func() error { reloaded = true; return nil }
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodPut, "/api/v1/providers/models",
+		strings.NewReader(`{"vendor":"deepseek","model_id":"deepseek-v4-flash","cost_per_million_input":1.5}`))
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+	(&Admin{ModelStore: store, ModelReload: reloadFn}).saveProviderModelPricing(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if store.savedVendor != "deepseek" || store.savedModel != "deepseek-v4-flash" {
+		t.Fatalf("SavePricing got (%q,%q), want (deepseek, deepseek-v4-flash)", store.savedVendor, store.savedModel)
+	}
+	if !reloaded {
+		t.Fatal("ModelReload not called after save pricing")
 	}
 }

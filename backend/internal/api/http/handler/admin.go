@@ -64,6 +64,14 @@ type Admin struct {
 	FingerprintSet func(enabled bool)
 	// P-inflight: 活跃请求内存快照的只读查询(闭包注入,handler 不依赖 inflight 包)。
 	InflightSnapshot func() []*inflight.Snapshot
+	// P-model-sync: 模型管理页依赖(可 nil — 无 DB 时模型管理不可用)。
+	// ModelStore 存 database.ProviderModelStore(UpsertModels/SavePricing/All),
+	// 不是 provider.ModelStore 适配器 — list 需 All 返回 []database.ProviderModel(带 Vendor/价格)。
+	ModelStore dbpkg.ProviderModelStore
+	// ModelSync 由 server 注入封装好 store+manager(vendor 名),触发上游模型同步落库。
+	ModelSync func(ctx context.Context, vendor string) ([]string, error)
+	// ModelReload 同步/定价变更后热刷 manager 内存(可选 nil)。
+	ModelReload func() error
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -96,6 +104,9 @@ func NewAdmin(
 	fingerprintGet func() (bool, string), // 可 nil(fingerprint 查询不可用)
 	fingerprintSet func(enabled bool), // 可 nil(fingerprint 切换不可用)
 	inflightSnapshot func() []*inflight.Snapshot, // 可 nil(inflight 查询不可用)
+	modelStore dbpkg.ProviderModelStore, // 可 nil(模型管理不可用)
+	modelSync func(ctx context.Context, vendor string) ([]string, error), // 可 nil(sync 不可用)
+	modelReload func() error, // 可 nil(不热刷 manager)
 ) *Admin {
 	return &Admin{
 		Manager:             mgr,
@@ -116,6 +127,9 @@ func NewAdmin(
 		FingerprintGet:      fingerprintGet,
 		FingerprintSet:      fingerprintSet,
 		InflightSnapshot:    inflightSnapshot,
+		ModelStore:          modelStore,
+		ModelSync:           modelSync,
+		ModelReload:         modelReload,
 	}
 }
 
@@ -133,6 +147,11 @@ type GatewayKeyInfo struct {
 func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/providers", a.listProviders)
 	r.GET("/providers/registered", a.listRegisteredProviders)
+	// P-model-sync: 模型管理端点 — /providers/models 必须在 /providers/:name 之前注册,
+	// 否则 "models" 会被 :name 吞掉(变成 getProvider 的 name)。
+	r.GET("/providers/models", a.listProviderModels)
+	r.POST("/providers/sync-models", a.syncProviderModels)
+	r.PUT("/providers/models", a.saveProviderModelPricing)
 	r.GET("/providers/:name", a.getProvider)
 	// P-mimo-quota: MIMO 控制台 cookie 查询/更新(cookie 约 1 天过期,过期后
 	// 轮询退化保守;POST 一条命令热更新,不用改 config 重启)
@@ -286,6 +305,76 @@ func (a *Admin) getProvider(c *gin.Context) {
 		info["key_pool"] = pool.Status()
 	}
 	c.JSON(http.StatusOK, info)
+}
+
+// listProviderModels GET /api/v1/providers/models — 列出所有厂商模型(按 vendor 分组)。
+func (a *Admin) listProviderModels(c *gin.Context) {
+	if a.ModelStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model_store_unavailable"})
+		return
+	}
+	rows, err := a.ModelStore.All(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	group := map[string][]dbpkg.ProviderModel{}
+	for _, r := range rows {
+		group[r.Vendor] = append(group[r.Vendor], r)
+	}
+	c.JSON(http.StatusOK, gin.H{"vendors": group, "count": len(group)})
+}
+
+// syncProviderModels POST /api/v1/providers/sync-models {vendor} — 触发上游模型同步。
+func (a *Admin) syncProviderModels(c *gin.Context) {
+	var body struct {
+		Vendor string `json:"vendor"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Vendor == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vendor required"})
+		return
+	}
+	if a.ModelSync == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "sync_unavailable"})
+		return
+	}
+	ids, err := a.ModelSync(c.Request.Context(), body.Vendor)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if a.ModelReload != nil {
+		_ = a.ModelReload()
+	}
+	c.JSON(http.StatusOK, gin.H{"vendor": body.Vendor, "synced_models": len(ids)})
+}
+
+// saveProviderModelPricing PUT /api/v1/providers/models {vendor, model_id, cost_per_million_*}.
+func (a *Admin) saveProviderModelPricing(c *gin.Context) {
+	var body struct {
+		Vendor                 string  `json:"vendor"`
+		ModelID                string  `json:"model_id"`
+		CostPerMillionInput    float64 `json:"cost_per_million_input"`
+		CostPerMillionCacheRead float64 `json:"cost_per_million_cache_read"`
+		CostPerMillionOutput   float64 `json:"cost_per_million_output"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Vendor == "" || body.ModelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vendor and model_id required"})
+		return
+	}
+	if a.ModelStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model_store_unavailable"})
+		return
+	}
+	if err := a.ModelStore.SavePricing(c.Request.Context(), body.Vendor, body.ModelID,
+		body.CostPerMillionInput, body.CostPerMillionCacheRead, body.CostPerMillionOutput); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if a.ModelReload != nil {
+		_ = a.ModelReload()
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // getMimoQuotaCookie GET /api/v1/providers/mimo/quota-cookie
