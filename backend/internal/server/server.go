@@ -41,28 +41,31 @@ import (
 
 // Server 持有所有运行时依赖
 type Server struct {
-	cfg      *config.Config
-	logger   *zap.Logger
-	db       *gorm.DB
-	manager  *provider.Manager
-	router   *router.Router
-	engine   *proxy.Engine
-	pools    map[string]*keypool.Pool
-	poolsMu  sync.RWMutex // F4: 保护 s.pools 字段读(s.pools[name])/写(= newPools)
-	auth     *auth.Authenticator
-	usageC   *usage.Collector
-	usageR   *usage.Repository
-	metricsC *metrics.Collector
-	accessR  *accesslog.Recorder // P67: 接入日志 Recorder
-	quotaM   *quotacheck.Manager // P68: 配额恢复 worker
-	inflightR *inflight.Registry // P-inflight: 活跃请求内存快照表
+	cfg     *config.Config
+	logger  *zap.Logger
+	db      *gorm.DB
+	manager *provider.Manager
+	// modelStoreAdapter 把 database.ProviderModelStore 适配成 provider.ModelStore,
+	// 首次启动(New)与热重载(Reload)都用它读 DB provider_models 注入 manager 定价。
+	modelStoreAdapter provider.ModelStore
+	router            *router.Router
+	engine            *proxy.Engine
+	pools             map[string]*keypool.Pool
+	poolsMu           sync.RWMutex // F4: 保护 s.pools 字段读(s.pools[name])/写(= newPools)
+	auth              *auth.Authenticator
+	usageC            *usage.Collector
+	usageR            *usage.Repository
+	metricsC          *metrics.Collector
+	accessR           *accesslog.Recorder // P67: 接入日志 Recorder
+	quotaM            *quotacheck.Manager // P68: 配额恢复 worker
+	inflightR         *inflight.Registry  // P-inflight: 活跃请求内存快照表
 	// fpEnabled 设备指纹归一化开关原子值(运行时热切,PATCH /api/v1/fingerprint 翻转)。
 	// 指针:engine 闭包与 server 持有同一个实例,热切换共享。默认 = cfg.Fingerprint 开关。
 	// atomic 保证热路径只读一次、无锁。
 	fpEnabled *atomic.Bool
 	// fpSnapshot 启动时 Capture 一次的网关环境快照。热切换只翻 enabled,不改快照。
 	fpSnapshot fingerprint.Snapshot
-	http     *http.Server
+	http       *http.Server
 }
 
 // New 构造 Server
@@ -171,13 +174,21 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		}),
 		// 设备指纹归一化(热切换):闭包每次请求读 fpEnabled,off 时原样透传。
 		FingerprintSanitizer: fingerprintSanitizer(fpEnabled, fpSnap),
-		MaxRetry: cfg.Retry.MaxAttempts,
+		MaxRetry:             cfg.Retry.MaxAttempts,
 		// 流式写 deadline 续期预算 — 与 http.Server.WriteTimeout 同源,
 		// 流式场景下按 chunk 续期成空闲超时(非流式仍是绝对上限)
 		WriteTimeout: cfg.Server.WriteTimeout,
 	})
 	// P30:把 DB Pool 注入到每个 Provider(Manager.LoadFromConfig 时 Pool 还是 nil)
 	injectPools(manager, pools, logger)
+
+	// Task 6:从 DB provider_models 读 pricing/defaultModels 注入 manager(首次启动)。
+	// 必须在 injectPools 之后、LoadFromConfig 已在 main.go 跑过(先于 server.New),
+	// 此时 m.providers 已就绪,LoadModelsFromStore 遍历 m.providers 算 defaultModels 正确。
+	modelStoreAdapter := providerModelStoreAdapter{s: database.NewProviderModelStore(db)}
+	if err := manager.LoadModelsFromStore(context.Background(), modelStoreAdapter); err != nil {
+		logger.Warn("load models from store failed (pricing/defaultModels empty)", zap.Error(err))
+	}
 
 	// P68: 构造 quotacheck.Manager(quota restore worker)
 	endpoints := make(map[string]string, len(cfg.Providers))
@@ -200,26 +211,70 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
 
 	s := &Server{
-		cfg:        cfg,
-		logger:     logger,
-		db:         db,
-		manager:    manager,
-		router:     r,
-		engine:     eng,
-		pools:      pools,
-		auth:       authn,
-		usageC:     usageC,
-		usageR:     usageRepo,
-		metricsC:   metricsC,
-		accessR:    accessR,
-		quotaM:     quotaM,
-		inflightR:  inflightR,
-		fpEnabled:  fpEnabled,
-		fpSnapshot: fpSnap,
+		cfg:               cfg,
+		logger:            logger,
+		db:                db,
+		manager:           manager,
+		modelStoreAdapter: modelStoreAdapter,
+		router:            r,
+		engine:            eng,
+		pools:             pools,
+		auth:              authn,
+		usageC:            usageC,
+		usageR:            usageRepo,
+		metricsC:          metricsC,
+		accessR:           accessR,
+		quotaM:            quotaM,
+		inflightR:         inflightR,
+		fpEnabled:         fpEnabled,
+		fpSnapshot:        fpSnap,
 	}
 	// P-route-order: 启动时把 route_order 的 Level 2 provider 改写加载进 router
 	s.reloadProviderOrder()
 	return s, nil
+}
+
+// providerModelStoreAdapter 把 database.ProviderModelStore 适配成 provider.ModelStore。
+// provider 包不 import database(依赖倒置),由 server(顶层编排)把 database 的
+// ProviderModel 投影成 provider.DBModelRow(厂商粒度)。
+type providerModelStoreAdapter struct {
+	s database.ProviderModelStore
+}
+
+func (a providerModelStoreAdapter) All(ctx context.Context) ([]provider.DBModelRow, error) {
+	rows, err := a.s.All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]provider.DBModelRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, provider.DBModelRow{
+			Vendor:                  r.Vendor,
+			ModelID:                 r.ModelID,
+			CostPerMillionInput:     r.CostPerMillionInput,
+			CostPerMillionCacheRead: r.CostPerMillionCacheRead,
+			CostPerMillionOutput:    r.CostPerMillionOutput,
+		})
+	}
+	return out, nil
+}
+
+func (a providerModelStoreAdapter) ListByVendor(ctx context.Context, vendor string) ([]provider.DBModelRow, error) {
+	rows, err := a.s.ListByVendor(ctx, vendor)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]provider.DBModelRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, provider.DBModelRow{
+			Vendor:                  r.Vendor,
+			ModelID:                 r.ModelID,
+			CostPerMillionInput:     r.CostPerMillionInput,
+			CostPerMillionCacheRead: r.CostPerMillionCacheRead,
+			CostPerMillionOutput:    r.CostPerMillionOutput,
+		})
+	}
+	return out, nil
 }
 
 // P30:把 buildKeyPools 读出来的 Pool 注入到每个 Provider
@@ -820,8 +875,8 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		auth.NewMimoQuotaCookieStore(s.db), // P-mimo-quota: cookie 持久化(单行)
 		// P-mimo-quota 解耦:处理器不 import provider/mimo,由 server(顶层编排者)
 		// 把 vendor 专属校验/注入闭包传入 — 与 keyStatusLookup/quotaMarkFunc 同模式
-		mimo.ValidateQuotaCookie, // MimoQuotaValidate
-		mimo.SetQuotaCookie,      // MimoQuotaSet
+		mimo.ValidateQuotaCookie,          // MimoQuotaValidate
+		mimo.SetQuotaCookie,               // MimoQuotaSet
 		database.NewRouteOrderStore(s.db), // P-route-order: Level 2/3 排序改写仓库(可 nil)
 		func() { // P-route-order: PUT provider 顺序后热更新 router 的 Level 2 排序
 			s.reloadProviderOrder()
@@ -1021,8 +1076,11 @@ func (s *Server) Reload(newCfg *config.Config) {
 	// 路由调度策略(default_strategy / max_attempts)同频热重载(此前会静默保留旧值)
 	s.router.ReloadStrategy(newCfg.Routing.DefaultStrategy, newCfg.Retry.MaxAttempts)
 
-	// Manager 定价表(cost) — 不需要重建 Provider 实例,只刷 pricing map
+	// Manager 定价表(cost) — 不需要重建 Provider 实例,只刷 billingSource/responsesAPI
 	s.manager.ReloadPricing(toManagerConfigForReload(newCfg, s.pools))
+	// Task 6:pricing/defaultModels 改由 DB provider_models 刷(不再读 config models 段)。
+	// 若这里漏掉,热重载后 pricing 仍是旧值(计费不刷新)。
+	_ = s.manager.LoadModelsFromStore(context.Background(), s.modelStoreAdapter)
 
 	// Authenticator — P51: 重载时必须从 DB 重新加载,不能只用 config keys
 	// 否则通过 API 添加的 key 会在 config 热重载后失效

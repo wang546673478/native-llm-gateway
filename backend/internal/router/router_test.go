@@ -32,8 +32,50 @@ func (p *fakeProvider) HealthCheck(ctx context.Context) error { return nil }
 func (p *fakeProvider) ListModels(ctx context.Context) ([]string, error) {
 	return nil, nil
 }
-func (p *fakeProvider) SetPool(*keypool.Pool)                 {}
-func (p *fakeProvider) Close() error                          { return nil }
+func (p *fakeProvider) SetPool(*keypool.Pool) {}
+func (p *fakeProvider) Close() error          { return nil }
+
+// fakeModelStore 最小 provider.ModelStore 实现(router 测试用)。
+// 把 fakeProvider 的 Models 投影成 DBModelRow(粒度 = vendor,经 VendorFor 归位)。
+type fakeModelStore struct {
+	rows []provider.DBModelRow
+}
+
+func (s fakeModelStore) All(ctx context.Context) ([]provider.DBModelRow, error) {
+	return s.rows, nil
+}
+func (s fakeModelStore) ListByVendor(ctx context.Context, vendor string) ([]provider.DBModelRow, error) {
+	var out []provider.DBModelRow
+	for _, r := range s.rows {
+		if r.Vendor == vendor {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// loadModelsFromProviders 用 fakeProvider 的 model 清单填充 manager 的 defaultModels。
+// pricing/defaultModels 已改 DB 来源(Task 6),LoadFromConfig 不再填它们,测试须显式喂 store。
+// rows 的 Vendor = vendor(经 VendorFor 归位),让 LoadModelsFromStore 的 first[vendor] 命中。
+func loadModelsFromProviders(mgr *provider.Manager, rows []provider.DBModelRow) {
+	_ = mgr.LoadModelsFromStore(context.Background(), fakeModelStore{rows: rows})
+}
+
+// modelRowsFromProviders 从 providers(+每个 provider 的 vendor)构造 DBModelRow 清单。
+// 每个 provider 的 Models 全部投影(首个为 defaultModel)。
+func modelRowsFromProviders(vendors map[string]string, ps ...provider.Provider) []provider.DBModelRow {
+	var rows []provider.DBModelRow
+	for _, p := range ps {
+		v := vendors[p.Name()]
+		if v == "" {
+			v = p.Name()
+		}
+		for _, m := range p.Models() {
+			rows = append(rows, provider.DBModelRow{Vendor: v, ModelID: m})
+		}
+	}
+	return rows
+}
 
 // newFakeManager 构造一个带 fake providers 的 Manager
 // 每个测试独立 Registry,避免污染全局
@@ -61,6 +103,7 @@ func newFakeManager(t *testing.T, ps ...provider.Provider) *provider.Manager {
 	if err := mgr.LoadFromConfig(context.Background(), cfg); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)
 	}
+	loadModelsFromProviders(mgr, modelRowsFromProviders(nil, ps...))
 	return mgr
 }
 
@@ -98,6 +141,7 @@ func newFakeManagerWithVendors(t *testing.T, vendors map[string]string, ps ...pr
 	if err := mgr.LoadFromConfig(context.Background(), cfg); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)
 	}
+	loadModelsFromProviders(mgr, modelRowsFromProviders(vendors, ps...))
 	return mgr
 }
 
@@ -1047,7 +1091,7 @@ func TestRouter_CatchAllAuto_Level2OverrideKeyedByVendor(t *testing.T) {
 	// mimo 的 key 比 minimax 晚加入 → 默认「最早 key 时间」序下 miminimax 本应优先;
 	// 但 route_order 改写把 mimo 排到 minimax 前(vendor 键)。修复后应按 vendor 命中,
 	// mimo-token-plan-anthropic 排到第一;修复前它查不到改写,minimax 反而被加权排前。
-	mimoPool := mkPool("token_plan", base)                  // mimo 后加入
+	mimoPool := mkPool("token_plan", base)                    // mimo 后加入
 	minimaxPool := mkPool("token_plan", base.Add(-time.Hour)) // minimax 先加入
 	// 用 RegisterWithProtocolVendor 造「面名 ≠ vendor」的假 provider(fakeProvider 也带 vendor,
 	// 这里直接用带 vendor 的自定义注册;newFakeManager 不够,需显式注册 vendor 元数据)。
@@ -1084,4 +1128,3 @@ func TestRouter_CatchAllAuto_Level2OverrideKeyedByVendor(t *testing.T) {
 			res.ProviderName)
 	}
 }
-

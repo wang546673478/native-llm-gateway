@@ -123,8 +123,26 @@ func (p *fakeProvider) HealthCheck(ctx context.Context) error { return nil }
 func (p *fakeProvider) ListModels(ctx context.Context) ([]string, error) {
 	return nil, nil
 }
-func (p *fakeProvider) SetPool(*keypool.Pool)                 {}
-func (p *fakeProvider) Close() error                          { return nil }
+func (p *fakeProvider) SetPool(*keypool.Pool) {}
+func (p *fakeProvider) Close() error          { return nil }
+
+// fakeModelStore 最小 provider.ModelStore 实现(catch_all 测试喂 defaultModels 用)。
+type fakeModelStore struct {
+	rows []provider.DBModelRow
+}
+
+func (s fakeModelStore) All(ctx context.Context) ([]provider.DBModelRow, error) {
+	return s.rows, nil
+}
+func (s fakeModelStore) ListByVendor(ctx context.Context, vendor string) ([]provider.DBModelRow, error) {
+	var out []provider.DBModelRow
+	for _, r := range s.rows {
+		if r.Vendor == vendor {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
 
 // buildEngine 构造一个挂上 fake provider + 路由的 Engine
 // 返回 (engine, rec) — rec 记录所有用量上报,测试断言用
@@ -1290,6 +1308,11 @@ func TestProxy_CatchAll_ModelNotFoundFailsOver(t *testing.T) {
 	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{Providers: provCfg}); err != nil {
 		t.Fatalf("LoadFromConfig: %v", err)
 	}
+	// Task 6:defaultModels 改 DB 来源,须显式喂 store(否则 catch_all 无候选 → 503)。
+	_ = mgr.LoadModelsFromStore(context.Background(), fakeModelStore{rows: []provider.DBModelRow{
+		{Vendor: "mimo-token-plan-anthropic", ModelID: "mimo-v2.5-pro"},
+		{Vendor: "minimax", ModelID: "MiniMax-M3"},
+	}})
 	r := router.NewRouter(zap.NewNop(), mgr, pools, router.Config{
 		Aliases:  map[string]router.AliasConfig{},
 		CatchAll: &router.AliasConfig{Alias: "*"}, // catch_all 自动模式

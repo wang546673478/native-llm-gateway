@@ -57,6 +57,26 @@ type ModelCost struct {
 	CostPerMillionOutput    float64
 }
 
+// DBModelRow provider 包侧对 database.ProviderModel 的投影结构体。
+// 为免 provider 包 import database 的具体类型,由 server 装配层的适配器把
+// database.ProviderModel 投影成 DBModelRow。粒度 = vendor(厂商),非注册面。
+type DBModelRow struct {
+	Vendor                  string
+	ModelID                 string
+	CostPerMillionInput     float64
+	CostPerMillionCacheRead float64
+	CostPerMillionOutput    float64
+}
+
+// ModelStore provider 包定义的模型读取窄接口(依赖倒置,provider 不 import database)。
+// 由 server 装配层用适配器把 database.ProviderModelStore 适配成本接口。
+type ModelStore interface {
+	// All 返回全部厂商模型行(按 vendor/model_id 有序)。
+	All(ctx context.Context) ([]DBModelRow, error)
+	// ListByVendor 返回某厂商的全部模型行。
+	ListByVendor(ctx context.Context, vendor string) ([]DBModelRow, error)
+}
+
 // ManagerCircuitConfig Circuit Breaker 配置
 type ManagerCircuitConfig struct {
 	FailureThreshold int
@@ -110,7 +130,6 @@ func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pricing = make(map[string]ModelCost)
 
 	loaded := 0
 	for name, pcfg := range cfg.Providers {
@@ -133,22 +152,12 @@ func (m *Manager) LoadFromConfig(ctx context.Context, cfg *ManagerConfig) error 
 			ForceThinkingDisabled: pcfg.ForceThinkingDisabled,
 		}
 
-		// P37: 填充定价表
-		for modelID, cost := range pcfg.ModelCosts {
-			m.pricing[pricingKey(name, modelID)] = cost
-		}
 		// P47: 填充 billing_source
 		bs := pcfg.BillingSource
 		if bs == "" {
 			bs = "api"
 		}
 		m.billingSources[name] = bs
-		// P-catch-all: 默认模型 — 显式配置优先,否则第一个声明
-		dm := pcfg.DefaultModel
-		if dm == "" && len(pcfg.Models) > 0 {
-			dm = pcfg.Models[0]
-		}
-		m.defaultModels[name] = dm
 		// P-responses: Responses API 能力标记
 		m.responsesAPI[name] = pcfg.ResponsesAPI
 		// P-tier-failover: endpoint 映射(给 quotacheck.CheckQuota 提供 baseURL)
@@ -231,11 +240,13 @@ func (m *Manager) Names() []string {
 }
 
 // CostFor P37: 查 (provider, model) 的定价
-// 未找到返回 zero value(cost=0)— Proxy 会用 0 兜底
+// provider 是注册面名,先经 VendorFor 归到厂商(vendor)再查 —— pricing 键是
+// vendor:model(LoadModelsFromStore 存的是 vendor)。未找到返回 zero value(cost=0)。
 func (m *Manager) CostFor(provider, model string) ModelCost {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if c, ok := m.pricing[pricingKey(provider, model)]; ok {
+	v := m.VendorFor(provider)
+	if c, ok := m.pricing[pricingKey(v, model)]; ok {
 		return c
 	}
 	return ModelCost{}
@@ -280,33 +291,66 @@ func (m *Manager) Reload(ctx context.Context, cfg *ManagerConfig) error {
 	return m.LoadFromConfig(ctx, cfg)
 }
 
-// ReloadPricing 只更新定价表,不动 Provider 实例
-// 用于热重载 config.yaml 时同步 cost 改动
+// ReloadPricing 只更新 billingSource + responsesAPI(仍来自 config),不动 Provider 实例。
+// 定价(pricing)与默认模型(defaultModels)已改由 DB provider_models 提供 —— 由
+// LoadModelsFromStore 负责刷新,此处不再读 pcfg.ModelCosts/pcfg.Models。
+// 用于热重载 config.yaml 时同步 billing_source / responses_api 改动。
 func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pricing = make(map[string]ModelCost)
 	m.billingSources = make(map[string]string)
-	m.defaultModels = make(map[string]string)
 	for name, pcfg := range cfg.Providers {
-		for modelID, cost := range pcfg.ModelCosts {
-			m.pricing[pricingKey(name, modelID)] = cost
-		}
 		bs := pcfg.BillingSource
 		if bs == "" {
 			bs = "api"
 		}
 		m.billingSources[name] = bs
-		// P-catch-all: 默认模型与 pricing 同频热重载
-		dm := pcfg.DefaultModel
-		if dm == "" && len(pcfg.Models) > 0 {
-			dm = pcfg.Models[0]
-		}
-		m.defaultModels[name] = dm
 		// P-responses: 能力标记同频热重载
 		m.responsesAPI[name] = pcfg.ResponsesAPI
 	}
-	m.logger.Info("pricing reloaded", zap.Int("entries", len(m.pricing)))
+	m.logger.Info("billing/responses reloaded", zap.Int("providers", len(m.billingSources)))
+}
+
+// LoadModelsFromStore 从 DB provider_models 读入 pricing 与 defaultModels。
+// pricing 键统一为 "<vendor>:<model_id>"(经 VendorFor 归位,不是注册面名);
+// defaultModels 取每个 vendor 的首个 model_id(All 已按 vendor/model_id 排序,确定性)。
+// 首次启动(server.New,LoadFromConfig 之后)与热重载(Reload)都走这里。
+// DB 为空时只打警告,不 panic —— 计费全 0、候选为空,等首次同步 Task 5 拉取填表。
+func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) error {
+	rows, err := store.All(ctx)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pricing = make(map[string]ModelCost)
+	m.defaultModels = make(map[string]string)
+	// vendor → 首个 model_id(排序确定)作默认模型
+	first := make(map[string]string)
+	for _, r := range rows {
+		c := ModelCost{
+			CostPerMillionInput:     r.CostPerMillionInput,
+			CostPerMillionCacheRead: r.CostPerMillionCacheRead,
+			CostPerMillionOutput:    r.CostPerMillionOutput,
+		}
+		m.pricing[pricingKey(r.Vendor, r.ModelID)] = c
+		if _, ok := first[r.Vendor]; !ok {
+			first[r.Vendor] = r.ModelID
+		}
+	}
+	// 给每个启用 provider 的 defaultModel 按 VendorFor 归位
+	for name := range m.providers {
+		v := m.VendorFor(name)
+		if dm, ok := first[v]; ok {
+			m.defaultModels[name] = dm
+		}
+	}
+	if len(rows) == 0 {
+		m.logger.Warn("provider_models empty — pricing/defaultModels empty, no candidates until first sync")
+		return nil
+	}
+	m.logger.Info("models loaded from store", zap.Int("rows", len(rows)))
+	return nil
 }
 
 // SupportsResponsesAPI P-responses: 该 provider 是否原生支持 OpenAI
