@@ -222,7 +222,8 @@ func TestListInflight(t *testing.T) {
 		return []*inflight.Snapshot{{
 			TraceID:        "trace-1",
 			StartedAt:      start,
-			Model:          "deepseek-v4-pro",
+			RequestedModel: "opus",
+			FinalModel:     "deepseek-v4-pro",
 			ProviderName:   "deepseek",
 			GatewayKeyName: "key-1",
 			IsStream:       true,
@@ -232,7 +233,8 @@ func TestListInflight(t *testing.T) {
 		Requests []struct {
 			TraceID        string `json:"trace_id"`
 			StartedAt      string `json:"started_at"`
-			Model          string `json:"model"`
+			RequestedModel string `json:"requested_model"`
+			FinalModel     string `json:"final_model"`
 			ProviderName   string `json:"provider_name"`
 			GatewayKeyName string `json:"gateway_key_name"`
 			IsStream       bool   `json:"is_stream"`
@@ -246,7 +248,7 @@ func TestListInflight(t *testing.T) {
 		t.Fatalf("requests = %d, want 1", len(body.Requests))
 	}
 	r := body.Requests[0]
-	if r.TraceID != "trace-1" || r.Model != "deepseek-v4-pro" || r.ProviderName != "deepseek" ||
+	if r.TraceID != "trace-1" || r.RequestedModel != "opus" || r.FinalModel != "deepseek-v4-pro" || r.ProviderName != "deepseek" ||
 		r.GatewayKeyName != "key-1" || !r.IsStream {
 		t.Errorf("request fields = %+v, want populated snapshot", r)
 	}

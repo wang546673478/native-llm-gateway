@@ -8,12 +8,12 @@ import (
 func TestPutSnapshotAndDelete(t *testing.T) {
 	r := NewRegistry()
 
-	r.Put(&Snapshot{TraceID: "t1", StartedAt: time.Now().UTC(), Model: "m1", IsStream: true})
+	r.Put(&Snapshot{TraceID: "t1", StartedAt: time.Now().UTC(), RequestedModel: "m1", IsStream: true})
 
 	if got := r.Snapshot(); len(got) != 1 {
 		t.Fatalf("after Put, Snapshot len = %d, want 1", len(got))
-	} else if got[0].TraceID != "t1" || got[0].Model != "m1" {
-		t.Fatalf("Snapshot[0] = %+v, want trace_id=t1 model=m1", got[0])
+	} else if got[0].TraceID != "t1" || got[0].RequestedModel != "m1" {
+		t.Fatalf("Snapshot[0] = %+v, want trace_id=t1 requested_model=m1", got[0])
 	}
 
 	r.Delete("t1")
@@ -43,6 +43,30 @@ func TestSetProviderUnknownTraceIsNoop(t *testing.T) {
 	r.SetProvider("ghost", "deepseek") // 不该 panic,不该插入
 	if got := r.Snapshot(); len(got) != 0 {
 		t.Fatalf("SetProvider on unknown trace inserted an entry: %+v", got)
+	}
+}
+
+func TestSetFinalModelUpdatesExisting(t *testing.T) {
+	r := NewRegistry()
+	r.Put(&Snapshot{TraceID: "t1", StartedAt: time.Now().UTC()})
+
+	r.SetFinalModel("t1", "MiniMax-M3")
+	if got := r.Snapshot(); len(got) != 1 || got[0].FinalModel != "MiniMax-M3" {
+		t.Fatalf("after SetFinalModel, got %+v, want final_model=MiniMax-M3", got)
+	}
+
+	// failover 切候选模型
+	r.SetFinalModel("t1", "deepseek-v4-flash")
+	if got := r.Snapshot(); got[0].FinalModel != "deepseek-v4-flash" {
+		t.Fatalf("after failover SetFinalModel, final_model = %q, want deepseek-v4-flash", got[0].FinalModel)
+	}
+}
+
+func TestSetFinalModelUnknownTraceIsNoop(t *testing.T) {
+	r := NewRegistry()
+	r.SetFinalModel("ghost", "MiniMax-M3")
+	if got := r.Snapshot(); len(got) != 0 {
+		t.Fatalf("SetFinalModel on unknown trace inserted an entry: %+v", got)
 	}
 }
 

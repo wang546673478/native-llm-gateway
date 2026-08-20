@@ -1,7 +1,8 @@
 // Package inflight 维护「trace_id → 请求状态」的并发安全内存快照,
 // 供实时「活跃请求」视图读取。纯内存态、结束即消、不留历史。
 //
-// 窄接口约定:Registry 只暴露 Put / SetProvider / Delete / Snapshot 四个方法。
+// 窄接口约定:Registry 只暴露 Put / SetProvider / SetFinalModel / Delete /
+// Snapshot 五个方法。
 // 未来多实例上 Redis 时,只需替换本包内部 map 为 redis.Client,proxy 层不改一行。
 package inflight
 
@@ -12,12 +13,16 @@ import (
 )
 
 // Snapshot 一条活跃请求的只读快照。
-// 全字段为值类型 + string,Snapsohot 返回的结构体拷贝即与后续写入隔离。
+// 全字段为值类型 + string,Snapshot 返回的结构体拷贝即与后续写入隔离。
 type Snapshot struct {
-	TraceID        string
-	StartedAt      time.Time // 请求开始,elapsed_ms 由调用方现算(now - StartedAt)
-	Model          string    // alias 解析后的真实 model
-	ProviderName   string    // 当前正在打的 vendor,随 failover 实时更新
+	TraceID   string
+	StartedAt time.Time // 请求开始,elapsed_ms 由调用方现算(now - StartedAt)
+	// RequestedModel 客户端原始请求名(alias 解析前),如 opus。
+	RequestedModel string
+	// FinalModel 路由实际使用的上游候选模型(result.ModelID),如 MiniMax-M3。
+	// 首次候选选定前为零值(空)。
+	FinalModel     string
+	ProviderName   string // 当前正在打的 vendor,随 failover 实时更新
 	GatewayKeyName string
 	IsStream       bool
 }
@@ -49,6 +54,15 @@ func (r *Registry) SetProvider(traceID, provider string) {
 	defer r.mu.Unlock()
 	if s, ok := r.m[traceID]; ok {
 		s.ProviderName = provider
+	}
+}
+
+// SetFinalModel 更新一条活跃请求实际使用的上游模型。未知 TraceID 是 no-op。
+func (r *Registry) SetFinalModel(traceID, modelID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.m[traceID]; ok {
+		s.FinalModel = modelID
 	}
 }
 

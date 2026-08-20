@@ -1037,7 +1037,8 @@ func (a *Admin) listInflight(c *gin.Context) {
 	type req struct {
 		TraceID        string `json:"trace_id"`
 		StartedAt      string `json:"started_at"`
-		Model          string `json:"model"`
+		RequestedModel string `json:"requested_model"`
+		FinalModel     string `json:"final_model"`
 		ProviderName   string `json:"provider_name"`
 		GatewayKeyName string `json:"gateway_key_name"`
 		IsStream       bool   `json:"is_stream"`
@@ -1049,7 +1050,8 @@ func (a *Admin) listInflight(c *gin.Context) {
 		out = append(out, req{
 			TraceID:        s.TraceID,
 			StartedAt:      s.StartedAt.UTC().Format(time.RFC3339),
-			Model:          s.Model,
+			RequestedModel: s.RequestedModel,
+			FinalModel:     s.FinalModel,
 			ProviderName:   s.ProviderName,
 			GatewayKeyName: s.GatewayKeyName,
 			IsStream:       s.IsStream,

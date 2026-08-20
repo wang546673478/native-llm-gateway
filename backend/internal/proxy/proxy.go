@@ -265,6 +265,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		return
 	}
 	isStream = bodyStream
+	// requestedModel 记客户端原始请求名(alias 解析前),供 inflight 快照展示「请求模型」。
+	// 它必须在这行拿住 —— 下方 alias 解析会把 model 覆盖成 target。
+	requestedModel := model
 	if entry != nil {
 		// P-stream-flag: entry 在 body 解析前创建,IsStream 当时是零值 —
 		// 解析完 body 后补写真实值(之前日志 stream 列恒为 False)
@@ -342,7 +345,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		e.inflight.Put(&inflight.Snapshot{
 			TraceID:        traceID,
 			StartedAt:      time.Now().UTC(),
-			Model:          model,
+			RequestedModel: requestedModel,
 			GatewayKeyName: gkName,
 			IsStream:       isStream,
 		})
@@ -1148,6 +1151,9 @@ func (e *Engine) tryCandidate(
 	// 客户端请求名可能只是标签)。failover 时每次尝试都覆盖,最后一次成功者胜出
 	if entry != nil {
 		entry.FinalModel = result.ModelID
+	}
+	if e.inflight != nil {
+		e.inflight.SetFinalModel(req.TraceID, result.ModelID)
 	}
 	req.Headers.Set("X-Request-Id", req.TraceID)
 	// P-key-mismatch: 把已 acquire 的 key 传给 Provider — 否则 Provider 内部

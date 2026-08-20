@@ -165,7 +165,8 @@ export interface AccessLogStatsResp {
 export interface InflightRequest {
   trace_id: string
   started_at: string
-  model: string
+  requested_model: string
+  final_model: string
   provider_name: string
   gateway_key_name: string
   is_stream: boolean
