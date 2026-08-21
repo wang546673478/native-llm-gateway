@@ -1,6 +1,9 @@
 <template>
   <n-config-provider :theme="null">
     <n-message-provider>
+      <!-- NDialogProvider: useDialog() 的宿主 —— 缺它则 useDialog() 返回 undefined,
+           调用方 setup 阶段抛错、整个页面白屏(ModelManager 的「清理无归属」二次确认用) -->
+      <n-dialog-provider>
       <n-layout has-sider style="min-height: 100vh">
         <n-layout-sider bordered :width="220" collapse-mode="width" :collapsed-width="64" show-trigger="bar">
           <div class="logo">LLM Gateway</div>
@@ -26,6 +29,7 @@
           </n-layout-content>
         </n-layout>
       </n-layout>
+      </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>
 </template>
@@ -34,7 +38,7 @@
 import { computed, h, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  NConfigProvider, NLayout, NLayoutSider, NLayoutHeader, NLayoutContent,
+  NConfigProvider, NDialogProvider, NLayout, NLayoutSider, NLayoutHeader, NLayoutContent,
   NMenu, NMessageProvider, NSpace, NTag,
 } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
