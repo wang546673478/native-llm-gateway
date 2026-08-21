@@ -2,12 +2,12 @@
 //
 // 端点由 config 提供（不含 /v1，anthropic base 拼 /v1/messages）。Right Code 的
 // Claude 有多个渠道，endpoint 换一下即可切换：
-//   - AWSQ 逆向渠道：https://rightapi.ai/claude-aws（当前配置）
-//   - 官渠：        https://rightapi.ai/claude
-//   - 官渠特惠：    https://rightapi.ai/claude-sale
+//   - 官渠：        https://rightapi.ai/claude（注册名 rightapi-claude，本文件）
+//   - AWSQ 逆向：   https://rightapi.ai/claude-aws（注册名 rightapi-claude-aws，见 claude_aws.go）
+//   - 官渠特惠：    https://rightapi.ai/claude-sale（**不接入**，见 rightapi.go 注释）
 //
-// 模型：claude-opus-5 / claude-sonnet-4-6 / claude-haiku-4-5 等（各渠道略有差异，
-// claude-aws 比官渠少 claude-fable-5）。
+// 模型：claude-fable-5 / claude-opus-5 / claude-sonnet-4-6 / claude-haiku-4-5 等
+// （各渠道略有差异，claude-aws 比官渠少 claude-fable-5）。
 //
 // 鉴权兼容 Authorization: Bearer <key> 或 x-api-key。
 //
@@ -36,25 +36,38 @@ const claudeModelsPath = "/v1/models"
 
 // claudeProvider Anthropic 协议 Provider（注册名 "rightapi-claude"）。
 type claudeProvider struct {
+	name   string // 注册面名（rightapi-claude / rightapi-claude-aws）
 	base   *anthropic_compatible.Base
 	cfg    provider.ProviderConfig
 	client *http.Client // 模型列表专用（与 base 的请求客户端分开，互不影响）
 }
 
 func newClaude(cfg provider.ProviderConfig) (provider.Provider, error) {
+	return newClaudeNamed(claudeName, cfg)
+}
+
+func newClaudeAWS(cfg provider.ProviderConfig) (provider.Provider, error) {
+	return newClaudeNamed(claudeAWSName, cfg)
+}
+
+// newClaudeNamed 构造一个 Anthropic 协议的 claude 渠道面。官渠与 AWSQ 逆向
+// 渠道的唯一差别是 endpoint（由 config 提供），逻辑完全相同 —— 复用同一构造器，
+// 避免再抄一份 120 行的文件（低耦合:一个渠道一个文件,但共享构造逻辑）。
+func newClaudeNamed(name string, cfg provider.ProviderConfig) (provider.Provider, error) {
 	if cfg.Protocol != provider.ProtocolAnthropic {
-		return nil, fmt.Errorf("rightapi-claude requires protocol=anthropic, got %q", cfg.Protocol)
+		return nil, fmt.Errorf("%s requires protocol=anthropic, got %q", name, cfg.Protocol)
 	}
 	if cfg.Endpoint == "" {
-		return nil, fmt.Errorf("rightapi-claude endpoint is required")
+		return nil, fmt.Errorf("%s endpoint is required", name)
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	return &claudeProvider{
+		name: name,
 		base: anthropic_compatible.NewBase(anthropic_compatible.Config{
-			Name:     claudeName,
+			Name:     name,
 			Endpoint: cfg.Endpoint,
 			Timeout:  cfg.Timeout,
 			Pool:     cfg.Pool,
@@ -67,8 +80,10 @@ func newClaude(cfg provider.ProviderConfig) (provider.Provider, error) {
 	}, nil
 }
 
-func (p *claudeProvider) Name() string                { return claudeName }
-func (p *claudeProvider) Protocol() provider.Protocol { return provider.ProtocolAnthropic }
+func (p *claudeProvider) Name() string { return p.name }
+func (p *claudeProvider) Protocol() provider.Protocol {
+	return provider.ProtocolAnthropic
+}
 
 func (p *claudeProvider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)

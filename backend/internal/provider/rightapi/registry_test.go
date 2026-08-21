@@ -1,6 +1,6 @@
 // Package rightapi — 注册回归测试。
-// P-provider-vendor: 三协议面注册（codex/grok 走 openai、claude 走 anthropic，
-// vendor 都是 rightapi）是核心不变量，用永久测试钉住，防止未来误删。
+// P-provider-vendor: 五个协议面注册（codex/grok/gemini 走 openai，claude/claude-aws
+// 走 anthropic，vendor 都是 rightapi）是核心不变量，用永久测试钉住，防止未来误删。
 package rightapi
 
 import (
@@ -9,42 +9,34 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
-func TestRegistration_ThreeFaces(t *testing.T) {
+func TestRegistration_AllFaces(t *testing.T) {
 	infos := provider.Default().ListRegisteredInfo()
 
-	// rightapi-codex — openai，vendor = rightapi
-	codex, ok := infos[codexName]
-	if !ok {
-		t.Fatalf("registered name %q missing", codexName)
+	// 每个注册面 → 期望的 (协议, vendor)
+	want := map[string]struct {
+		proto  provider.Protocol
+		vendor string
+	}{
+		codexName:     {provider.ProtocolOpenAI, vendor},
+		grokName:      {provider.ProtocolOpenAI, vendor},
+		geminiName:    {provider.ProtocolOpenAI, vendor},
+		claudeName:    {provider.ProtocolAnthropic, vendor},
+		claudeAWSName: {provider.ProtocolAnthropic, vendor},
 	}
-	if codex.Protocol != provider.ProtocolOpenAI {
-		t.Errorf("%s protocol = %q, want openai", codexName, codex.Protocol)
+	if len(infos) < len(want) {
+		t.Fatalf("registered count = %d, want at least %d faces", len(infos), len(want))
 	}
-	if codex.Vendor != vendor {
-		t.Errorf("%s vendor = %q, want %q", codexName, codex.Vendor, vendor)
-	}
-
-	// rightapi-grok — openai，vendor = rightapi
-	grok, ok := infos[grokName]
-	if !ok {
-		t.Fatalf("registered name %q missing", grokName)
-	}
-	if grok.Protocol != provider.ProtocolOpenAI {
-		t.Errorf("%s protocol = %q, want openai", grokName, grok.Protocol)
-	}
-	if grok.Vendor != vendor {
-		t.Errorf("%s vendor = %q, want %q", grokName, grok.Vendor, vendor)
-	}
-
-	// rightapi-claude — anthropic，vendor = rightapi
-	claude, ok := infos[claudeName]
-	if !ok {
-		t.Fatalf("registered name %q missing", claudeName)
-	}
-	if claude.Protocol != provider.ProtocolAnthropic {
-		t.Errorf("%s protocol = %q, want anthropic", claudeName, claude.Protocol)
-	}
-	if claude.Vendor != vendor {
-		t.Errorf("%s vendor = %q, want %q", claudeName, claude.Vendor, vendor)
+	for name, w := range want {
+		info, ok := infos[name]
+		if !ok {
+			t.Errorf("registered name %q missing", name)
+			continue
+		}
+		if info.Protocol != w.proto {
+			t.Errorf("%s protocol = %q, want %q", name, info.Protocol, w.proto)
+		}
+		if info.Vendor != w.vendor {
+			t.Errorf("%s vendor = %q, want %q", name, info.Vendor, w.vendor)
+		}
 	}
 }

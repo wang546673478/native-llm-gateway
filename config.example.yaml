@@ -217,8 +217,12 @@ providers:
       excluded_errors: ["429"]
 
   # --- Right Code (API 中转站, https://rightapi.ai/) ---
-  # 三个协议面共享 vendor=rightapi + 同一个 key(单 key 通用)。
+  # 每个后缀端点 = 一个协议面(注册名 rightapi-<后缀>),共享 vendor=rightapi + 同一把 key。
+  # 各渠道是不同上游、模型互不相通,归属由 DB provider_model_faces 按面隔离
+  # (踩坑 #25:按 vendor 合并会让 codex 面拿到 claude 模型 → 404)。
   # billing_source 都是 api:余额按量扣费,不足返回 429 → 错误码驱动降档;无余额 API 走 probe。
+  # 未接入 /claude-sale(官渠特惠):实测 503「this group only allows Claude Code clients」,
+  # 是 key 在平台上的账号组开关,网关伪造 header/指纹绕不过;用官渠 /claude 拿同一批模型。
   rightapi-codex:
     enabled: true
     billing_source: "api"
@@ -249,7 +253,38 @@ providers:
       countable_errors: ["5xx", "timeout", "connection_error"]
       excluded_errors: ["429"]
 
+  # Gemini 渠道(Right Code 转成 OpenAI 兼容 chat/completions;无原生 Responses API)
+  rightapi-gemini:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://rightapi.ai/gemini/v1"
+    protocol: "openai"
+    timeout: 60s
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # Claude 官渠(含 claude-fable-5)
   rightapi-claude:
+    enabled: true
+    billing_source: "api"
+    endpoint: "https://rightapi.ai/claude"
+    protocol: "anthropic"
+    timeout: 60s
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
+      countable_errors: ["5xx", "timeout", "connection_error"]
+      excluded_errors: ["429"]
+
+  # Claude AWSQ 逆向渠道(比官渠少 claude-fable-5)
+  rightapi-claude-aws:
     enabled: true
     billing_source: "api"
     endpoint: "https://rightapi.ai/claude-aws"
