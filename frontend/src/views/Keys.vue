@@ -73,7 +73,8 @@
             clearable
           />
           <n-text depth="3" style="font-size: 12px; display: block; margin-top: 4px">
-            用 <code>*</code> 表示允许所有模型。当前可选 {{ availableModelOptions.length }} 个
+            用 <code>*</code> 表示允许所有模型。当前可选 {{ selectableModelCount }} 个;
+            按渠道面分组 —— <b>〔仅此面〕</b>的模型选中即锁定该渠道,<b>〔多面共有〕</b>的任一渠道都可能命中
           </n-text>
         </n-form-item>
 
@@ -171,6 +172,9 @@ interface KeyView {
 
 const keys = ref<KeyView[]>([])
 const providers = ref<ProviderInfo[]>([])
+// P-model-face: vendor → 面 → 该面提供的模型 id(来自 /providers/models 的 faces)。
+// 空 = 该厂商无面归属数据(未同步 / 所有面都无模型列表端点)→ 下拉退回扁平模式
+const modelFaces = ref<Record<string, Record<string, string[]>>>({})
 const providerKeysMap = ref<Record<string, ProviderKeyView[]>>({}) // P34: provider_name → ProviderKey[]
 // P-provider-vendor: store 持 vendors 单一来源;load() 内填充 providers
 const provStore = useProvidersStore()
@@ -236,23 +240,81 @@ const providerModelsUnion = computed<string[]>(() => {
   ))
 })
 
-const availableModelOptions = computed<SelectOption[]>(() => {
-  const opts: SelectOption[] = [
-    { label: '* (通配,所有模型)', value: '*' },
-    ...providerModelsUnion.value
-      .filter(m => m !== '*')
-      .sort()
-      .map(m => ({ label: m, value: m })),
-  ]
-  return opts
+// P-model-face: 模型 → 提供它的面(去掉 vendor 前缀的短名),按当前已选 vendor 过滤。
+// 同一模型可能由同厂商多个面提供(如 claude-opus-4-8 官渠和 AWSQ 都有);
+// 只由一个面提供的模型(如 claude-fable-5 仅官渠)= 选它就锁定了那个渠道。
+const modelFaceMap = computed<Record<string, string[]>>(() => {
+  const selected = form.value.providers
+  const out: Record<string, string[]> = {}
+  for (const [vendor, faces] of Object.entries(modelFaces.value)) {
+    if (selected.length > 0 && !selected.includes(vendor)) continue
+    for (const [face, models] of Object.entries(faces)) {
+      const short = face.startsWith(`${vendor}-`) ? face.slice(vendor.length + 1) : face
+      const label = `${vendor} · ${short}`
+      for (const m of models) {
+        ;(out[m] ??= []).push(label)
+      }
+    }
+  }
+  for (const m of Object.keys(out)) out[m] = Array.from(new Set(out[m])).sort()
+  return out
 })
 
-function renderModelTag({ option, handleClose }: any) {
-  const matched = providers.value
-    .filter(p => form.value.providers.includes(p.name) || form.value.providers.length === 0)
-    .filter(p => p.models.includes(String(option.value)))
-    .map(p => p.name)
-  const suffix = matched.length > 0 ? ` (${matched.join(', ')})` : ''
+// availableModelOptions 白名单模型下拉。
+//
+// P-model-face: 按「提供该模型的面组合」分组 —— 组名即归属,一眼看出选某个模型
+// 会命中哪些渠道。不按单个面分组,是因为同一模型可能属于多个面,那样会在
+// multi-select 里出现重复 value(选一个全亮 + naive-ui 告警)。
+// 无归属数据的模型(未同步的厂商 / 面无模型端点)落到「未标注归属」组,行为同旧版。
+const availableModelOptions = computed<SelectOption[]>(() => {
+  const wildcard: SelectOption = { label: '* (通配,所有模型)', value: '*' }
+  const models = providerModelsUnion.value.filter(m => m !== '*')
+  const faceMap = modelFaceMap.value
+  // 有任何归属信息才分组,否则保持旧的扁平列表(向后兼容)
+  if (!models.some(m => (faceMap[m] ?? []).length > 0)) {
+    return [wildcard, ...models.sort().map(m => ({ label: m, value: m }))]
+  }
+  // 按「面组合」聚类:key = 归属面排序后拼接
+  const groups = new Map<string, string[]>()
+  for (const m of models) {
+    const key = (faceMap[m] ?? []).join(' + ') || '未标注归属'
+    const bucket = groups.get(key)
+    if (bucket) bucket.push(m)
+    else groups.set(key, [m])
+  }
+  const sortedKeys = Array.from(groups.keys()).sort((a, b) => {
+    if (a === '未标注归属') return 1
+    if (b === '未标注归属') return -1
+    return a.localeCompare(b)
+  })
+  return [
+    wildcard,
+    ...sortedKeys.map(key => {
+      const items = (groups.get(key) ?? []).sort()
+      const exclusive = !key.includes(' + ') && key !== '未标注归属'
+      return {
+        type: 'group' as const,
+        // 组名带提示:单一面 = 选中即锁定该渠道;多面 = 任一渠道都可能命中
+        label: `${key}${exclusive ? '  〔仅此面〕' : key === '未标注归属' ? '' : '  〔多面共有〕'} · ${items.length}`,
+        key,
+        children: items.map(m => ({ label: m, value: m })),
+      }
+    }),
+  ]
+})
+
+// selectableModelCount 真实可选模型数(不含通配项与分组标题 —— 分组后
+// availableModelOptions.length 是「组数+1」,拿它当模型数会显示成个位数)
+const selectableModelCount = computed(() => providerModelsUnion.value.filter(m => m !== '*').length)
+
+// renderModelTag 已选模型的 tag —— 后缀标真实归属面。
+// 修复:原实现用 p.models.includes() 判断,而 /providers 的 models 是 vendor 级
+// 合并列表(各面共用一份),导致每个模型都匹配到该厂商的全部注册面,后缀等于没标。
+// 现在读 provider_model_faces 的真实归属。
+function renderModelTag({ option }: any) {
+  const value = String(option.value)
+  const faces = modelFaceMap.value[value] ?? []
+  const suffix = faces.length > 0 ? ` (${faces.join(', ')})` : ''
   return h(
     'span',
     {
@@ -271,6 +333,17 @@ async function load() {
     const [keysResp] = await Promise.all([
       api.keys.list().catch(() => ({ keys: [], count: 0 })),
       provStore.load(),
+      // P-model-face: 拉「面→模型」归属,让白名单下拉能按渠道分组 + 标「仅此面/多面共有」。
+      // 中转站厂商同一 vendor 下各面是不同上游、模型互不相通(如 claude-fable-5 只有
+      // 官渠有),扁平列表看不出选某个模型会不会锁死渠道。拉失败则退回扁平模式。
+      api.models
+        .list()
+        .then(r => {
+          modelFaces.value = r.faces ?? {}
+        })
+        .catch(() => {
+          modelFaces.value = {}
+        }),
     ])
     keys.value = keysResp.keys
     // reg-name → vendor 映射来自 store getter(单一来源,不再本地手撸循环)
