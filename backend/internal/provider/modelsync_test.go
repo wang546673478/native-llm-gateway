@@ -43,6 +43,8 @@ type fakeModelSyncStore struct {
 	modelIDs []string
 	err      error
 	calls    int
+	// faceCalls 记录每个面各自落库的归属(P-model-face),face → modelIDs
+	faceCalls map[string][]string
 }
 
 func (s *fakeModelSyncStore) UpsertModels(ctx context.Context, vendor string, modelIDs []string) error {
@@ -50,6 +52,14 @@ func (s *fakeModelSyncStore) UpsertModels(ctx context.Context, vendor string, mo
 	s.vendor = vendor
 	s.modelIDs = modelIDs
 	return s.err
+}
+
+func (s *fakeModelSyncStore) ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
+	if s.faceCalls == nil {
+		s.faceCalls = make(map[string][]string)
+	}
+	s.faceCalls[face] = modelIDs
+	return nil
 }
 
 func TestSyncVendorModels_FindsOpenAIFace(t *testing.T) {
@@ -182,6 +192,41 @@ func TestSyncVendorModels_MergesFaces(t *testing.T) {
 	if store.calls != 1 {
 		t.Fatalf("store calls = %d, want 1 (single upsert for merged list)", store.calls)
 	}
+	// P-model-face: 合并进定价表的同时,每个面各自的归属必须单独落库 ——
+	// 否则中转站两个面共享合并清单,codex 面会拿到 claude 模型发给自己的端点 → 404。
+	// 注意 gpt-5.5 同时属于两个面(去重只发生在 vendor 级合并,不影响面归属)。
+	if got := store.faceCalls["rc-codex"]; !reflect.DeepEqual(got, []string{"gpt-5.4", "gpt-5.5"}) {
+		t.Errorf("faceCalls[rc-codex] = %v, want [gpt-5.4 gpt-5.5]", got)
+	}
+	if got := store.faceCalls["rc-claude"]; !reflect.DeepEqual(got, []string{"claude-opus-5", "gpt-5.5"}) {
+		t.Errorf("faceCalls[rc-claude] = %v, want [claude-opus-5 gpt-5.5]", got)
+	}
+}
+
+// TestSyncVendorModels_FailedFaceKeepsItsAttribution P-model-face:某面 ListModels
+// 失败/NotSupported 时**不动它已有的归属** —— 只有成功的面才 ReplaceFaceModels。
+// 若失败也清空归属,该面会掉进 vendor 级 fallback 拿到全厂商模型(含别的面的),
+// 等于把本次修的 bug 在上游抖动时重新引入。
+func TestSyncVendorModels_FailedFaceKeepsItsAttribution(t *testing.T) {
+	okFace := &fakeModelsProvider{name: "rc-codex", protocol: ProtocolOpenAI, models: []string{"gpt-5.4"}}
+	failFace := &fakeModelsProvider{name: "rc-claude", protocol: ProtocolAnthropic, listErr: errors.New("upstream 503")}
+	reg := NewRegistry()
+	mgr := NewManager(reg, zap.NewNop())
+	reg.RegisterWithProtocolVendor("rc-codex", func(cfg ProviderConfig) (Provider, error) { return okFace, nil }, ProtocolOpenAI, "rightapi")
+	reg.RegisterWithProtocolVendor("rc-claude", func(cfg ProviderConfig) (Provider, error) { return failFace, nil }, ProtocolAnthropic, "rightapi")
+	mgr.SetForTesting("rc-codex", okFace)
+	mgr.SetForTesting("rc-claude", failFace)
+
+	store := &fakeModelSyncStore{}
+	if _, err := SyncVendorModels(context.Background(), mgr, "rightapi", store); err != nil {
+		t.Fatalf("SyncVendorModels: %v", err)
+	}
+	if _, ok := store.faceCalls["rc-codex"]; !ok {
+		t.Error("成功的面必须落归属:faceCalls 缺 rc-codex")
+	}
+	if _, ok := store.faceCalls["rc-claude"]; ok {
+		t.Error("失败的面不能落归属(会清空已有归属):faceCalls 不该有 rc-claude")
+	}
 }
 
 // fakeCountingSyncStore 每个 vendor 独立计数,验证"全部同步"逐个落库。
@@ -198,6 +243,10 @@ func (s *fakeCountingSyncStore) UpsertModels(ctx context.Context, vendor string,
 	if s.errByVendor != nil {
 		return s.errByVendor[vendor]
 	}
+	return nil
+}
+
+func (s *fakeCountingSyncStore) ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
 	return nil
 }
 

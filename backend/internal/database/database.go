@@ -76,6 +76,7 @@ func Migrate(db *gorm.DB) error {
 	tables := []interface{}{
 		&Provider{},
 		&ProviderModel{},
+		&ProviderModelFace{}, // P-model-face: 面→模型归属(中转站多后缀厂商)
 		&ModelAlias{},
 		&ProviderAPIKey{}, // P30: 替换 APIKey 表
 		&UsageRecord{},

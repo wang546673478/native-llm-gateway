@@ -63,6 +63,15 @@ type DBModelRow struct {
 	CostPerMillionOutput    float64
 }
 
+// DBFaceRow provider 包侧对 database.ProviderModelFace 的投影结构体。
+// 粒度 = 注册面(face),记「该面提供哪些模型」+ 面内顺序。
+type DBFaceRow struct {
+	Vendor    string
+	Face      string
+	ModelID   string
+	SortOrder int
+}
+
 // ModelStore provider 包定义的模型读取窄接口(依赖倒置,provider 不 import database)。
 // 由 server 装配层用适配器把 database.ProviderModelStore 适配成本接口。
 type ModelStore interface {
@@ -70,6 +79,8 @@ type ModelStore interface {
 	All(ctx context.Context) ([]DBModelRow, error)
 	// ListByVendor 返回某厂商的全部模型行。
 	ListByVendor(ctx context.Context, vendor string) ([]DBModelRow, error)
+	// AllFaces 返回全部面归属行(按 vendor/face/sort_order 有序)。
+	AllFaces(ctx context.Context) ([]DBFaceRow, error)
 }
 
 // ManagerCircuitConfig Circuit Breaker 配置
@@ -96,6 +107,10 @@ type Manager struct {
 	// P-catch-all: provider name → 默认模型(catch_all 自动模式用)。
 	// LoadFromConfig / ReloadPricing 时填充;热重载同步
 	defaultModels map[string]string
+	// P-model-face: 注册面名 → 该面提供的模型(按面内 sort_order 有序)。
+	// 空 map / 某面缺失 = 该面无归属数据 → ModelsFor 退回 vendor 级全量清单
+	// (向后兼容:未同步过的厂商、或 anthropic 面这类无模型列表端点的面)。
+	faceModels map[string][]string
 	// P-responses: provider name → 是否原生支持 Responses API(/v1/responses)
 	// LoadFromConfig / ReloadPricing 时填充
 	responsesAPI map[string]bool
@@ -116,6 +131,7 @@ func NewManager(registry *Registry, logger *zap.Logger) *Manager {
 		pricing:        make(map[string]ModelCost),
 		billingSources: make(map[string]string),
 		defaultModels:  make(map[string]string),
+		faceModels:     make(map[string][]string),
 		responsesAPI:   make(map[string]bool),
 		endpoints:      make(map[string]string),
 	}
@@ -269,13 +285,30 @@ func (m *Manager) VendorFor(name string) string {
 }
 
 // ModelsFor 返回某注册面的可用模型 id。
-// 语义(方案 A):vendor 是模型归属的唯一维度 — 同一 vendor 下所有协议面
-// (openai/anthropic/token-plan...)共享同一份模型清单,天然等价于"每个面自己的清单"
-// (因为 DB 按 vendor 存、各面不单独声明)。经 VendorFor 归位后返回该 vendor 的清单。
-// 未同步/无数据 → 空切片。排序确定(按 model 名字典序)。
+//
+// 语义(P-model-face,2026-08-21 起):模型归属的维度是**注册面**,不是 vendor ——
+// 中转站厂商(rightapi)每个后缀端点是不同上游,模型互不相通:codex 面只有 gpt-*、
+// grok 面只有 grok-*、claude 面只有 claude-*。按 vendor 合并会让 codex 面拿到
+// claude 模型并发给上游 → 404 model not found(实测),该面永远轮不到干活。
+//
+// 核心不变式(fallback):**该面无归属行时,退回该 vendor 的全量清单**。
+// 这一条同时覆盖两种正当情形,不能省:
+//   - 尚未同步过的厂商(迁移后首次启动)→ 否则候选全空 → 全部 503
+//   - anthropic 面这类无模型列表端点的面(deepseek-anthropic)→ 它与 openai 面
+//     确实共享同一批模型,vendor 全量正是正确答案
+//
+// 未同步/无数据 → 空切片。排序确定(按 model 名字典序,与调用方历史行为一致)。
 func (m *Manager) ModelsFor(name string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// 该面有归属行 → 只用它自己的(面间隔离)
+	if models, ok := m.faceModels[name]; ok && len(models) > 0 {
+		out := make([]string, len(models))
+		copy(out, models)
+		sort.Strings(out)
+		return out
+	}
+	// fallback:退回 vendor 级全量清单
 	v := m.VendorFor(name)
 	out := make([]string, 0)
 	seen := map[string]bool{}
@@ -331,13 +364,21 @@ func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 	m.logger.Info("billing/responses reloaded", zap.Int("providers", len(m.billingSources)))
 }
 
-// LoadModelsFromStore 从 DB provider_models 读入 pricing 与 defaultModels。
-// pricing 键统一为 "<vendor>:<model_id>"(经 VendorFor 归位,不是注册面名);
-// defaultModels 取每个 vendor 的首个 model_id —— All 按 (vendor, sort_order) 排,
+// LoadModelsFromStore 从 DB provider_models + provider_model_faces 读入
+// pricing / defaultModels / faceModels。
+//
+// pricing 键统一为 "<vendor>:<model_id>"(经 VendorFor 归位,不是注册面名)——
+// 定价是厂商级属性,同一模型在同厂商各面价格相同,face 不进 pricingKey。
+//
+// defaultModels 按**面**取:该面在 provider_model_faces 里 sort_order 最小的模型;
+// 该面无归属行时落回 vendor 级首行(All 按 (vendor, sort_order) 排)。
 // sort_order 是上游 ListModels 的返回下标,上游把旗舰款排最前(minimax=M3、
 // mimo=mimo-v2.5、deepseek=v4-flash),与改动前的默认模型一致。
 // 不能改回 model_id 字典序:那会把 MiniMax-M3 排到 MiniMax-M2 之后,
 // catch_all 模式下主力模型静默降级(2026-08-20 根因)。
+// 按面取默认模型是 2026-08-21 修的第二个同类根因:vendor 级首行对中转站
+// 意味着 codex/grok 面拿到 claude 模型 → 404,该面 0 条成功记录。
+//
 // 首次启动(server.New,LoadFromConfig 之后)与热重载(Reload)都走这里。
 // DB 为空时只打警告,不 panic —— 计费全 0、候选为空,等首次同步 Task 5 拉取填表。
 func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) error {
@@ -345,11 +386,16 @@ func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) err
 	if err != nil {
 		return err
 	}
+	faceRows, err := store.AllFaces(ctx)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pricing = make(map[string]ModelCost)
 	m.defaultModels = make(map[string]string)
-	// vendor → 首个 model_id(排序确定)作默认模型
+	m.faceModels = make(map[string][]string)
+	// vendor → 首个 model_id(排序确定)作 fallback 默认模型
 	first := make(map[string]string)
 	for _, r := range rows {
 		c := ModelCost{
@@ -362,10 +408,21 @@ func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) err
 			first[r.Vendor] = r.ModelID
 		}
 	}
-	// 给每个启用 provider 的 defaultModel 按 VendorFor 归位
+	// 面归属:AllFaces 已按 (vendor, face, sort_order) 排序,append 即保持面内上游顺序
+	faceFirst := make(map[string]string)
+	for _, fr := range faceRows {
+		m.faceModels[fr.Face] = append(m.faceModels[fr.Face], fr.ModelID)
+		if _, ok := faceFirst[fr.Face]; !ok {
+			faceFirst[fr.Face] = fr.ModelID
+		}
+	}
+	// 默认模型:该面有归属 → 用面内首个;否则落回该 vendor 首行(向后兼容)
 	for name := range m.providers {
-		v := m.VendorFor(name)
-		if dm, ok := first[v]; ok {
+		if dm, ok := faceFirst[name]; ok {
+			m.defaultModels[name] = dm
+			continue
+		}
+		if dm, ok := first[m.VendorFor(name)]; ok {
 			m.defaultModels[name] = dm
 		}
 	}
@@ -373,7 +430,8 @@ func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) err
 		m.logger.Warn("provider_models empty — pricing/defaultModels empty, no candidates until first sync")
 		return nil
 	}
-	m.logger.Info("models loaded from store", zap.Int("rows", len(rows)))
+	m.logger.Info("models loaded from store",
+		zap.Int("rows", len(rows)), zap.Int("face_rows", len(faceRows)))
 	return nil
 }
 

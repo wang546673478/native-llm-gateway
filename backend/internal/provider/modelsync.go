@@ -11,15 +11,25 @@ import (
 // ModelSyncStore 同步落库所需的最小 DB 接口(由 database 实现注入),
 // 放 provider 包定接口 = 依赖倒置,provider 不 import database。
 type ModelSyncStore interface {
+	// UpsertModels 落厂商级模型清单(定价表,只增不删,保留手工价)。
 	UpsertModels(ctx context.Context, vendor string, modelIDs []string) error
+	// ReplaceFaceModels 整体替换某注册面的模型归属(P-model-face)。
+	ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error
 }
 
 // SyncVendorModels 拉某厂商上游在售模型并落库。
-// 遍历该 vendor 的所有注册面,逐个调 ListModels 合并去重;单个面返回
-// ErrListModelsNotSupported / 其它错误时继续试其它面(不中断整体)。
-// 这样"同一 vendor 多协议面各自有模型端点"的中转站厂商(如 rightapi 的
-// codex/grok/claude 三面各有一份 /v1/models)能合并到同一 vendor 名下;
-// 而 deepseek/minimax/mimo 的 anthropic 面返回 NotSupported 直接跳过,行为不变。
+//
+// 遍历该 vendor 的所有注册面,逐个调 ListModels:
+//   - 该面成功 → 立即 ReplaceFaceModels 记下**这个面**的归属(P-model-face),
+//     并把 id 合并进 vendor 级清单
+//   - 该面返回 ErrListModelsNotSupported / 其它错误 → 跳过,**不动它已有的归属**
+//     (上游临时抖动不该清空归属;anthropic 面这类天生无模型端点的面永远无归属,
+//     由 ModelsFor 的 fallback 退回 vendor 全量)
+//
+// 面归属让中转站厂商(rightapi 的 codex/grok/claude 三面各有一份 /v1/models、
+// 模型互不相通)不再把 claude 模型发给 codex 端点(404 model not found);
+// 而 deepseek/minimax/mimo 的 anthropic 面无归属 → fallback 共享 openai 面的清单,
+// 行为不变。
 func SyncVendorModels(ctx context.Context, m *Manager, vendor string, store ModelSyncStore) ([]string, error) {
 	var merged []string
 	seen := make(map[string]bool)
@@ -34,7 +44,12 @@ func SyncVendorModels(ctx context.Context, m *Manager, vendor string, store Mode
 		ids, err := p.ListModels(ctx)
 		if err != nil {
 			// 该面不支持模型列表(NotSupported)或拉取失败 → 跳过,由其它面兜底。
+			// 不碰该面已有归属:失败是瞬态的,清空会让该面掉进 fallback 拿到全厂商模型。
 			continue
+		}
+		// 记下该面自己的归属(整体替换 → 上游下架的模型从该面消失)
+		if err := store.ReplaceFaceModels(ctx, vendor, n, ids); err != nil {
+			return nil, err
 		}
 		for _, id := range ids {
 			if id != "" && !seen[id] {

@@ -206,3 +206,48 @@ func TestMigrateProviderVendorKeys_LeavesOthersUntouched(t *testing.T) {
 		}
 	}
 }
+
+// TestProviderModelFaceSchema P-model-face:面归属表的 schema 契约。
+// 唯一索引必须是 (face, model_id) 两列 —— face 是注册面名而不是协议:
+// 中转站可以有两个同协议、不同 endpoint、模型互斥的面(rightapi-codex 与
+// rightapi-grok 都是 openai),用协议当键会把它们的模型混在一起。
+func TestProviderModelFaceSchema(t *testing.T) {
+	if got := (ProviderModelFace{}).TableName(); got != "provider_model_faces" {
+		t.Errorf("TableName() = %q, want provider_model_faces", got)
+	}
+	s, err := schema.Parse(&ProviderModelFace{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	want := map[string]bool{"vendor": false, "face": false, "model_id": false, "sort_order": false}
+	for _, f := range s.Fields {
+		if _, ok := want[f.DBName]; ok {
+			want[f.DBName] = true
+		}
+	}
+	for col, found := range want {
+		if !found {
+			t.Errorf("missing column %q", col)
+		}
+	}
+	foundIdx := false
+	for _, idx := range s.ParseIndexes() {
+		if idx.Name != "idx_face_model" {
+			continue
+		}
+		foundIdx = true
+		var cols []string
+		for _, c := range idx.Fields {
+			cols = append(cols, c.DBName)
+		}
+		if len(cols) != 2 || cols[0] != "face" || cols[1] != "model_id" {
+			t.Errorf("idx_face_model columns = %v, want [face model_id]", cols)
+		}
+		if idx.Class != "UNIQUE" {
+			t.Errorf("idx_face_model should be unique, got class %q", idx.Class)
+		}
+	}
+	if !foundIdx {
+		t.Error("idx_face_model 索引缺失(同面同模型会重复插入)")
+	}
+}

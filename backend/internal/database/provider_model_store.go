@@ -20,6 +20,18 @@ type ProviderModelStore interface {
 	SavePricing(ctx context.Context, vendor, modelID string, input, cacheRead, output float64) error
 	// All 列出全部分组后的厂商模型(供模型管理页一次性渲染)。
 	All(ctx context.Context) ([]ProviderModel, error)
+
+	// --- P-model-face: 面→模型归属(provider_model_faces 表) ---
+
+	// ReplaceFaceModels 整体替换某**面**的模型归属(先删该面全部旧行再按序插入),
+	// sort_order 记该面 ListModels 的返回下标。只在该面 ListModels 成功时调用 ——
+	// 失败/NotSupported 时不动已有归属,避免上游临时抖动清空归属。
+	ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error
+	// AllFaces 列出全部面归属行(按 vendor/face/sort_order 有序)。
+	AllFaces(ctx context.Context) ([]ProviderModelFace, error)
+	// PruneOrphanModels 删除该 vendor 下「在任何面都无归属」的 provider_models 行,
+	// 返回删除行数。用于清理上游下架/换 channel 后残留的模型(手工触发,不在同步里自动跑)。
+	PruneOrphanModels(ctx context.Context, vendor string) (int64, error)
 }
 
 type gormProviderModelStore struct{ db *gorm.DB }
@@ -99,4 +111,68 @@ func (s *gormProviderModelStore) All(ctx context.Context) ([]ProviderModel, erro
 		return nil, err
 	}
 	return out, nil
+}
+
+// ReplaceFaceModels 整体替换某面的归属:事务内先删该面旧行,再按 modelIDs 顺序插入。
+// 整体替换(而非 upsert)才能让上游下架的模型从该面消失 —— 归属是可再生数据
+// (每次同步重新拉),没有手工内容需要保护;定价在 provider_models 里,不受影响。
+func (s *gormProviderModelStore) ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
+	now := time.Now()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("face = ?", face).Delete(&ProviderModelFace{}).Error; err != nil {
+			return err
+		}
+		rows := make([]ProviderModelFace, 0, len(modelIDs))
+		for i, id := range modelIDs {
+			if id == "" {
+				continue
+			}
+			rows = append(rows, ProviderModelFace{
+				Vendor:    vendor,
+				Face:      face,
+				ModelID:   id,
+				SortOrder: i,
+				SyncedAt:  &now,
+			})
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		return tx.Create(&rows).Error
+	})
+}
+
+func (s *gormProviderModelStore) AllFaces(ctx context.Context) ([]ProviderModelFace, error) {
+	var out []ProviderModelFace
+	// 按 (vendor, face, sort_order) 排 —— manager 取每个面的首行作该面默认模型,
+	// 依赖这里保持该面上游返回顺序(与 All 的 sort_order 契约同构)。
+	if err := s.db.WithContext(ctx).
+		Order("vendor ASC, face ASC, sort_order ASC, model_id ASC").Find(&out).Error; err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PruneOrphanModels 删除该 vendor 下无任何面归属的模型行。
+// 注意:会连带删掉这些模型的手工价格 —— 它们已不在任何面的上游清单里,
+// 留着也无法路由。手工触发(模型管理页「清理无归属」),不在同步流程里自动跑。
+//
+// 安全前提:该 vendor 一条归属行都没有时**直接返回 0 不删**。此时 vendor 处于
+// fallback 模式(尚未同步过,或所有面都不支持模型列表),所有模型都隐式可用 ——
+// 若照常执行 `NOT IN (空集)` 会把该 vendor 的模型全删光。
+func (s *gormProviderModelStore) PruneOrphanModels(ctx context.Context, vendor string) (int64, error) {
+	var faceRows int64
+	if err := s.db.WithContext(ctx).Model(&ProviderModelFace{}).
+		Where("vendor = ?", vendor).Count(&faceRows).Error; err != nil {
+		return 0, err
+	}
+	if faceRows == 0 {
+		return 0, nil
+	}
+	res := s.db.WithContext(ctx).
+		Where("vendor = ?", vendor).
+		Where("model_id NOT IN (?)",
+			s.db.Model(&ProviderModelFace{}).Select("model_id").Where("vendor = ?", vendor)).
+		Delete(&ProviderModel{})
+	return res.RowsAffected, res.Error
 }

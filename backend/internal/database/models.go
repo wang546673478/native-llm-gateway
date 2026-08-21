@@ -55,6 +55,36 @@ type ProviderModel struct {
 // TableName
 func (ProviderModel) TableName() string { return "provider_models" }
 
+// ProviderModelFace 记录「某注册面提供哪些模型」+ 面内顺序。
+//
+// 为什么与 provider_models 分表(而不是给它加一个 face 列):
+//   - 定价是 (vendor, model_id) 的属性 —— deepseek 的 openai/anthropic 两面共享
+//     同一批模型,加 face 列会让同一个模型出现多行,同一个价要填多次。
+//   - 归属是 (face, model_id) 的多对多关系,天然是一张 join 表。
+//
+// 为什么 SortOrder 在这里也有一份:顺序是**面内**的属性,不是 vendor 的 ——
+// 中转站每个面是不同上游,codex 面首个是 gpt-5.4、claude 面首个是 claude-haiku,
+// 各有各的序。面内默认模型取本表 sort_order 最小者;无归属行时落回
+// provider_models.sort_order(见 manager.LoadModelsFromStore 的 fallback)。
+//
+// face 存注册面名(rightapi-codex / deepseek-anthropic),不是协议 —— 中转站可以有
+// 两个同协议、不同 endpoint、模型互斥的面(rightapi-codex 与 rightapi-grok 都是
+// openai),协议不足以区分。
+type ProviderModelFace struct {
+	ID      uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	Vendor  string `gorm:"column:vendor;index;not null" json:"vendor"`
+	Face    string `gorm:"column:face;uniqueIndex:idx_face_model;not null" json:"face"`
+	ModelID string `gorm:"column:model_id;uniqueIndex:idx_face_model;not null" json:"model_id"`
+	// SortOrder 该面 ListModels 返回该模型的下标(0 起) —— 面内默认模型据此选
+	SortOrder int        `gorm:"column:sort_order;not null;default:0" json:"sort_order"`
+	SyncedAt  *time.Time `gorm:"column:synced_at" json:"synced_at"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// TableName
+func (ProviderModelFace) TableName() string { return "provider_model_faces" }
+
 // ModelAlias 别名路由(可由多个 Provider 的多个 model 映射到同一个别名)
 type ModelAlias struct {
 	ID           uint      `gorm:"primaryKey;autoIncrement" json:"id"`

@@ -53,6 +53,12 @@ func (s fakeModelStore) ListByVendor(ctx context.Context, vendor string) ([]prov
 	return out, nil
 }
 
+// AllFaces 返回空 —— router 测试全部走 vendor 级 fallback(无面归属数据),
+// 与「未同步过的厂商」和「anthropic 面共享 openai 面模型」的线上语义一致。
+func (s fakeModelStore) AllFaces(ctx context.Context) ([]provider.DBFaceRow, error) {
+	return nil, nil
+}
+
 // loadModelsFromProviders 用 fakeProvider 的 model 清单填充 manager 的 defaultModels。
 // pricing/defaultModels 已改 DB 来源(Task 6),LoadFromConfig 不再填它们,测试须显式喂 store。
 // rows 的 Vendor = vendor(经 VendorFor 归位),让 LoadModelsFromStore 的 first[vendor] 命中。

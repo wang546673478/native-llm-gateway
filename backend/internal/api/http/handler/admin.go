@@ -182,6 +182,7 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	r.GET("/providers/models", a.listProviderModels)
 	r.POST("/providers/sync-models", a.syncProviderModels)
 	r.POST("/providers/sync-all-models", a.syncAllProviderModels)
+	r.POST("/providers/models/prune", a.pruneProviderModels)
 	r.PUT("/providers/models", a.saveProviderModelPricing)
 	r.GET("/providers/:name", a.getProvider)
 	// P-mimo-quota: MIMO 控制台 cookie 查询/更新(cookie 约 1 天过期,过期后
@@ -339,6 +340,8 @@ func (a *Admin) getProvider(c *gin.Context) {
 }
 
 // listProviderModels GET /api/v1/providers/models — 列出所有厂商模型(按 vendor 分组)。
+// 同时返回 faces:vendor → face → 该面提供的模型 id 列表(P-model-face),供页面
+// 渲染面 tab 与归属列。不在任何 face 列表里的模型 = 无归属(上游已下架/换 channel 残留)。
 func (a *Admin) listProviderModels(c *gin.Context) {
 	if a.ModelStore == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model_store_unavailable"})
@@ -349,11 +352,50 @@ func (a *Admin) listProviderModels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	faceRows, err := a.ModelStore.AllFaces(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	group := map[string][]dbpkg.ProviderModel{}
 	for _, r := range rows {
 		group[r.Vendor] = append(group[r.Vendor], r)
 	}
-	c.JSON(http.StatusOK, gin.H{"vendors": group, "count": len(group)})
+	// faces: vendor → face → [model_id...](AllFaces 已按 vendor/face/sort_order 排序)
+	faces := map[string]map[string][]string{}
+	for _, fr := range faceRows {
+		if faces[fr.Vendor] == nil {
+			faces[fr.Vendor] = map[string][]string{}
+		}
+		faces[fr.Vendor][fr.Face] = append(faces[fr.Vendor][fr.Face], fr.ModelID)
+	}
+	c.JSON(http.StatusOK, gin.H{"vendors": group, "faces": faces, "count": len(group)})
+}
+
+// pruneProviderModels POST /api/v1/providers/models/prune {vendor} — 清理无归属模型。
+// 删除该 vendor 下在任何协议面都不再出现的模型行(连带其手工价格)。
+// 该 vendor 尚无任何归属数据时不删(store 层保护 fallback 模式,见 PruneOrphanModels)。
+func (a *Admin) pruneProviderModels(c *gin.Context) {
+	var body struct {
+		Vendor string `json:"vendor"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Vendor == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vendor required"})
+		return
+	}
+	if a.ModelStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model_store_unavailable"})
+		return
+	}
+	deleted, err := a.ModelStore.PruneOrphanModels(c.Request.Context(), body.Vendor)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if a.ModelReload != nil {
+		_ = a.ModelReload()
+	}
+	c.JSON(http.StatusOK, gin.H{"vendor": body.Vendor, "deleted": deleted})
 }
 
 // syncProviderModels POST /api/v1/providers/sync-models {vendor} — 触发上游模型同步。

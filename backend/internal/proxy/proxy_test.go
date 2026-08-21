@@ -143,6 +143,11 @@ func (s fakeModelStore) ListByVendor(ctx context.Context, vendor string) ([]prov
 	return out, nil
 }
 
+// AllFaces 返回空 —— proxy 测试全部走 vendor 级 fallback(无面归属数据)。
+func (s fakeModelStore) AllFaces(ctx context.Context) ([]provider.DBFaceRow, error) {
+	return nil, nil
+}
+
 // buildEngine 构造一个挂上 fake provider + 路由的 Engine
 // 返回 (engine, rec) — rec 记录所有用量上报,测试断言用
 func buildEngine(t *testing.T, p *fakeProvider, aliases map[string]router.AliasConfig) (*Engine, *recordingUsage) {

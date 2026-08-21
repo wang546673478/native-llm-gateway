@@ -59,6 +59,11 @@ func (s fakeModelStore) ListByVendor(ctx context.Context, vendor string) ([]prov
 	return out, nil
 }
 
+// AllFaces 返回空 —— listProviders 测试走 vendor 级 fallback(无面归属数据)。
+func (s fakeModelStore) AllFaces(ctx context.Context) ([]provider.DBFaceRow, error) {
+	return nil, nil
+}
+
 // TestListProviders_VendorAggregation P-provider-vendor:
 // GET /providers 按 vendor 聚合 — deepseek 双注册名归一个 vendor,names 排序确定,
 // models 并集去重,key_pool 来自共享 pool(vendor 名)
@@ -291,8 +296,11 @@ func TestListInflight(t *testing.T) {
 // fakeProviderModelStore 最小 database.ProviderModelStore 实现(模型管理端点测试替身)。
 type fakeProviderModelStore struct {
 	rows        []dbpkg.ProviderModel
+	faceRows    []dbpkg.ProviderModelFace
 	savedVendor string
 	savedModel  string
+	prunedVendor string
+	pruneDeleted int64
 }
 
 func (s *fakeProviderModelStore) All(ctx context.Context) ([]dbpkg.ProviderModel, error) {
@@ -314,6 +322,16 @@ func (s *fakeProviderModelStore) SavePricing(ctx context.Context, vendor, modelI
 	s.savedVendor = vendor
 	s.savedModel = modelID
 	return nil
+}
+func (s *fakeProviderModelStore) ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
+	return nil
+}
+func (s *fakeProviderModelStore) AllFaces(ctx context.Context) ([]dbpkg.ProviderModelFace, error) {
+	return s.faceRows, nil
+}
+func (s *fakeProviderModelStore) PruneOrphanModels(ctx context.Context, vendor string) (int64, error) {
+	s.prunedVendor = vendor
+	return s.pruneDeleted, nil
 }
 
 // TestListProviderModels_ModelStoreNil P-model-sync:ModelStore=nil → 503。
@@ -454,5 +472,105 @@ func TestSaveProviderModelPricing(t *testing.T) {
 	}
 	if !reloaded {
 		t.Fatal("ModelReload not called after save pricing")
+	}
+}
+
+// TestPruneProviderModels P-model-face:清理无归属走 store,删除数回传,且 reload 被调用。
+func TestPruneProviderModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &fakeProviderModelStore{pruneDeleted: 2}
+	reloaded := false
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/providers/models/prune",
+		strings.NewReader(`{"vendor":"rightapi"}`))
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+	(&Admin{ModelStore: store, ModelReload: func() error { reloaded = true; return nil }}).
+		pruneProviderModels(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Vendor  string `json:"vendor"`
+		Deleted int64  `json:"deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Deleted != 2 {
+		t.Errorf("deleted = %d, want 2", body.Deleted)
+	}
+	if store.prunedVendor != "rightapi" {
+		t.Errorf("store 收到 vendor = %q, want rightapi", store.prunedVendor)
+	}
+	if !reloaded {
+		t.Error("prune 后必须热刷 manager(否则已删模型仍留在内存候选里)")
+	}
+}
+
+// TestPruneProviderModels_VendorRequired 缺 vendor → 400,不碰 store。
+func TestPruneProviderModels_VendorRequired(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &fakeProviderModelStore{}
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/providers/models/prune",
+		strings.NewReader(`{}`))
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+	(&Admin{ModelStore: store}).pruneProviderModels(ginCtx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if store.prunedVendor != "" {
+		t.Errorf("不该调用 store,却收到 vendor = %q", store.prunedVendor)
+	}
+}
+
+// TestListProviderModels_IncludesFaces P-model-face:list 响应带 faces 分组,
+// 供页面渲染面 tab 与归属列(不在任何 face 列表里的模型 = 无归属)。
+func TestListProviderModels_IncludesFaces(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &fakeProviderModelStore{
+		rows: []dbpkg.ProviderModel{
+			{Vendor: "rightapi", ModelID: "gpt-5.4"},
+			{Vendor: "rightapi", ModelID: "claude-opus-5"},
+			{Vendor: "rightapi", ModelID: "claude-fable-5"}, // 无归属(换 channel 残留)
+		},
+		faceRows: []dbpkg.ProviderModelFace{
+			{Vendor: "rightapi", Face: "rightapi-codex", ModelID: "gpt-5.4", SortOrder: 0},
+			{Vendor: "rightapi", Face: "rightapi-claude", ModelID: "claude-opus-5", SortOrder: 0},
+		},
+	}
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/providers/models", nil)
+	(&Admin{ModelStore: store}).listProviderModels(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Faces map[string]map[string][]string `json:"faces"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	ra := body.Faces["rightapi"]
+	if len(ra) != 2 {
+		t.Fatalf("faces[rightapi] 有 %d 个面, want 2: %+v", len(ra), ra)
+	}
+	if got := ra["rightapi-codex"]; len(got) != 1 || got[0] != "gpt-5.4" {
+		t.Errorf("codex 面 = %v, want [gpt-5.4]", got)
+	}
+	// claude-fable-5 不该出现在任何面里(页面据此标「无归属」)
+	for face, models := range ra {
+		for _, m := range models {
+			if m == "claude-fable-5" {
+				t.Errorf("claude-fable-5 不该有归属,却出现在 %s", face)
+			}
+		}
 	}
 }

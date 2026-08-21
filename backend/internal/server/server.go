@@ -277,6 +277,25 @@ func (a providerModelStoreAdapter) ListByVendor(ctx context.Context, vendor stri
 	return out, nil
 }
 
+// AllFaces 投影 database.ProviderModelFace → provider.DBFaceRow(注册面粒度)。
+// P-model-face: 面→模型归属,让中转站厂商各后缀端点的模型清单互相隔离。
+func (a providerModelStoreAdapter) AllFaces(ctx context.Context) ([]provider.DBFaceRow, error) {
+	rows, err := a.s.AllFaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]provider.DBFaceRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, provider.DBFaceRow{
+			Vendor:    r.Vendor,
+			Face:      r.Face,
+			ModelID:   r.ModelID,
+			SortOrder: r.SortOrder,
+		})
+	}
+	return out, nil
+}
+
 // P30:把 buildKeyPools 读出来的 Pool 注入到每个 Provider
 // Manager.LoadFromConfig 时 Pool 还是 nil(那时 DB 还没读),
 // 启动后 Server.New 再注入

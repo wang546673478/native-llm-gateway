@@ -264,6 +264,10 @@ export interface ProviderModelRow {
 
 export interface ProviderModelsResp {
   vendors: Record<string, ProviderModelRow[]>
+  // P-model-face: vendor → 注册面 → 该面提供的模型 id(按面内上游顺序)。
+  // 不在任何面列表里的模型 = 无归属(上游下架 / 换 channel 残留),页面标 ⚠ 并可清理。
+  // 某 vendor 整体缺席 = 该厂商未同步过面归属 → 后端走 vendor 级 fallback。
+  faces: Record<string, Record<string, string[]>>
   count: number
 }
 
@@ -392,5 +396,11 @@ export const api = {
       cost_per_million_cache_read: number
       cost_per_million_output: number
     }) => client.put<{ ok: boolean }>('/providers/models', body).then(r => r.data),
+    // P-model-face: 清理该厂商无归属模型(上游已下架/换 channel 残留)。
+    // 后端对「无任何归属数据」的厂商整体跳过,不会误删 fallback 模式的厂商。
+    prune: (vendor: string) =>
+      client
+        .post<{ vendor: string; deleted: number }>('/providers/models/prune', { vendor })
+        .then(r => r.data),
   },
 }
