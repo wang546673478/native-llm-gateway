@@ -867,6 +867,8 @@ func (e *Engine) recordUsageWithTokens(
 		r.InputTokens = u.PromptTokens
 		r.OutputTokens = u.CompletionTokens
 		r.TotalTokens = u.TotalTokens
+		r.CacheReadTokens = u.CacheReadTokens         // ⭐ 新增:缓存读取 token
+		r.CacheCreationTokens = u.CacheCreationTokens // ⭐ 新增:缓存写入 token
 		// P37 + P40 + P-quota-512k: 算 cost(支持 cache pricing + 长上下文悬崖,单位 CNY ¥)
 		// 逻辑见 provider.ComputeCost — cost = prompt*input + cache_creation*cache_create
 		// (0 则 fallback 到 input)+ cache_read*cache_read + completion*output;

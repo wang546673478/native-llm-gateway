@@ -50,6 +50,7 @@ type Registry struct {
 	factories map[string]Factory
 	protocols map[string]Protocol // 用于前端显示绑定选项,即使 provider 未启用
 	vendors   map[string]string   // P-provider-vendor: name → vendor(默认 = name)
+	relays    map[string]bool     // name → 是否中转站(relay station)
 }
 
 // NewRegistry 构造空 Registry
@@ -58,6 +59,7 @@ func NewRegistry() *Registry {
 		factories: make(map[string]Factory),
 		protocols: make(map[string]Protocol),
 		vendors:   make(map[string]string),
+		relays:    make(map[string]bool),
 	}
 }
 
@@ -104,9 +106,15 @@ func (r *Registry) RegisterWithProtocol(name string, factory Factory, proto Prot
 // RegisterWithProtocolVendor 同 RegisterWithProtocol,但额外记录 vendor 元数据
 // vendor 为空时默认 = name(单协议厂商)
 func (r *Registry) RegisterWithProtocolVendor(name string, factory Factory, proto Protocol, vendor string) {
+	r.RegisterWithProtocolVendorRelay(name, factory, proto, vendor, false)
+}
+
+// RegisterWithProtocolVendorRelay 同 RegisterWithProtocolVendor,但额外记录是否中转站
+func (r *Registry) RegisterWithProtocolVendorRelay(name string, factory Factory, proto Protocol, vendor string, isRelay bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.factories[name]; exists {
+	// P-relay-independent: 允许中转站热重载时覆盖已有注册(非中转站不允许重复注册)
+	if _, exists := r.factories[name]; exists && !isRelay {
 		panic(fmt.Sprintf("provider factory %q already registered", name))
 	}
 	r.factories[name] = factory
@@ -115,6 +123,7 @@ func (r *Registry) RegisterWithProtocolVendor(name string, factory Factory, prot
 		vendor = name
 	}
 	r.vendors[name] = vendor
+	r.relays[name] = isRelay
 }
 
 // VendorFor 查询注册名的 vendor;未注册或未声明时返回 name 本身
@@ -157,13 +166,49 @@ func (r *Registry) ListRegisteredProtocols() map[string]Protocol {
 }
 
 // Create 用已注册的 factory 创建 Provider 实例
+// 如果 provider 未注册,但配置了 protocol 字段,则尝试用对应的 compatible 实现
 func (r *Registry) Create(name string, cfg ProviderConfig) (Provider, error) {
 	r.mu.RLock()
 	factory, ok := r.factories[name]
 	r.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("provider %q is not registered (available: %v)", name, r.ListRegistered())
+		// 未注册时,尝试根据 protocol 自动创建 compatible 实例
+		return r.createCompatible(name, cfg)
 	}
+	return factory(cfg)
+}
+
+// createCompatible 根据 protocol 字段创建 openai/anthropic/google compatible 实例
+func (r *Registry) createCompatible(name string, cfg ProviderConfig) (Provider, error) {
+	proto := cfg.Protocol
+	if proto == "" {
+		return nil, fmt.Errorf("provider %q is not registered and protocol is empty (available: %v)",
+			name, r.ListRegistered())
+	}
+
+	// 尝试使用全局注册的通用 factory
+	var genericName string
+	switch proto {
+	case ProtocolOpenAI:
+		genericName = "__generic_openai__"
+	case ProtocolAnthropic:
+		genericName = "__generic_anthropic__"
+	case ProtocolGoogle:
+		genericName = "__generic_google__"
+	default:
+		return nil, fmt.Errorf("provider %q is not registered and protocol %q has no compatible implementation (available: %v)",
+			name, cfg.Protocol, r.ListRegistered())
+	}
+
+	r.mu.RLock()
+	factory, ok := r.factories[genericName]
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("provider %q is not registered and generic factory for protocol %q is not available (available: %v)",
+			name, cfg.Protocol, r.ListRegistered())
+	}
+
 	return factory(cfg)
 }
 
@@ -176,4 +221,11 @@ func (r *Registry) ListRegistered() []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// IsRelay 检查某个 provider 是否是中转站
+func (r *Registry) IsRelay(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.relays[name]
 }

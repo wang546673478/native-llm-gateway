@@ -55,6 +55,9 @@ type ProviderModel struct {
 // TableName
 func (ProviderModel) TableName() string { return "provider_models" }
 
+// GetModelID 实现 provider.ModelInfo 接口
+func (m ProviderModel) GetModelID() string { return m.ModelID }
+
 // ProviderModelFace 记录「某注册面提供哪些模型」+ 面内顺序。
 //
 // 为什么与 provider_models 分表(而不是给它加一个 face 列):
@@ -84,6 +87,27 @@ type ProviderModelFace struct {
 
 // TableName
 func (ProviderModelFace) TableName() string { return "provider_model_faces" }
+
+// RelayStation 中转站配置表
+// 中转站 = 纯透传代理,无需编写代码,只需填 URL + 选协议
+type RelayStation struct {
+	ID          uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name        string `gorm:"column:name;not null" json:"name"`                         // tokenmarket
+	DisplayName string `gorm:"column:display_name" json:"display_name"`                              // TokenMarket
+	BaseURL     string `gorm:"column:base_url;not null" json:"base_url"`                             // https://tokenmarket.cheap
+	ProtocolMode string `gorm:"column:protocol_mode;not null;default:'single'" json:"protocol_mode"` // single/multi
+	PrimaryProtocol string `gorm:"column:primary_protocol;not null" json:"primary_protocol"`         // anthropic/openai/google
+	SupportedProtocols string `gorm:"column:supported_protocols" json:"supported_protocols"`         // JSON数组: ["anthropic","openai"]
+	Keys        string `gorm:"column:keys;type:text" json:"keys"`                                    // JSON数组: ["sk-xxx","sk-yyy"]
+	Enabled     bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	Timeout     int    `gorm:"column:timeout_seconds;not null;default:60" json:"timeout_seconds"`
+	BillingSource string `gorm:"column:billing_source;not null;default:'api'" json:"billing_source"` // token_plan/api/free
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// TableName
+func (RelayStation) TableName() string { return "relay_stations" }
 
 // ModelAlias 别名路由(可由多个 Provider 的多个 model 映射到同一个别名)
 type ModelAlias struct {
@@ -136,18 +160,20 @@ type UsageRecord struct {
 	Protocol     string `gorm:"column:protocol;not null" json:"protocol"`
 	// P47: 冗余存 billing_source — 方便按 token_plan / api / free 聚合统计
 	// 取自请求时刻该 provider 的 billing_source,改 config 不会影响历史记录
-	BillingSource string    `gorm:"column:billing_source;index;default:'api'" json:"billing_source"`
-	InputTokens   int       `gorm:"column:input_tokens;not null;default:0" json:"input_tokens"`
-	OutputTokens  int       `gorm:"column:output_tokens;not null;default:0" json:"output_tokens"`
-	TotalTokens   int       `gorm:"column:total_tokens;not null;default:0" json:"total_tokens"`
-	Cost          float64   `gorm:"column:cost;not null;default:0" json:"cost"`
-	LatencyMs     int       `gorm:"column:latency_ms;not null;default:0" json:"latency_ms"`
+	BillingSource       string    `gorm:"column:billing_source;index;default:'api'" json:"billing_source"`
+	InputTokens         int       `gorm:"column:input_tokens;not null;default:0" json:"input_tokens"`
+	OutputTokens        int       `gorm:"column:output_tokens;not null;default:0" json:"output_tokens"`
+	TotalTokens         int       `gorm:"column:total_tokens;not null;default:0" json:"total_tokens"`
+	CacheReadTokens     int       `gorm:"column:cache_read_tokens;not null;default:0" json:"cache_read_tokens"`         // 缓存读取 token
+	CacheCreationTokens int       `gorm:"column:cache_creation_tokens;not null;default:0" json:"cache_creation_tokens"` // 缓存写入 token
+	Cost                float64   `gorm:"column:cost;not null;default:0" json:"cost"`
+	LatencyMs           int       `gorm:"column:latency_ms;not null;default:0" json:"latency_ms"`
 	// TtftMs 首字时间(流式):请求发起 → 收第一个 token 的耗时 ms;非流式填 0。
 	TtftMs     int       `gorm:"column:ttft_ms;not null;default:0" json:"ttft_ms"`
 	IsStream   bool      `gorm:"column:is_stream;not null;default:false" json:"is_stream"`
-	StatusCode    int       `gorm:"column:status_code" json:"status_code"`
-	ErrorType     string    `gorm:"column:error_type" json:"error_type"`
-	CreatedAt     time.Time `gorm:"index;column:created_at" json:"created_at"`
+	StatusCode int       `gorm:"column:status_code" json:"status_code"`
+	ErrorType  string    `gorm:"column:error_type" json:"error_type"`
+	CreatedAt  time.Time `gorm:"index;column:created_at" json:"created_at"`
 }
 
 // TableName
@@ -261,6 +287,7 @@ type RouteOrder struct {
 	Name          string    `gorm:"column:name;not null;default:''" json:"name"`
 	BillingSource string    `gorm:"column:billing_source;not null;default:''" json:"billing_source"`
 	Seq           int       `gorm:"column:seq;not null;default:0" json:"seq"`
+	CreatedAt     time.Time `gorm:"column:created_at" json:"created_at"`
 	UpdatedAt     time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 

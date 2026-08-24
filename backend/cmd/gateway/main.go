@@ -27,6 +27,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/provider/relay"
 	"github.com/wang546673478/native-llm-gateway/internal/server"
 )
 
@@ -98,6 +99,11 @@ func run(cmd *cobra.Command, args []string) error {
 	manager := provider.NewManager(registry, logger)
 	if err := manager.LoadFromConfig(context.Background(), toManagerConfig(cfg)); err != nil {
 		return fmt.Errorf("load providers: %w", err)
+	}
+
+	// P-relay: 从数据库加载中转站配置并注册(必须在 manager 创建后)
+	if err := relay.LoadFromDatabase(db, manager); err != nil {
+		logger.Warn("failed to load relay stations from database", zap.Error(err))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

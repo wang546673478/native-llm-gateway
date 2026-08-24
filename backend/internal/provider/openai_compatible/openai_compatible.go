@@ -56,13 +56,17 @@ type Config struct {
 	// 默认 true:让响应最后一个 chunk 带 usage,Gateway 才能正确计费
 	// DeepSeek / Qwen / Kimi / GLM 都支持
 	StreamUsage bool
+	// UsageParser 可选的 Usage 解析器,用于提取厂商特殊的计费字段
+	// nil 时使用默认的 OpenAI 标准解析器
+	UsageParser provider.UsageParser
 }
 
 // Base 是 OpenAI 兼容 Provider 的共享实现
 // DeepSeek / GLM / Qwen / Kimi 等只需要薄薄一层 wrapper 即可
 type Base struct {
-	cfg    Config
-	client *http.Client
+	cfg         Config
+	client      *http.Client
+	usageParser provider.UsageParser
 }
 
 // NewBase 构造 Base
@@ -86,9 +90,17 @@ func NewBase(cfg Config) *Base {
 	// 默认开启 stream_options.include_usage:让流式响应最后一个 chunk 带 usage,
 	// Gateway 才能正确计费。OpenAI 兼容家族(DeepSeek/Qwen/Kimi/GLM)都支持。
 	cfg.StreamUsage = true
+
+	// 如果没有指定 UsageParser,使用默认的标准 OpenAI 解析器
+	usageParser := cfg.UsageParser
+	if usageParser == nil {
+		usageParser = &DefaultOpenAIUsageParser{}
+	}
+
 	return &Base{
-		cfg:    cfg,
-		client: &http.Client{Timeout: timeout},
+		cfg:         cfg,
+		client:      &http.Client{Timeout: timeout},
+		usageParser: usageParser,
 	}
 }
 
@@ -193,8 +205,14 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	// 成功
 	b.cfg.Pool.ReportSuccess(key)
 
-	// 解析 Usage(OpenAI 格式)
-	usage := parseOpenAIUsage(body)
+	// 解析 Usage - 使用注入的 UsageParser
+	// DEBUG: 打印 parser 类型
+	fmt.Printf("[DEBUG] usageParser type: %T\n", b.usageParser)
+	usage := b.usageParser.Parse(body)
+	if usage != nil {
+		fmt.Printf("[DEBUG] Parsed usage: prompt=%d, completion=%d, cache_read=%d, cache_creation=%d\n",
+			usage.PromptTokens, usage.CompletionTokens, usage.CacheReadTokens, usage.CacheCreationTokens)
+	}
 
 	return &provider.Response{
 		StatusCode: httpResp.StatusCode,
@@ -355,8 +373,8 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 				}
 				return
 			}
-			// P42: 尝试从 chunk JSON 抽 usage
-			if u := parseOpenAIUsage(payload); u != nil {
+			// P42: 尝试从 chunk JSON 抽 usage - 使用注入的 UsageParser
+			if u := b.usageParser.Parse(payload); u != nil {
 				lastUsage = u
 			}
 			// 把 "data: {...}\n\n" 还原成 SSE 事件
@@ -412,8 +430,18 @@ func (b *Base) acquireOwnFaceKey() (*keypool.Key, error) {
 
 // ListModels 调 GET {endpoint}{ModelsPath} 拉上游模型 id 列表。
 func (b *Base) ListModels(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		strings.TrimRight(b.cfg.Endpoint, "/")+b.cfg.ModelsPath, nil)
+	endpoint := strings.TrimRight(b.cfg.Endpoint, "/")
+	modelsPath := b.cfg.ModelsPath
+
+	// P-relay-independent: 防止双重路径 — 如果 endpoint 已包含 /v1 且 modelsPath 以 /v1 开头，去掉 modelsPath 的 /v1
+	if strings.HasSuffix(endpoint, "/v1") && strings.HasPrefix(modelsPath, "/v1/") {
+		modelsPath = modelsPath[3:] // 去掉开头的 "/v1"，保留 "/models"
+	}
+
+	fullURL := endpoint + modelsPath
+	fmt.Printf("DEBUG: ListModels for %s: Endpoint=%q, ModelsPath=%q, FullURL=%q\n",
+		b.cfg.Name, b.cfg.Endpoint, b.cfg.ModelsPath, fullURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +449,12 @@ func (b *Base) ListModels(ctx context.Context) ([]string, error) {
 		if k, err := b.acquireOwnFaceKey(); err == nil {
 			req.Header.Set("Authorization", "Bearer "+k.Key)
 			defer b.cfg.Pool.ReportSuccess(k)
+		} else {
+			// Log when we can't acquire a key for ListModels
+			return nil, fmt.Errorf("list models: failed to acquire key: %w", err)
 		}
+	} else {
+		return nil, fmt.Errorf("list models: pool is nil for provider %s", b.cfg.Name)
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
@@ -463,6 +496,14 @@ func (b *Base) Close() error {
 // 启动后 Server.New 再注入
 func (b *Base) SetPool(p *keypool.Pool) {
 	b.cfg.Pool = p
+}
+
+// DefaultOpenAIUsageParser 标准 OpenAI 协议的 Usage 解析器
+// 支持标准 OpenAI 格式 + DeepSeek 扩展字段 + MiniMax/qwen 等标准缓存字段
+type DefaultOpenAIUsageParser struct{}
+
+func (p *DefaultOpenAIUsageParser) Parse(body []byte) *provider.Usage {
+	return parseOpenAIUsage(body)
 }
 
 // parseOpenAIUsage 从 OpenAI Chat Completions 响应中抽取 usage

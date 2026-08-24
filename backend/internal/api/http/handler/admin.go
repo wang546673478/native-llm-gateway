@@ -81,6 +81,10 @@ type Admin struct {
 	ModelSyncAll func(ctx context.Context) ([]provider.VendorSyncResult, error)
 	// ModelReload 同步/定价变更后热刷 manager 内存(可选 nil)。
 	ModelReload func() error
+	// 中转站管理
+	RelayStationStore dbpkg.RelayStationStore
+	// RelayReloadFunc 中转站热重载函数(由 server 注入,调用 relay.ReloadFromDatabase)
+	RelayReloadFunc func() error
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -117,6 +121,8 @@ func NewAdmin(
 	modelSync func(ctx context.Context, vendor string) ([]string, error), // 可 nil(sync 不可用)
 	modelSyncAll func(ctx context.Context) ([]provider.VendorSyncResult, error), // 可 nil(sync-all 不可用)
 	modelReload func() error, // 可 nil(不热刷 manager)
+	relayStationStore dbpkg.RelayStationStore, // 可 nil(中转站管理不可用)
+	relayReloadFunc func() error, // 可 nil(中转站热重载不可用)
 ) *Admin {
 	return &Admin{
 		Manager:             mgr,
@@ -141,6 +147,8 @@ func NewAdmin(
 		ModelSync:           modelSync,
 		ModelSyncAll:        modelSyncAll,
 		ModelReload:         modelReload,
+		RelayStationStore:   relayStationStore,
+		RelayReloadFunc:     relayReloadFunc,
 	}
 }
 
@@ -210,6 +218,12 @@ func (a *Admin) Register(r *gin.RouterGroup) {
 	r.PUT("/fingerprint", a.putFingerprint)
 	// P-inflight: 实时活跃请求列表
 	r.GET("/inflight", a.listInflight)
+	// 中转站管理
+	r.GET("/relay-stations", a.listRelayStations)
+	r.POST("/relay-stations", a.createRelayStation)
+	r.PUT("/relay-stations/:id", a.updateRelayStation)
+	r.DELETE("/relay-stations/:id", a.deleteRelayStation)
+	r.POST("/relay-stations/reload", a.reloadRelayStations)
 }
 
 // listRegisteredProviders GET /api/v1/providers/registered
@@ -259,6 +273,7 @@ func (a *Admin) listRegisteredProviders(c *gin.Context) {
 // P-provider-vendor: 按 vendor 聚合输出 — 同一厂商的多个注册名(deepseek / deepseek-anthropic)
 // 归到同一 vendor 条目下,前端按厂商展示。key_pool / circuit_breaker 取该 vendor 第一个注册名的
 // (共享 pool 时状态相同)。
+// 包含内置厂商和中转站 — Provider Keys 页面需要看到中转站才能添加 key。
 func (a *Admin) listProviders(c *gin.Context) {
 	// P-per-key-circuit: 熔断器已下沉到 keypool(per-key),不再有 provider 级
 	// circuit_breaker 状态 — 每把 key 的熔断状态在 /api-keys 端点返回
@@ -267,14 +282,21 @@ func (a *Admin) listProviders(c *gin.Context) {
 		Names   []gin.H
 		Models  []string
 		KeyPool *keypool.PoolStatus
+		IsRelay bool
 	}
 	byVendor := make(map[string]*vendorEntry)
 	order := make([]string, 0)
 	for name, p := range a.Manager.GetAll() {
-		v := a.Registry.VendorFor(name)
+		isRelay := a.Registry.IsRelay(name)
+		// 中转站: vendor = name(不再聚合),这样每个中转站面独立显示
+		// 厂商: vendor = a.Registry.VendorFor(name)(按厂商聚合)
+		v := name
+		if !isRelay {
+			v = a.Registry.VendorFor(name)
+		}
 		entry, ok := byVendor[v]
 		if !ok {
-			entry = &vendorEntry{Vendor: v}
+			entry = &vendorEntry{Vendor: v, IsRelay: isRelay}
 			byVendor[v] = entry
 			order = append(order, v)
 		}
@@ -308,9 +330,10 @@ func (a *Admin) listProviders(c *gin.Context) {
 			}
 		}
 		entry := gin.H{
-			"vendor": v.Vendor,
-			"names":  v.Names,
-			"models": models,
+			"vendor":   v.Vendor,
+			"names":    v.Names,
+			"models":   models,
+			"is_relay": v.IsRelay,
 		}
 		if v.KeyPool != nil {
 			entry["key_pool"] = v.KeyPool
@@ -342,6 +365,7 @@ func (a *Admin) getProvider(c *gin.Context) {
 // listProviderModels GET /api/v1/providers/models — 列出所有厂商模型(按 vendor 分组)。
 // 同时返回 faces:vendor → face → 该面提供的模型 id 列表(P-model-face),供页面
 // 渲染面 tab 与归属列。不在任何 face 列表里的模型 = 无归属(上游已下架/换 channel 残留)。
+// 只返回当前启用的 provider 的模型(防止已下线厂商的历史数据污染前端显示)。
 func (a *Admin) listProviderModels(c *gin.Context) {
 	if a.ModelStore == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model_store_unavailable"})
@@ -357,17 +381,33 @@ func (a *Admin) listProviderModels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	// 获取当前启用的 vendor 集合(从 Manager 的已加载 provider 里提取)
+	enabledVendors := make(map[string]bool)
+	if a.Manager != nil {
+		for _, name := range a.Manager.Names() {
+			vendor := a.Registry.VendorFor(name)
+			enabledVendors[vendor] = true
+		}
+	}
+
+	// 只收集当前启用 vendor 的模型
 	group := map[string][]dbpkg.ProviderModel{}
 	for _, r := range rows {
-		group[r.Vendor] = append(group[r.Vendor], r)
+		if enabledVendors[r.Vendor] {
+			group[r.Vendor] = append(group[r.Vendor], r)
+		}
 	}
 	// faces: vendor → face → [model_id...](AllFaces 已按 vendor/face/sort_order 排序)
+	// 同样只保留启用 vendor 的面数据
 	faces := map[string]map[string][]string{}
 	for _, fr := range faceRows {
-		if faces[fr.Vendor] == nil {
-			faces[fr.Vendor] = map[string][]string{}
+		if enabledVendors[fr.Vendor] {
+			if faces[fr.Vendor] == nil {
+				faces[fr.Vendor] = map[string][]string{}
+			}
+			faces[fr.Vendor][fr.Face] = append(faces[fr.Vendor][fr.Face], fr.ModelID)
 		}
-		faces[fr.Vendor][fr.Face] = append(faces[fr.Vendor][fr.Face], fr.ModelID)
 	}
 	c.JSON(http.StatusOK, gin.H{"vendors": group, "faces": faces, "count": len(group)})
 }
@@ -1245,4 +1285,170 @@ func (a *Admin) listInflight(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"requests": out})
+}
+
+// listRelayStations GET /api/v1/relay-stations — 返回所有中转站配置
+func (a *Admin) listRelayStations(c *gin.Context) {
+	if a.RelayStationStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "relay station store not available"})
+		return
+	}
+	stations, err := a.RelayStationStore.List(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query relay stations: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"relay_stations": stations})
+}
+
+// createRelayStation POST /api/v1/relay-stations — 创建新中转站
+func (a *Admin) createRelayStation(c *gin.Context) {
+	if a.RelayStationStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "relay station store not available"})
+		return
+	}
+	var req dbpkg.RelayStation
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
+		return
+	}
+
+	// 校验必填字段
+	if req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "field 'name' is required"})
+		return
+	}
+	if req.BaseURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "field 'base_url' is required"})
+		return
+	}
+	if req.PrimaryProtocol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "field 'primary_protocol' is required"})
+		return
+	}
+	if req.ProtocolMode == "" {
+		req.ProtocolMode = "single" // 默认单协议模式
+	}
+	if req.Timeout == 0 {
+		req.Timeout = 60 // 默认 60 秒
+	}
+	if req.BillingSource == "" {
+		req.BillingSource = "api" // 默认 api
+	}
+
+	if err := a.RelayStationStore.Create(c.Request.Context(), &req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "create relay station: " + err.Error()})
+		return
+	}
+
+	// P-relay-independent: 自动热重载 — 创建后立即加载新中转站
+	if a.RelayReloadFunc != nil {
+		if err := a.RelayReloadFunc(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "created but reload failed: " + err.Error()})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"relay_station": req})
+}
+
+// updateRelayStation PUT /api/v1/relay-stations/:id — 更新中转站配置
+func (a *Admin) updateRelayStation(c *gin.Context) {
+	if a.RelayStationStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "relay station store not available"})
+		return
+	}
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	existing, err := a.RelayStationStore.Get(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "relay station not found"})
+		return
+	}
+
+	var req dbpkg.RelayStation
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
+		return
+	}
+
+	// 更新字段
+	existing.Name = req.Name
+	existing.DisplayName = req.DisplayName
+	existing.BaseURL = req.BaseURL
+	existing.ProtocolMode = req.ProtocolMode
+	existing.PrimaryProtocol = req.PrimaryProtocol
+	existing.SupportedProtocols = req.SupportedProtocols
+	existing.Keys = req.Keys
+	existing.Enabled = req.Enabled
+	existing.Timeout = req.Timeout
+	existing.BillingSource = req.BillingSource
+
+	if err := a.RelayStationStore.Update(c.Request.Context(), existing); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update relay station: " + err.Error()})
+		return
+	}
+
+	// P-relay-independent: 自动热重载 — 更新后立即重新加载配置
+	if a.RelayReloadFunc != nil {
+		if err := a.RelayReloadFunc(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "updated but reload failed: " + err.Error()})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"relay_station": existing})
+}
+
+// deleteRelayStation DELETE /api/v1/relay-stations/:id — 删除中转站
+func (a *Admin) deleteRelayStation(c *gin.Context) {
+	if a.RelayStationStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "relay station store not available"})
+		return
+	}
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	if err := a.RelayStationStore.Delete(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete relay station: " + err.Error()})
+		return
+	}
+
+	// P-relay-independent: 自动热重载 — 删除后立即卸载该中转站
+	if a.RelayReloadFunc != nil {
+		if err := a.RelayReloadFunc(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "deleted but reload failed: " + err.Error()})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+}
+
+// reloadRelayStations POST /api/v1/relay-stations/reload — 热重载所有中转站
+func (a *Admin) reloadRelayStations(c *gin.Context) {
+	if a.RelayStationStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "relay station store not available"})
+		return
+	}
+	if a.RelayReloadFunc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "relay reload function not available"})
+		return
+	}
+
+	if err := a.RelayReloadFunc(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload relay stations: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "relay stations reloaded"})
 }

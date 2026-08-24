@@ -20,6 +20,8 @@ type ProviderModelStore interface {
 	SavePricing(ctx context.Context, vendor, modelID string, input, cacheRead, output float64) error
 	// All 列出全部分组后的厂商模型(供模型管理页一次性渲染)。
 	All(ctx context.Context) ([]ProviderModel, error)
+	// CountVendorModels 查询该厂商已有的模型数量(用于检查手动添加的模型)。
+	CountVendorModels(ctx context.Context, vendor string) (int, error)
 
 	// --- P-model-face: 面→模型归属(provider_model_faces 表) ---
 
@@ -27,6 +29,10 @@ type ProviderModelStore interface {
 	// sort_order 记该面 ListModels 的返回下标。只在该面 ListModels 成功时调用 ——
 	// 失败/NotSupported 时不动已有归属,避免上游临时抖动清空归属。
 	ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error
+	// AddFaceModels 增量添加某**面**的模型归属(只添加新模型,不删除已有模型)。
+	// 用于中转站场景:同一 API key 可能分配了不同分组(GPT vs Claude),每次调用只返回当前分组的模型,
+	// 多次同步会互相覆盖。增量模式让所有分组的模型都保留。
+	AddFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error
 	// AllFaces 列出全部面归属行(按 vendor/face/sort_order 有序)。
 	AllFaces(ctx context.Context) ([]ProviderModelFace, error)
 	// PruneOrphanModels 删除该 vendor 下「在任何面都无归属」的 provider_models 行,
@@ -113,6 +119,14 @@ func (s *gormProviderModelStore) All(ctx context.Context) ([]ProviderModel, erro
 	return out, nil
 }
 
+func (s *gormProviderModelStore) CountVendorModels(ctx context.Context, vendor string) (int, error) {
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&ProviderModel{}).Where("vendor = ?", vendor).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return int(count), nil
+}
+
 // ReplaceFaceModels 整体替换某面的归属:事务内先删该面旧行,再按 modelIDs 顺序插入。
 // 整体替换(而非 upsert)才能让上游下架的模型从该面消失 —— 归属是可再生数据
 // (每次同步重新拉),没有手工内容需要保护;定价在 provider_models 里,不受影响。
@@ -134,6 +148,50 @@ func (s *gormProviderModelStore) ReplaceFaceModels(ctx context.Context, vendor, 
 				SortOrder: i,
 				SyncedAt:  &now,
 			})
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		return tx.Create(&rows).Error
+	})
+}
+
+// AddFaceModels 增量添加某面的模型归属:只添加新模型,不删除已有模型。
+// P-relay-independent: 用于中转站场景 — 同一 API key 可能分配了不同分组(GPT vs Claude),
+// 每次 ListModels 只返回当前分组的模型。全量替换会让不同分组互相覆盖,增量模式让所有分组的模型都保留。
+// sort_order 从已有最大值+1 开始递增,保证新增模型排在已有模型之后。
+func (s *gormProviderModelStore) AddFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
+	now := time.Now()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 查询该面已有的模型 ID 和最大 sort_order
+		var existing []ProviderModelFace
+		if err := tx.Where("face = ?", face).Find(&existing).Error; err != nil {
+			return err
+		}
+		existingMap := make(map[string]bool, len(existing))
+		maxOrder := -1
+		for _, row := range existing {
+			existingMap[row.ModelID] = true
+			if row.SortOrder > maxOrder {
+				maxOrder = row.SortOrder
+			}
+		}
+
+		// 只添加新模型(已有的跳过)
+		rows := make([]ProviderModelFace, 0, len(modelIDs))
+		nextOrder := maxOrder + 1
+		for _, id := range modelIDs {
+			if id == "" || existingMap[id] {
+				continue
+			}
+			rows = append(rows, ProviderModelFace{
+				Vendor:    vendor,
+				Face:      face,
+				ModelID:   id,
+				SortOrder: nextOrder,
+				SyncedAt:  &now,
+			})
+			nextOrder++
 		}
 		if len(rows) == 0 {
 			return nil

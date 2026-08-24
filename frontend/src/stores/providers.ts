@@ -36,6 +36,11 @@ export const useProvidersStore = defineStore('providers', {
     vendorOptions(): { label: string; value: string }[] {
       return (this.vendors ?? []).map(v => ({ label: v.vendor, value: v.vendor }))
     },
+    // P-relay-independent: vendorOptionsNoRelay —— 不含中转站的 vendor 选项。
+    // Gateway Keys 的 Provider 绑定用此(中转站没 Provider Keys,绑了也没用)。
+    vendorOptionsNoRelay(): { label: string; value: string }[] {
+      return (this.vendors ?? []).filter(v => !v.is_relay).map(v => ({ label: v.vendor, value: v.vendor }))
+    },
   },
   actions: {
     async load() {

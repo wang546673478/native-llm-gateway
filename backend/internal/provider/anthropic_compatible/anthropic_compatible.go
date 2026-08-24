@@ -538,9 +538,162 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// ListModels anthropic 协议面无模型列表端点 → NotSupported。
+// ListModels 调用上游模型列表端点，支持两种格式:
+// 1. New API (rightapi.ai 等中转站): GET /api/models
+//    Headers: Authorization: Bearer {key}
+//    Response: {"success": true, "data": {"1": ["model-1"], "2": ["model-2"]}}
+// 2. Anthropic 标准 API: GET /v1/models
+//    Headers: x-api-key: {key}, anthropic-version: 2023-06-01
+//    Response: {"data": [{"id": "claude-opus-5", "type": "model", ...}, ...]}
+//
+// 先尝试 /api/models (New API),失败后降级到 /v1/models (Anthropic 标准)。
 func (b *Base) ListModels(ctx context.Context) ([]string, error) {
-	return nil, provider.ErrListModelsNotSupported
+	if b.cfg.Pool == nil {
+		return nil, fmt.Errorf("keypool not configured")
+	}
+	key, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
+	if err != nil {
+		return nil, fmt.Errorf("no available key: %w", err)
+	}
+
+	listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// 先尝试 New API 格式 (/api/models)
+	fmt.Printf("DEBUG: Anthropic ListModels for %s: trying New API /api/models\n", b.cfg.Name)
+	models, err := b.tryNewAPIModels(listCtx, key.Key)
+	if err == nil && len(models) > 0 {
+		fmt.Printf("DEBUG: Anthropic ListModels for %s: New API succeeded, got %d models\n", b.cfg.Name, len(models))
+		return models, nil
+	}
+	fmt.Printf("DEBUG: Anthropic ListModels for %s: New API failed (%v), trying standard /v1/models\n", b.cfg.Name, err)
+
+	// 降级到 Anthropic 标准格式 (/v1/models)
+	return b.tryAnthropicModels(listCtx, key.Key)
+}
+
+// tryNewAPIModels 尝试调用 New API 的 /api/models 端点 (rightapi.ai 等中转站)
+func (b *Base) tryNewAPIModels(ctx context.Context, apiKey string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(b.cfg.Endpoint, "/")+"/api/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	// P-relay-independent: rightapi.ai 的 New API 使用 x-api-key 认证
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	// 解析 New API 响应格式: {"success": true, "data": {"1": [...], "2": [...]}}
+	var newAPIResp struct {
+		Success bool                `json:"success"`
+		Data    map[string][]string `json:"data"` // 渠道ID -> 模型列表
+	}
+	if err := json.Unmarshal(body, &newAPIResp); err != nil {
+		return nil, fmt.Errorf("parse new api response: %w", err)
+	}
+
+	if !newAPIResp.Success {
+		return nil, fmt.Errorf("new api returned success=false")
+	}
+
+	// 合并所有渠道的模型(去重)
+	seen := make(map[string]bool)
+	var models []string
+	for _, channelModels := range newAPIResp.Data {
+		for _, m := range channelModels {
+			if m != "" && !seen[m] {
+				seen[m] = true
+				models = append(models, m)
+			}
+		}
+	}
+
+	if len(models) == 0 {
+		return nil, fmt.Errorf("new api returned empty model list")
+	}
+
+	return models, nil
+}
+
+// tryAnthropicModels 调用 Anthropic 标准 /v1/models 端点
+func (b *Base) tryAnthropicModels(ctx context.Context, apiKey string) ([]string, error) {
+	endpoint := strings.TrimRight(b.cfg.Endpoint, "/")
+	modelsPath := "/v1/models"
+
+	// P-relay-independent: 防止双重路径 — 如果 endpoint 已包含 /v1 且 modelsPath 以 /v1 开头，去掉 modelsPath 的 /v1
+	if strings.HasSuffix(endpoint, "/v1") && strings.HasPrefix(modelsPath, "/v1") {
+		modelsPath = "/models" // 去掉 /v1，只保留 /models
+	}
+
+	fullURL := endpoint + modelsPath
+	fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: URL=%q\n", b.cfg.Name, fullURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: request error: %v\n", b.cfg.Name, err)
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: status %d, body: %s\n", b.cfg.Name, resp.StatusCode, string(body))
+		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	// 解析 Anthropic Models API 响应格式
+	var listResp struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: parse error: %v, body: %s\n", b.cfg.Name, err, string(body))
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	if len(listResp.Data) == 0 {
+		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: empty data array\n", b.cfg.Name)
+		return nil, provider.ErrListModelsNotSupported
+	}
+
+	models := make([]string, 0, len(listResp.Data))
+	for _, m := range listResp.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+
+	return models, nil
 }
 
 // Close 释放 http client

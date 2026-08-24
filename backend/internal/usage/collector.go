@@ -22,12 +22,14 @@ type Record struct {
 	ModelID      string
 	Protocol     string
 	// P47: 计费来源(token_plan / api / free)
-	BillingSource string
-	InputTokens   int
-	OutputTokens  int
-	TotalTokens   int
-	Cost          float64
-	LatencyMs     int64
+	BillingSource       string
+	InputTokens         int
+	OutputTokens        int
+	TotalTokens         int
+	CacheReadTokens     int // 缓存读取 token (便宜 10x)
+	CacheCreationTokens int // 缓存写入 token
+	Cost                float64
+	LatencyMs           int64
 	// TtftMs 首字时间(time to first token):流式请求从发起请求到收到第一个
 	// token 的耗时(ms)。非流式请求语义上无独立首字概念 → 填 0(不统计)。
 	TtftMs     int64
@@ -141,22 +143,24 @@ func (c *Collector) flush(batch []*Record) error {
 	now := time.Now().UTC()
 	for i, r := range batch {
 		models[i] = dbpkg.UsageRecord{
-			TraceID:       r.TraceID,
-			GatewayKeyID:  r.GatewayKeyID,
-			ProviderName:  r.ProviderName,
-			ModelID:       r.ModelID,
-			Protocol:      r.Protocol,
-			BillingSource: r.BillingSource,
-			InputTokens:   r.InputTokens,
-			OutputTokens:  r.OutputTokens,
-			TotalTokens:   r.TotalTokens,
-			Cost:          r.Cost,
-			LatencyMs:     int(r.LatencyMs),
-			TtftMs:        int(r.TtftMs),
-			IsStream:      r.IsStream,
-			StatusCode:    r.StatusCode,
-			ErrorType:     r.ErrorType,
-			CreatedAt:     now,
+			TraceID:             r.TraceID,
+			GatewayKeyID:        r.GatewayKeyID,
+			ProviderName:        r.ProviderName,
+			ModelID:             r.ModelID,
+			Protocol:            r.Protocol,
+			BillingSource:       r.BillingSource,
+			InputTokens:         r.InputTokens,
+			OutputTokens:        r.OutputTokens,
+			TotalTokens:         r.TotalTokens,
+			CacheReadTokens:     r.CacheReadTokens,     // ⭐ 新增
+			CacheCreationTokens: r.CacheCreationTokens, // ⭐ 新增
+			Cost:                r.Cost,
+			LatencyMs:           int(r.LatencyMs),
+			TtftMs:              int(r.TtftMs),
+			IsStream:            r.IsStream,
+			StatusCode:          r.StatusCode,
+			ErrorType:           r.ErrorType,
+			CreatedAt:           now,
 		}
 	}
 	return c.db.CreateInBatches(models, c.batchSize).Error

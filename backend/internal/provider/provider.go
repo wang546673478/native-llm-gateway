@@ -196,6 +196,17 @@ type Provider interface {
 // 同步层收到它时,回退到同 vendor 的 OpenAI 面去查。
 var ErrListModelsNotSupported = errors.New("provider: list models not supported")
 
+// MultiProtocolProvider 可选接口:支持多协议的 Provider 实现此接口
+// Router 会通过 type assertion 检测并调用 SupportsProtocol
+// 不实现此接口的 Provider 仍然正常工作(向后兼容)
+type MultiProtocolProvider interface {
+	Provider
+	// SupportsProtocol 检查是否支持指定协议
+	SupportsProtocol(proto Protocol) bool
+	// SupportedProtocols 返回所有支持的协议列表
+	SupportedProtocols() []Protocol
+}
+
 // ErrorType 错误分类
 type ErrorType string
 

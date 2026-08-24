@@ -163,7 +163,8 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 	isResponses := reqProto == provider.ProtocolOpenAI && strings.HasSuffix(strings.ToLower(req.Path), "/responses")
 	var routes []ProviderRoute
 	for name, p := range r.manager.GetAll() {
-		if reqProto != "" && p.Protocol() != reqProto {
+		// 检查协议匹配:支持多协议 Provider
+		if reqProto != "" && !supportsProtocol(p, reqProto) {
 			continue
 		}
 		// P-per-key-circuit: 熔断器已下沉到 keypool(per-key),provider 级
@@ -434,6 +435,17 @@ func detectProtocol(path string) provider.Protocol {
 	default:
 		return ""
 	}
+}
+
+// supportsProtocol 检查 provider 是否支持指定协议
+// 支持标准 Provider 和 MultiProtocolProvider
+func supportsProtocol(p provider.Provider, proto provider.Protocol) bool {
+	// 检查是否实现了 MultiProtocolProvider 接口
+	if mp, ok := p.(provider.MultiProtocolProvider); ok {
+		return mp.SupportsProtocol(proto)
+	}
+	// 回退到标准协议检查
+	return p.Protocol() == proto
 }
 
 // KeyCandidate P64: 把候选从 provider 维度展开到 (provider, tier) 维度

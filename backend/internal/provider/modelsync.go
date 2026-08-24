@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+
+	"go.uber.org/zap"
 )
 
 // ModelSyncStore 同步落库所需的最小 DB 接口(由 database 实现注入),
@@ -15,6 +17,10 @@ type ModelSyncStore interface {
 	UpsertModels(ctx context.Context, vendor string, modelIDs []string) error
 	// ReplaceFaceModels 整体替换某注册面的模型归属(P-model-face)。
 	ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error
+	// AddFaceModels 增量添加某注册面的模型归属(只添加新模型,不删除已有模型)。
+	AddFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error
+	// CountVendorModels 查询该厂商已有的模型数量(用于检查手动添加的模型)。
+	CountVendorModels(ctx context.Context, vendor string) (int, error)
 }
 
 // SyncVendorModels 拉某厂商上游在售模型并落库。
@@ -45,6 +51,10 @@ func SyncVendorModels(ctx context.Context, m *Manager, vendor string, store Mode
 		if err != nil {
 			// 该面不支持模型列表(NotSupported)或拉取失败 → 跳过,由其它面兜底。
 			// 不碰该面已有归属:失败是瞬态的,清空会让该面掉进 fallback 拿到全厂商模型。
+			m.logger.Warn("ListModels failed for face, skipping",
+				zap.String("face", n),
+				zap.String("vendor", vendor),
+				zap.Error(err))
 			continue
 		}
 		// 记下该面自己的归属(整体替换 → 上游下架的模型从该面消失)
@@ -60,7 +70,19 @@ func SyncVendorModels(ctx context.Context, m *Manager, vendor string, store Mode
 	}
 	if len(merged) == 0 {
 		// 所有面都拉不到模型(既无 openai 面,或全部 NotSupported/failed)。
-		return nil, fmt.Errorf("vendor %q has no face with a working model list", vendor)
+		// 检查数据库中是否已有手动添加的模型(如 anthropic 协议中转站)。
+		count, err := store.CountVendorModels(ctx, vendor)
+		if err != nil {
+			return nil, fmt.Errorf("vendor %q has no face with a working model list and failed to check existing models: %w", vendor, err)
+		}
+		if count == 0 {
+			return nil, fmt.Errorf("vendor %q has no face with a working model list", vendor)
+		}
+		// 已有手动添加的模型,跳过同步(保持手工配置不变)
+		m.logger.Info("vendor has no ListModels support but has manually configured models, skipping sync",
+			zap.String("vendor", vendor),
+			zap.Int("model_count", count))
+		return nil, nil
 	}
 	if err := store.UpsertModels(ctx, vendor, merged); err != nil {
 		return nil, err

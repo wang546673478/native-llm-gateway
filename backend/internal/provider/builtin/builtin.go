@@ -10,6 +10,9 @@
 //
 // 2026-08-20 下线 gemini / qwen / glm 三家(历史用量:gemini 0、qwen 0、glm 53 次
 // 且已无 key)。gemini 是 provider/google 的唯一消费者,google 协议层暂留待评估。
+//
+// 2026-08-24 下线 rightapi / tokenmarket 硬编码中转站 — 中转站已改为数据库配置
+// (relay_stations 表),通过 relay.LoadFromDatabase() 动态加载,不再需要代码包。
 package builtin
 
 import (
@@ -17,5 +20,4 @@ import (
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/mimo"
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/rightapi"
 )

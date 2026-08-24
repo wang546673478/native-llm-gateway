@@ -205,7 +205,8 @@ const rules = {
   name: { required: true, message: '名称必填', trigger: 'blur' },
 }
 
-const providerOptions = computed<SelectOption[]>(() => provStore.vendorOptions)
+// P-relay-independent: Gateway Keys 的 Provider 绑定不含中转站(中转站没 Provider Keys)
+const providerOptions = computed<SelectOption[]>(() => provStore.vendorOptionsNoRelay)
 
 // P34: 当前可选的 ProviderKey(根据已绑定的 providers 过滤)
 // form.providers 为空时显示所有;否则只显示绑定 provider 的 keys

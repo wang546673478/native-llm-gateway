@@ -33,6 +33,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/metrics"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 	"github.com/wang546673478/native-llm-gateway/internal/provider/mimo"
+	"github.com/wang546673478/native-llm-gateway/internal/provider/relay"
 	"github.com/wang546673478/native-llm-gateway/internal/proxy"
 	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
@@ -73,6 +74,20 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	// P3+P4+P5: 构造 KeyPool map + Router + Proxy
 	// P30:从 DB (provider_api_keys 表) 读 key 而不是 config.yaml
 	pools := buildKeyPools(cfg, db, logger)
+
+	// P-relay-independent: 为已加载的中转站构建 KeyPool
+	registry := provider.Default()
+	for name := range manager.GetAll() {
+		if registry.IsRelay(name) {
+			vendor := registry.VendorFor(name)
+			if _, exists := pools[vendor]; !exists {
+				pool := buildProviderPool(cfg, db, vendor, logger)
+				pools[vendor] = pool
+				logger.Info("built keypool for relay station", zap.String("vendor", vendor), zap.String("name", name))
+			}
+		}
+	}
+
 	// P-state-persist: 恢复上次优雅关停的 key 状态(QE/COOLING/余额)。
 	// 必须在 quotacheck.NewManager(injectCallbacks)之前 — QE key 恢复后
 	// 立即被 callback 重入堆,不等 poll 重新确认
@@ -371,6 +386,15 @@ func buildKeyPools(cfg *config.Config, db *gorm.DB, logger *zap.Logger) map[stri
 		out[name] = pool
 	}
 	return out
+}
+
+// buildProviderPool 为单个 vendor 构建 KeyPool（中转站热重载时使用）
+func buildProviderPool(cfg *config.Config, db *gorm.DB, vendor string, logger *zap.Logger) *keypool.Pool {
+	sched := keypool.NewScheduler(cfg.KeyPool.KeyRotation)
+	store := auth.NewProviderKeyStore(db)
+	poolCfg := toPoolCfg(cfg, vendor, logger)
+	return buildOnePool(context.Background(), vendor, sched, poolCfg, store, logger,
+		loadKeyOrder(db, vendor))
 }
 
 // toPoolCfg 单一来源:构造 provider pool 的 keypool.Config。
@@ -929,6 +953,22 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		},
 		func() error {
 			return s.manager.LoadModelsFromStore(context.Background(), s.modelStoreAdapter)
+		},
+		// P-relay-station: 中转站管理 Store
+		database.NewRelayStationStore(s.db),
+		// P-relay-station: 中转站热重载函数
+		func() error {
+			if err := relay.ReloadFromDatabase(s.db, s.manager); err != nil {
+				return err
+			}
+			// P-relay-independent: 重载后重建中转站的 KeyPool
+			registry := provider.Default()
+			for name := range s.manager.GetAll() {
+				if registry.IsRelay(name) {
+					s.ReloadProviderPool(name)
+				}
+			}
+			return nil
 		},
 	)
 	// P-provider-vendor: 让 admin 动态读最新 pools —— ReloadProviderPool 会整体替换

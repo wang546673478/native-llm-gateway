@@ -263,9 +263,12 @@ async function load() {
     // P-provider-vendor: key 存在 vendor 名下(provider_name = vendor),不是注册面名下。
     // 同 vendor 多注册面共享同一 key 池 → 按 vendor 名查一次即可,展开注册面名逐个查
     // 反而会漏(注册面名如 rightapi-codex ≠ vendor 名 rightapi,查不到 key)。
+    // P-relay-independent: 过滤中转站 —— 中转站 key 在「中转站管理」页配置,
+    // 本页专属厂商(内置 provider),各管各的。
     await provStore.load()
-    providers.value = provStore.vendors
-    const vendors = provStore.vendors.map(v => v.vendor)
+    const vendorOnly = provStore.vendors.filter(v => !v.is_relay)
+    providers.value = vendorOnly
+    const vendors = vendorOnly.map(v => v.vendor)
     const allKeys = await Promise.all(
       vendors.map(async vendor => {
         try {

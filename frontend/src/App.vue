@@ -53,15 +53,16 @@ const activeKey = computed(() => route.path)
 const healthOk = computed(() => healthStore.ok)
 const currentTitle = computed(() => {
   const map: Record<string, string> = {
-    '/overview': '总览',
-    '/providers': 'Providers',
-    '/provider-keys': 'Provider Keys',
-    '/keys': 'Gateway Keys',
-    '/routing': '路由规则',
-    '/usage': '用量',
-    '/access-logs': 'Access Logs',
-    '/inflight': '活跃请求',
-    '/models': '模型管理',
+    '/overview': '📊 总览',
+    '/providers': '🏭 厂商管理 - 厂商列表',
+    '/provider-keys': '🏭 厂商管理 - 密钥管理',
+    '/keys': '🎫 Gateway Keys',
+    '/relay-stations': '🚉 中转站',
+    '/routing': '🗺️ 路由规则',
+    '/usage': '📈 用量',
+    '/access-logs': '📋 Access Logs',
+    '/inflight': '⚡ 活跃请求',
+    '/models': '🧩 模型管理',
   }
   return map[route.path] ?? 'LLM Gateway'
 })
@@ -71,12 +72,19 @@ function renderMenuLabel(to: string, label: string) {
 }
 
 const menuOptions: MenuOption[] = [
-  { key: '/overview', label: renderMenuLabel('/overview', '总览') },
-  { key: '/providers', label: renderMenuLabel('/providers', 'Providers') },
-  { key: '/provider-keys', label: renderMenuLabel('/provider-keys', 'Provider Keys') },
-  { key: '/keys', label: renderMenuLabel('/keys', 'Gateway Keys') },
-  { key: '/routing', label: renderMenuLabel('/routing', '路由规则') },
-  { key: '/usage', label: renderMenuLabel('/usage', '用量') },
+  { key: '/overview', label: renderMenuLabel('/overview', '📊 总览') },
+  {
+    key: 'vendor-management',
+    label: '🏭 厂商管理',
+    children: [
+      { key: '/providers', label: renderMenuLabel('/providers', '厂商列表') },
+      { key: '/provider-keys', label: renderMenuLabel('/provider-keys', '密钥管理') },
+    ],
+  },
+  { key: '/keys', label: renderMenuLabel('/keys', '🎫 Gateway Keys') },
+  { key: '/relay-stations', label: renderMenuLabel('/relay-stations', '🚉 中转站') },
+  { key: '/routing', label: renderMenuLabel('/routing', '🗺️ 路由规则') },
+  { key: '/usage', label: renderMenuLabel('/usage', '📈 用量') },
   { key: '/access-logs', label: renderMenuLabel('/access-logs', '📋 Access Logs') },
   { key: '/inflight', label: renderMenuLabel('/inflight', '⚡ 活跃请求') },
   { key: '/models', label: renderMenuLabel('/models', '🧩 模型管理') },

@@ -32,6 +32,9 @@ export interface VendorInfo {
   models: string[]
   key_pool?: KeyPoolStatus | null
   circuit_breaker?: CircuitBreakerInfo | null
+  // P-relay-independent: 中转站标记 —— true = 该项是中转站面(vendor 即 name),
+  // ProviderKeys 页面据此过滤(中转站 key 在中转站管理页配,不在 Provider Keys)
+  is_relay?: boolean
 }
 
 export interface ProvidersResponse {
@@ -403,4 +406,46 @@ export const api = {
         .post<{ vendor: string; deleted: number }>('/providers/models/prune', { vendor })
         .then(r => r.data),
   },
+}
+
+// 中转站管理 API
+export interface RelayStation {
+  id?: number
+  name: string
+  display_name: string
+  base_url: string
+  protocol_mode: 'single' | 'multi'
+  primary_protocol: string
+  supported_protocols: string
+  supported_protocols_array?: string[]
+  enabled: boolean
+  timeout_seconds: number
+  billing_source: string
+  keys?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface RelayStationsResponse {
+  relay_stations: RelayStation[]
+  count: number
+}
+
+export async function listRelayStations(): Promise<RelayStationsResponse> {
+  const resp = await client.get<RelayStationsResponse>('/relay-stations')
+  return resp.data
+}
+
+export async function createRelayStation(data: Partial<RelayStation>): Promise<RelayStation> {
+  const resp = await client.post<RelayStation>('/relay-stations', data)
+  return resp.data
+}
+
+export async function updateRelayStation(id: number, data: Partial<RelayStation>): Promise<RelayStation> {
+  const resp = await client.put<RelayStation>(`/relay-stations/${id}`, data)
+  return resp.data
+}
+
+export async function deleteRelayStation(id: number): Promise<void> {
+  await client.delete(`/relay-stations/${id}`)
 }

@@ -61,7 +61,8 @@ onMounted(async () => {
   loading.value = true
   try {
     await store.load() // 共享 fetch + 缓存;vendor 清单一次
-    providers.value = store.vendors
+    // P-relay-independent: 厂商列表只显示真厂商,不含中转站(中转站在「中转站管理」页)
+    providers.value = store.vendors.filter(v => !v.is_relay)
   } finally {
     loading.value = false
   }

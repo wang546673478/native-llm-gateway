@@ -259,6 +259,15 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing_provider_name"})
 		return
 	}
+	// P-relay-independent: 禁止为中转站创建 Provider Key —— 中转站的 key
+	// 在中转站管理页配置(存 relay_stations 表),厂商管理只管直连厂商。
+	if provider.Default().IsRelay(providerName) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  "relay_not_allowed",
+			"detail": "中转站的 key 请在「中转站管理」页面配置,不能在 Provider Keys 里创建",
+		})
+		return
+	}
 	// P-provider-vendor: 存储名归一为 vendor — 共享 pool 按 vendor 名读 DB,
 	// 直接 API 用变体名(deepseek-anthropic)创建会静默失效(池读不到)。
 	// 归一后 ReloadProviderPool(vendor) 会把 key 放进共享 pool 参与路由/poll。

@@ -18,9 +18,15 @@
 | | `mimo-token-plan` | openai | **token_plan** | probe | ✅ | `provider/mimo/mimo.go`(同 vendor) |
 | | `mimo-anthropic` | anthropic | api | probe | ❌ | `provider/mimo/anthropic.go` |
 | | `mimo-token-plan-anthropic` | anthropic | **token_plan** | probe | ❌ | `provider/mimo/anthropic.go`(同 vendor) |
+| **Right Code** | `rightapi-grok` | openai | api | - | ✅ | config only |
+| | `rightapi-gemini` | openai | api | - | ❌ | config only |
+| | `rightapi-claude` | anthropic | api | - | ❌ | config only |
+| | `rightapi-claude-aws` | anthropic | api | - | ❌ | config only |
+| **TokenMarket** | `tokenmarket` | openai | api | - | ❌ | config only(中转站) |
 
 > **kimi 已删除**(2026-08)。需要时按 `docs/provider厂商定制包指南.md` 加回。
 > **glm / qwen / gemini 已删除**(2026-08-20,历史用量 glm 53 次、qwen/gemini 0 次)。需要时按 `docs/provider厂商定制包指南.md` 加回。
+> **Right Code / TokenMarket** 为中转站,采用配置接入(无专属厂商包)。
 
 ---
 
@@ -200,3 +206,79 @@ if !vendorHasBalancer(vendor) {
 4. **config 块**:`billing_source` 与 vendor 内其他块保持一致
 5. **`provider/builtin/builtin.go`**:blank import 漏一行就完蛋
 6. **测试**:`registry_test.go` 断言两个注册名 + Protocol/Vendor
+
+---
+
+## 8. TokenMarket 中转站
+
+> ✅ **接入时间**: 2026-08-22  
+> 🎯 **接入方式**: 配置接入(无厂商包代码)  
+> 📚 **完整文档**: `docs/provider-tokenmarket.md`
+
+### 简介
+
+**TokenMarket** (https://tokenmarket.cheap) 是基于 **New-API** 开源项目搭建的 LLM API 聚合中转站。
+
+### 核心特点
+
+- ✅ **OpenAI 完全兼容** — 标准 `/v1/chat/completions` / `/v1/models` 格式
+- ✅ **国内直连** — 无需科学上网
+- ✅ **多厂商聚合** — GPT-4o、Claude、DeepSeek、国产模型一站式
+- ✅ **按量计费** — 不同模型倍率 0.05-1.5x 官方价格
+- ❌ **无 Responses API** — Codex 的 `/v1/responses` 请求不会路由到 TokenMarket
+
+### 技术实现
+
+TokenMarket 完全复用 `openai_compatible` 基础实现,无需编写专属厂商包:
+
+```yaml
+# config.yaml
+tokenmarket:
+  enabled: true
+  billing_source: "api"
+  endpoint: "https://tokenmarket.cheap/v1"
+  protocol: "openai"          # 复用 openai_compatible
+  timeout: 60s
+  responses_api: false        # 不支持 Responses API
+```
+
+### 使用步骤
+
+1. **获取 API Key**: 访问 https://tokenmarket.cheap 注册并充值
+2. **添加 Key**: 前端「Provider Keys」页面添加 `sk-xxxxx`
+3. **同步模型**: `curl -X POST http://localhost:8080/api/v1/providers/tokenmarket/sync-models`
+4. **测试**: `./scripts/test-tokenmarket.sh`
+
+### 路由集成
+
+TokenMarket 已自动加入路由链:
+- **协议过滤**: `/v1/chat/completions` 走 OpenAI 面(包括 tokenmarket)
+- **Sticky 调度**: 优先用最高优先级可用 key
+- **熔断保护**: 5xx/timeout 触发 per-key 熔断,自动切换
+
+### 监控
+
+- **Access Logs**: 筛选 `provider=tokenmarket`
+- **Overview**: 查看 tokenmarket 的 key 状态(健康/冷却/熔断)
+- **Usage**: 统计 token 消耗
+
+### 已知限制
+
+| 限制 | 说明 |
+|------|------|
+| ❌ Responses API | 不支持 `/v1/responses` |
+| ⚠️ 余额查询 | 无官方 balancer,需在 TokenMarket 平台管理 |
+| ⚠️ 中转站风险 | 可能跑路/变更政策,建议多备份 |
+| ⚠️ 首字延迟 | 中转站特性,平均 10-30 秒 |
+
+### 成本对比
+
+| 模型 | 官方价格 | TokenMarket 倍率 | 实际价格 |
+|------|----------|------------------|----------|
+| gpt-4o | $5/1M | 0.8-1.2x | $4-6/1M |
+| claude-3.5-sonnet | $3/1M | 0.9-1.5x | $2.7-4.5/1M |
+| deepseek-chat | $0.14/1M | 0.05-0.3x | $0.007-0.042/1M |
+
+### 完整文档
+
+详见 `docs/provider-tokenmarket.md` 和 `docs/TOKENMARKET-INTEGRATION-SUMMARY.md`。

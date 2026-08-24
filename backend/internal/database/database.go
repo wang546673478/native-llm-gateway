@@ -77,6 +77,7 @@ func Migrate(db *gorm.DB) error {
 		&Provider{},
 		&ProviderModel{},
 		&ProviderModelFace{}, // P-model-face: 面→模型归属(中转站多后缀厂商)
+		&RelayStation{},      // P-relay: 中转站配置
 		&ModelAlias{},
 		&ProviderAPIKey{}, // P30: 替换 APIKey 表
 		&UsageRecord{},

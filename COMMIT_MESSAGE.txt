@@ -1,0 +1,71 @@
+feat(provider): 接入 TokenMarket 中转站 — 通用 OpenAI 兼容协议
+
+## 变更摘要
+
+- 新增 `openai_compatible/generic.go` — 通用 OpenAI 兼容 Provider 包装器
+- 修复 `provider/registry.go` — createCompatible() 类型错误(cfg.Protocol 已是 Protocol 类型)
+- 新增文档 3 份 — 接入指南/完整报告/快速参考
+
+## 核心实现
+
+1. **通用 OpenAI 兼容 Provider**
+   - `openai_compatible.Generic` 包装 `Base`,完整复用现有能力
+   - 注册 `__generic_openai__` factory,供 Registry 自动路由
+   - 零侵入设计,删除不影响其他 provider
+
+2. **Registry 自动回退**
+   - 配置中 `protocol: openai` → 自动使用通用 factory
+   - 无需编写专属厂商包,5 分钟配置即用
+
+3. **完整特性继承**
+   - SendRequest / SendStreamRequest(SSE)
+   - ListModels / HealthCheck
+   - 熔断器 / 429 处理 / 错误分类
+   - 接入日志 / 用量统计
+
+## 测试结果
+
+✅ 编译通过: `make build`
+✅ 测试通过: 27/27 packages
+✅ 运行验证: curl /api/v1/providers 显示 tokenmarket
+✅ 日志确认: "pool injected provider=tokenmarket"
+
+## 低耦合原则遵守
+
+- ✅ 模块独立性 — generic.go 零外部依赖
+- ✅ 可替换性 — 删除不影响其他 provider
+- ✅ 显式边界 — 通过 Provider 接口交互
+- ✅ 测试隔离 — openai_compatible 包独立测试
+- ✅ 配置单源 — tokenmarket 配置块独立
+
+## 文件变更
+
+新增:
+- backend/internal/provider/openai_compatible/generic.go (57 行)
+- docs/tokenmarket接入指南.md (完整配置与故障排查)
+- docs/TOKENMARKET_INTEGRATION.md (技术实现报告)
+- docs/TOKENMARKET_QUICKREF.md (一页纸速查手册)
+
+修改:
+- backend/internal/provider/registry.go (createCompatible 逻辑优化)
+
+已有:
+- config.yaml (tokenmarket 配置块已存在)
+
+## 使用方式
+
+1. 前端 Provider Keys 页面添加 TokenMarket API Key
+2. (可选)config.yaml routing.catch_all 添加 tokenmarket
+3. 发送请求到 /v1/chat/completions,自动路由
+
+## 扩展能力
+
+任何 OpenAI 兼容中转站(One-API / FastGPT 等)均可通过相同方式接入:
+- 在 config.yaml 添加配置块,设置 protocol: openai
+- 无需编写代码,立即生效
+
+## 相关 Issue
+
+满足用户需求:接入 TokenMarket 中转站,保持厂商包特性,现有功能不破坏
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>

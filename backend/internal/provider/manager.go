@@ -479,3 +479,43 @@ func (m *Manager) SetForTesting(name string, p Provider) {
 	defer m.mu.Unlock()
 	m.providers[name] = p
 }
+
+// AddProvider 添加一个已构造的 Provider 到 manager(用于动态加载,如中转站)
+func (m *Manager) AddProvider(ctx context.Context, name string, p Provider) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 健康检查(短超时)
+	hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	if err := p.HealthCheck(hctx); err != nil {
+		m.logger.Warn("provider health check failed, still loaded",
+			zap.String("provider", name),
+			zap.Error(err))
+	} else {
+		m.logger.Info("provider loaded",
+			zap.String("provider", name),
+			zap.String("protocol", string(p.Protocol())))
+	}
+
+	m.providers[name] = p
+	return nil
+}
+
+// RemoveProvider 从 Manager 中移除指定的 provider
+func (m *Manager) RemoveProvider(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if p, ok := m.providers[name]; ok {
+		// 关闭 provider(释放资源)
+		if err := p.Close(); err != nil {
+			m.logger.Warn("failed to close provider",
+				zap.String("provider", name),
+				zap.Error(err))
+		}
+		delete(m.providers, name)
+		m.logger.Info("provider removed", zap.String("provider", name))
+	}
+}
