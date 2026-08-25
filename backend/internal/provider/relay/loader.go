@@ -96,6 +96,13 @@ func registerAndLoadRelayStation(ctx context.Context, s database.RelayStation, m
 			if err := mgr.AddProvider(ctx, faceName, relayProvider); err != nil {
 				return fmt.Errorf("add provider %s to manager: %w", faceName, err)
 			}
+
+			// P-responses: 标志按面设置 — 多协议站拆出的每个面都是独立的注册名,
+			// router 的 SupportsResponsesAPI 按注册名查。漏设会让多协议站配了
+			// supports_responses_api=true 也永远拿不到 /responses(候选被筛空 → 503)。
+			// 只有 openai 面有意义(isResponses 要求 ProtocolOpenAI),但无条件按站的
+			// 配置 set 更简单且无副作用 — anthropic 面不会走到那个判断。
+			mgr.SetResponsesAPISupport(faceName, s.SupportsResponsesAPI)
 		}
 	} else {
 		// 单协议模式:直接注册
@@ -108,11 +115,10 @@ func registerAndLoadRelayStation(ctx context.Context, s database.RelayStation, m
 			return fmt.Errorf("add provider %s to manager: %w", s.Name, err)
 		}
 
-		// P-responses: 设置 Responses API 支持标记
-		if s.SupportsResponsesAPI {
-			mgr.SetResponsesAPISupport(s.Name, true)
-			log.Printf("[relay] Set responses_api=true for %s", s.Name)
-		}
+		// P-responses: 设置 Responses API 支持标记。
+		// 无条件 set(不能只在 true 时 set):热重载时 DB 改回 false 必须能清掉内存里的
+		// 旧 true,否则「关掉某站的 /responses」要重启进程才生效(2026-08-25 实测)。
+		mgr.SetResponsesAPISupport(s.Name, s.SupportsResponsesAPI)
 	}
 
 	return nil

@@ -60,8 +60,6 @@ type routeOpts struct {
 	ProviderKeyIDs []uint
 	// P-catch-all: gateway key 白名单 — catch_all 自动模式用它选择候选模型
 	AllowedModels []string
-	// P-relay-passthrough: 中转站直通模式标志 — 跳过白名单选择，直接透传客户端模型名
-	IsRelayPassthrough bool
 	// P19: Gateway Key 绑定的 Provider 限制 — 路由候选必须在此列表中
 	AllowedProviders []string
 }
@@ -79,14 +77,6 @@ func WithProviderKeyIDs(ids []uint) RouteOption {
 func WithAllowedModels(models []string) RouteOption {
 	return func(o *routeOpts) {
 		o.AllowedModels = models
-	}
-}
-
-// WithRelayPassthrough P-relay-passthrough: 标记为中转站直通模式。
-// 中转站模式下，直接透传客户端模型名，跳过白名单选择逻辑。
-func WithRelayPassthrough(isRelay bool) RouteOption {
-	return func(o *routeOpts) {
-		o.IsRelayPassthrough = isRelay
 	}
 }
 
@@ -197,13 +187,31 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		// P-responses: /responses 透传只走原生支持 Responses API 的 provider
 		// (DeepSeek / MiniMax;Qwen / Gemini 不支持,硬发会 400/404 且
 		// 404 归类 model_not_found 非 retryable,会中断 failover)
-		if isResponses && !r.manager.SupportsResponsesAPI(name) {
+		// 中转站不受此过滤:它是纯透传,网关无从知道上游支不支持 /responses。
+		// supports_responses_api 对内建厂商是代码事实(deepseek 支持、qwen 不支持),
+		// 对中转站只是一个手填的 DB 列,默认 false —— 拿它当资格判定会把实际可用的站
+		// (tokenmarket 各站 /v1/responses 实测 200)在进候选前就筛掉,failover 无处可切。
+		// 与 relayServesModel / provider_model_faces 同一条不变式:信息缺失时放行,不判死。
+		// 中转站真不支持时由 failover 兜(见 proxy.go candidateUnfitNotFatal)。
+		if isResponses && !r.manager.IsRelay(name) && !r.manager.SupportsResponsesAPI(name) {
 			continue
 		}
 
-		// P-relay-passthrough: 中转站直通模式 — 仅当 Gateway Key 绑定的全是中转站时
-		// 才直接透传客户端模型名；否则中转站也参与普通路由（使用默认模型）
-		if r.manager.IsRelay(name) && o.IsRelayPassthrough {
+		// P-relay-model-first: 中转站永远「模型优先 + 透传」—— 与 Gateway Key 怎么绑无关。
+		// 客户端模型名是权威:先用它筛掉没声明该模型的站,再透传原名给上游。
+		//
+		// 为什么必须筛(不筛不只是浪费一次请求):404 → ErrorTypeModelNotFound
+		// (provider.go:307) → 非 retryable(provider.go:258) → tryCandidate 返
+		// outcomeFatal → runCandidateLoop 当场收尾。也就是说一个不合的站会把整条
+		// failover 链掐断,它后面本来能用的站一个都试不到(2026-08-25 实测:
+		// claude-opus-5→tokenmarket-kiro4 404×8、gpt-5.6-sol→tokenmarket-codex 404×3,
+		// 而这两个模型分别有 13/10 个站声明)。
+		//
+		// 普通厂商不走这里 — 它们的 default_model + 白名单选择逻辑完全不变。
+		if r.manager.IsRelay(name) {
+			if !relayServesModel(r.manager.ModelsFor(name), req.Model) {
+				continue
+			}
 			routes = append(routes, ProviderRoute{
 				Name:          name,
 				Model:         req.Model, // 直接透传客户端请求的模型名
@@ -307,6 +315,23 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 func sliceContains(list []string, v string) bool {
 	for _, s := range list {
 		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// relayServesModel P-relay-model-first: 该中转站是否声明了这个模型(大小写不敏感)。
+//
+// models 为空 = 该站从未同步过模型清单 → 当通配放行。这个守卫不能省:按空集判死会让
+// 新建中转站在首次同步前全部候选被筛空 → 503(与二十轮 provider_model_faces 的核心
+// 不变式同一条 —— 无归属行时回退放行,不判死)。
+func relayServesModel(models []string, model string) bool {
+	if len(models) == 0 {
+		return true // 未同步过 → 通配,不参与筛选
+	}
+	for _, m := range models {
+		if strings.EqualFold(m, model) {
 			return true
 		}
 	}
@@ -439,12 +464,16 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		// P-mixed-tier-pool: 补块级计费来源(显式 alias providers 列表里没写这个字段)
 		p.BillingSource = r.manager.BillingSourceFor(p.Name)
 
-		// P-relay-passthrough: 中转站直通模式 — 仅当 Gateway Key 绑定的全是中转站时
-		// 才跳过白名单选择，直接用客户端模型名；否则中转站也参与普通路由
-		if r.manager.IsRelay(p.Name) && o.IsRelayPassthrough {
-			if p.Model == "" {
-				p.Model = req.Model
+		// P-relay-model-first: 中转站永远「模型优先 + 透传」，与 Gateway Key 怎么绑无关。
+		// 与 routeCatchAllAuto 同一条规则(relayServesModel 单源),两处行为必须一致 ——
+		// 否则 catch_all 自动模式和显式 alias 模式对同一个中转站给出不同候选。
+		// 注意 Model 是无条件覆盖成 req.Model(不是仅 p.Model=="" 时):中转站的模型名
+		// 以客户端为准,配置里写死的 model 字段对中转站没有意义。
+		if r.manager.IsRelay(p.Name) {
+			if !relayServesModel(r.manager.ModelsFor(p.Name), req.Model) {
+				continue
 			}
+			p.Model = req.Model
 			out = append(out, p)
 			continue
 		}

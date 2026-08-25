@@ -1390,6 +1390,10 @@ func (a *Admin) updateRelayStation(c *gin.Context) {
 	existing.Enabled = req.Enabled
 	existing.Timeout = req.Timeout
 	existing.BillingSource = req.BillingSource
+	// P-responses: 漏了这一行会让「从 UI 编辑任何中转站」都把该标志静默清成 false
+	// (create 是整 struct bind 所以没这个问题,update 是逐字段 copy)。
+	// 标志为 false 的站在 /responses 请求里会被 router 筛掉 → 候选变空 → 503。
+	existing.SupportsResponsesAPI = req.SupportsResponsesAPI
 
 	if err := a.RelayStationStore.Update(c.Request.Context(), existing); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update relay station: " + err.Error()})

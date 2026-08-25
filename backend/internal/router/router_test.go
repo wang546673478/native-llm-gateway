@@ -38,6 +38,9 @@ func (p *fakeProvider) Close() error          { return nil }
 // 把 fakeProvider 的 Models 投影成 DBModelRow(粒度 = vendor,经 VendorFor 归位)。
 type fakeModelStore struct {
 	rows []provider.DBModelRow
+	// faceRows 按面的模型归属(provider_model_faces 等价物)。nil = 无面归属数据,
+	// 走 vendor 级 fallback —— 绝大多数 router 测试是这个形态。
+	faceRows []provider.DBFaceRow
 }
 
 func (s fakeModelStore) All(ctx context.Context) ([]provider.DBModelRow, error) {
@@ -53,10 +56,11 @@ func (s fakeModelStore) ListByVendor(ctx context.Context, vendor string) ([]prov
 	return out, nil
 }
 
-// AllFaces 返回空 —— router 测试全部走 vendor 级 fallback(无面归属数据),
+// AllFaces 默认返回空 —— 多数 router 测试走 vendor 级 fallback(无面归属数据),
 // 与「未同步过的厂商」和「anthropic 面共享 openai 面模型」的线上语义一致。
+// 显式喂 faceRows 的测试(中转站模型优先)拿到按面归属。
 func (s fakeModelStore) AllFaces(ctx context.Context) ([]provider.DBFaceRow, error) {
-	return nil, nil
+	return s.faceRows, nil
 }
 
 // loadModelsFromProviders 用 fakeProvider 的 model 清单填充 manager 的 defaultModels。

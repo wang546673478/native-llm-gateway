@@ -61,6 +61,15 @@
             :rows="4"
           />
         </n-form-item>
+        <n-form-item label="支持 Responses API" path="supports_responses_api">
+          <n-space vertical size="small" style="width: 100%">
+            <n-switch v-model:value="form.supports_responses_api" />
+            <n-text depth="3" style="font-size: 12px">
+              Codex 客户端走 /responses 端点。关闭时本站不参与 /responses 请求的路由 ——
+              若所有站都关闭，该类请求会直接 503。仅对 OpenAI 协议有意义。
+            </n-text>
+          </n-space>
+        </n-form-item>
         <n-form-item label="启用" path="enabled">
           <n-switch v-model:value="form.enabled" />
         </n-form-item>
@@ -82,7 +91,7 @@
 import { h, onMounted, ref } from 'vue'
 import {
   NButton, NCard, NDataTable, NForm, NFormItem, NInput, NInputNumber,
-  NModal, NSpace, NSpin, NSelect, NSwitch, NH3, NTag, useMessage,
+  NModal, NSpace, NSpin, NSelect, NSwitch, NH3, NTag, NText, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
@@ -110,6 +119,7 @@ const form = ref({
   timeout_seconds: 60,
   billing_source: 'api',
   keys_text: '',
+  supports_responses_api: false,
   enabled: true,
 })
 
@@ -186,6 +196,17 @@ const columns: DataTableColumns<RelayStation> = [
     render: (row) => BILLING_SOURCE[row.billing_source as keyof typeof BILLING_SOURCE] || row.billing_source,
   },
   {
+    title: 'Responses',
+    key: 'supports_responses_api',
+    width: 100,
+    render: (row) =>
+      h(
+        NTag,
+        { type: row.supports_responses_api ? 'info' : 'default', size: 'small' },
+        () => (row.supports_responses_api ? '支持' : '不支持')
+      ),
+  },
+  {
     title: '状态',
     key: 'enabled',
     width: 80,
@@ -258,6 +279,7 @@ function openCreate() {
     timeout_seconds: 60,
     billing_source: 'api',
     keys_text: '',
+    supports_responses_api: false,
     enabled: true,
   }
   editing.value = false
@@ -295,6 +317,7 @@ function openEdit(row: RelayStation) {
     timeout_seconds: row.timeout_seconds,
     billing_source: row.billing_source,
     keys_text: keysText,
+    supports_responses_api: row.supports_responses_api ?? false,
     enabled: row.enabled,
   }
   editing.value = true
@@ -320,6 +343,7 @@ async function save() {
     timeout_seconds: form.value.timeout_seconds,
     billing_source: form.value.billing_source,
     keys: JSON.stringify(keysArray),
+    supports_responses_api: form.value.supports_responses_api,
     enabled: form.value.enabled,
   }
 

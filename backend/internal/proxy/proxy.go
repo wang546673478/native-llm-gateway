@@ -45,7 +45,7 @@ type Engine struct {
 	// 不 import inflight 包内部实现。为「实时正在跑的对话」视图供数。
 	inflight     *inflight.Registry
 	quotaChecker QuotaChecker // token_plan 降档的配额探测(nil 时跳过探测)
-	maxRetry      int
+	maxRetry     int
 	// writeTimeout 流式写 deadline 的续期预算(取 server.write_timeout)。
 	// http.Server.WriteTimeout 是「响应整体绝对上限」,流式场景下长生成会被
 	// 120s 掐断(Claude Code 报 Connection closed mid-response);doStream 每个
@@ -122,18 +122,18 @@ func NewEngine(cfg Config) *Engine {
 		cfg.GkContext = defaultGatewayKeyContext
 	}
 	return &Engine{
-		logger:        cfg.Logger,
-		router:        cfg.Router,
-		usage:         cfg.Usage,
-		metrics:       cfg.Metrics,
-		tokenRecorder: cfg.TokenRecorder,
-		authn:         cfg.Authenticator,
-		accessLog:     cfg.AccessLog,
-		inflight:      cfg.Inflight,
-		quotaChecker:  cfg.QuotaChecker,
-		maxRetry:      cfg.MaxRetry,
-		writeTimeout:  cfg.WriteTimeout,
-		gkCtx:         cfg.GkContext,
+		logger:               cfg.Logger,
+		router:               cfg.Router,
+		usage:                cfg.Usage,
+		metrics:              cfg.Metrics,
+		tokenRecorder:        cfg.TokenRecorder,
+		authn:                cfg.Authenticator,
+		accessLog:            cfg.AccessLog,
+		inflight:             cfg.Inflight,
+		quotaChecker:         cfg.QuotaChecker,
+		maxRetry:             cfg.MaxRetry,
+		writeTimeout:         cfg.WriteTimeout,
+		gkCtx:                cfg.GkContext,
 		fingerprintSanitizer: cfg.FingerprintSanitizer,
 	}
 }
@@ -367,11 +367,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		if len(gk.Providers) > 0 {
 			routeOpts = append(routeOpts, router.WithAllowedProviders(gk.Providers))
 		}
-		// P-relay-passthrough: 中转站模式传递标志给路由层
-		if isRelayPassthrough {
-			routeOpts = append(routeOpts, router.WithRelayPassthrough(true))
-		}
-		// P-relay-passthrough: 中转站模式跳过白名单参与选择（中转站直接透传客户端模型名）
+		// P-relay-model-first: 路由层不再需要「是否直通」标志 —— 中转站永远模型优先 +
+		// 透传客户端模型名(router.go relayServesModel)。这里只保留白名单门控:
+		// 纯中转站绑定时不把白名单传下去,避免它改写普通厂商的候选模型选择。
 		// P-whitelist-select: 白名单参与 catch_all 自动模式的候选模型选择 —
 		// key 允许的模型就是链上实际服务的模型(通配 * 不参与选择)
 		if !isRelayPassthrough && len(gk.AllowedModels) > 0 && !(len(gk.AllowedModels) == 1 && gk.AllowedModels[0] == "*") {
@@ -1213,6 +1211,9 @@ afterWhitelist:
 			(pe.ErrorType == provider.ErrorTypeModelNotFound || pe.ErrorType == provider.ErrorTypeInvalidRequest) {
 			return outcomeContinue, false, true
 		}
+		if e.candidateUnfitNotFatal(result, req.Model, pe) {
+			return outcomeContinue, false, true
+		}
 		return outcomeFatal, false, true
 	}
 
@@ -1262,9 +1263,8 @@ afterWhitelist:
 				return outcomeContinue, false, true
 			}
 			if !errorIsRetryable(pe2) {
-				// 同首次尝试:catch_all 标签模型场景的模型类错误 = 候选不适配,继续
-				if result.ModelID != req.Model &&
-					(pe2.ErrorType == provider.ErrorTypeModelNotFound || pe2.ErrorType == provider.ErrorTypeInvalidRequest) {
+				// 同首次尝试:候选不适配 → 继续下一站(单源 candidateUnfitNotFatal)
+				if e.candidateUnfitNotFatal(result, req.Model, pe2) {
 					return outcomeContinue, false, true
 				}
 				return outcomeFatal, false, true
@@ -1485,6 +1485,30 @@ func (e *Engine) endpointFor(providerName string) string {
 		}
 	}
 	return ""
+}
+
+// candidateUnfitNotFatal 不可重试的模型类错误(404 model_not_found / 400 invalid_request)
+// 到底是「这个候选不适配」还是「请求本身致命」。前者继续下一候选,后者整请求失败。
+//
+// 两种「不适配」:
+//  1. 候选目标模型 ≠ 客户端模型名 — 客户端名只是标签,上游不认识这个真实模型名
+//     (400 Unsupported model)或不支持输入类型(404 image input,MiMo v2.5-pro 实测)。
+//  2. 中转站 — 永远透传所以 ModelID == req.Model 恒成立,条件 1 对它永不触发。
+//     对中转站 404/400 的成因是端点没开 / 模型清单过期 / 上游自己路由不到,都是
+//     「换下一站可能就好」,不是请求致命。不放行会让一个站的 404 掐断整条 failover 链
+//     (2026-08-25 实测:codex 之后的 8 个 tokenmarket 站一个都试不到)。
+//
+// 内建厂商直连真实模型名时保持 fatal:模型真不存在,换候选也没用。
+// 单源:首次尝试与换 key 后二次尝试两处共用,避免两份规则漂移。
+func (e *Engine) candidateUnfitNotFatal(result *router.RouteResult, clientModel string, pe *provider.ProviderError) bool {
+	if pe.ErrorType != provider.ErrorTypeModelNotFound &&
+		pe.ErrorType != provider.ErrorTypeInvalidRequest {
+		return false
+	}
+	if result.ModelID != clientModel {
+		return true
+	}
+	return e.router.Manager().IsRelay(result.ProviderName)
 }
 
 // isNetworkClass 网络类错误:connection / timeout / server_error —
