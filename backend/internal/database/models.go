@@ -102,6 +102,7 @@ type RelayStation struct {
 	Enabled     bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`
 	Timeout     int    `gorm:"column:timeout_seconds;not null;default:60" json:"timeout_seconds"`
 	BillingSource string `gorm:"column:billing_source;not null;default:'api'" json:"billing_source"` // token_plan/api/free
+	SupportsResponsesAPI bool `gorm:"column:supports_responses_api;not null;default:false" json:"supports_responses_api"` // P-responses: OpenAI Responses API 支持
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

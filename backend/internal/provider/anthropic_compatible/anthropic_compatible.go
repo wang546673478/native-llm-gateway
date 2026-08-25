@@ -560,13 +560,10 @@ func (b *Base) ListModels(ctx context.Context) ([]string, error) {
 	defer cancel()
 
 	// 先尝试 New API 格式 (/api/models)
-	fmt.Printf("DEBUG: Anthropic ListModels for %s: trying New API /api/models\n", b.cfg.Name)
 	models, err := b.tryNewAPIModels(listCtx, key.Key)
 	if err == nil && len(models) > 0 {
-		fmt.Printf("DEBUG: Anthropic ListModels for %s: New API succeeded, got %d models\n", b.cfg.Name, len(models))
 		return models, nil
 	}
-	fmt.Printf("DEBUG: Anthropic ListModels for %s: New API failed (%v), trying standard /v1/models\n", b.cfg.Name, err)
 
 	// 降级到 Anthropic 标准格式 (/v1/models)
 	return b.tryAnthropicModels(listCtx, key.Key)
@@ -642,7 +639,6 @@ func (b *Base) tryAnthropicModels(ctx context.Context, apiKey string) ([]string,
 	}
 
 	fullURL := endpoint + modelsPath
-	fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: URL=%q\n", b.cfg.Name, fullURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
@@ -653,14 +649,12 @@ func (b *Base) tryAnthropicModels(ctx context.Context, apiKey string) ([]string,
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: request error: %v\n", b.cfg.Name, err)
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: status %d, body: %s\n", b.cfg.Name, resp.StatusCode, string(body))
 		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -677,12 +671,12 @@ func (b *Base) tryAnthropicModels(ctx context.Context, apiKey string) ([]string,
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &listResp); err != nil {
-		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: parse error: %v, body: %s\n", b.cfg.Name, err, string(body))
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
+	// 空 data = 该面无模型端点能力(如 anthropic 官方面),按「不支持」处理:
+	// SyncVendorModels 会跳过该面、不动它已有归属(P-model-face)
 	if len(listResp.Data) == 0 {
-		fmt.Printf("DEBUG: Anthropic tryAnthropicModels for %s: empty data array\n", b.cfg.Name)
 		return nil, provider.ErrListModelsNotSupported
 	}
 

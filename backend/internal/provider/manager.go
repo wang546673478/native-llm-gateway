@@ -443,6 +443,14 @@ func (m *Manager) SupportsResponsesAPI(name string) bool {
 	return m.responsesAPI[name]
 }
 
+// SetResponsesAPISupport P-responses: 设置 provider 的 Responses API 支持标记
+// 用于 relay provider 在加载时动态注册能力标记
+func (m *Manager) SetResponsesAPISupport(name string, supported bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.responsesAPI[name] = supported
+}
+
 // DefaultModelFor P-catch-all: 返回 provider 承接未知模型名的默认模型
 // (显式 default_model 优先,否则第一个声明)。空 = 该 provider 没有可用默认模型
 func (m *Manager) DefaultModelFor(name string) string {
@@ -518,4 +526,9 @@ func (m *Manager) RemoveProvider(name string) {
 		delete(m.providers, name)
 		m.logger.Info("provider removed", zap.String("provider", name))
 	}
+}
+
+// IsRelay 判断 provider 是否为中转站（委托给 Registry）
+func (m *Manager) IsRelay(name string) bool {
+	return m.registry.IsRelay(name)
 }

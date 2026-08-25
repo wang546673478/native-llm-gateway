@@ -326,6 +326,18 @@ func (s *fakeProviderModelStore) SavePricing(ctx context.Context, vendor, modelI
 func (s *fakeProviderModelStore) ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
 	return nil
 }
+func (s *fakeProviderModelStore) AddFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
+	return nil
+}
+func (s *fakeProviderModelStore) CountVendorModels(ctx context.Context, vendor string) (int, error) {
+	var count int
+	for _, r := range s.rows {
+		if r.Vendor == vendor {
+			count++
+		}
+	}
+	return count, nil
+}
 func (s *fakeProviderModelStore) AllFaces(ctx context.Context) ([]dbpkg.ProviderModelFace, error) {
 	return s.faceRows, nil
 }

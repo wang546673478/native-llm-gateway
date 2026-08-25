@@ -14,6 +14,17 @@ bin/
 *.out
 frontend/tsconfig.tsbuildinfo
 
+# 根目录编译产物(历史遗留曾被跟踪,现已取消)
+/llm-gateway
+
+# 根目录一次性排障脚本(package main,会跟 backend 模块冲突;查完即删)
+/check_*.go
+/list_*.go
+/exec_sql.go
+/fix_*.go
+/migrate_and_fix.go
+/create_relay_station.sql
+
 # Local data
 data/
 *.db

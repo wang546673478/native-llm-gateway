@@ -68,6 +68,9 @@
 | 流式请求在详情页找 token | 去 Usage 页 |
 | 删结构体字段就当改完了 | 手工 DROP COLUMN(AutoMigrate 只加不删) |
 | SQLite 单写者扛高并发 | 生产用 PostgreSQL |
+| Provider 绑定留到 proxy 层否决 | 下沉路由层过滤(否则白 acquire key 推歪 sticky,#30) |
+| 改完 DB 接口不补 test fake | fake 缺方法 = 整包 build failed(`make test` 必跑) |
+| 排障 `fmt.Printf("DEBUG:...")` 留在代码里 | 提交前清干净或改 logger.Debug |
 
 ---
 
@@ -81,9 +84,11 @@ backend/
 │   │   ├── openai_compatible/   ← OpenAI 兼容共享实现
 │   │   ├── anthropic_compatible/← Anthropic 兼容共享实现
 │   │   ├── google/              ← Google Generative AI 共享实现
+│   │   ├── relay/               ← 中转站(DB 动态注册,零代码接入:URL+协议)
 │   │   └── registry.go / manager.go
-│   ├── router/                ← 路由(catch_all / alias / tier 拉平)
+│   ├── router/                ← 路由(catch_all / alias / tier 拉平 / Provider 绑定过滤)
 │   ├── proxy/                 ← 代理引擎(failover / 白名单逐候选 / swapToOtherKey)
+│   │   └── relay.go            ← 中转站直通判定(isRelayPassthrough)
 │   ├── keypool/               ← key 池(tier 桶 / 额度状态机 / per-key 熔断 / 调度器)
 │   │   ├── scheduler.go        ← Sticky(顺序黏性,默认) / RoundRobin / LeastUsed / Random
 │   │   ├── pool.go             ← acquireFromTierLocked(核心,待拆分)
@@ -103,7 +108,7 @@ backend/
 
 frontend/
 ├── src/
-│   ├── views/                 ← 9 个页面(Overview/Providers/ProviderKeys/Keys/Routing/Usage/AccessLogs/Inflight/Models)
+│   ├── views/                 ← 11 个页面(Overview/Providers/ProviderKeys/Keys/Routing/Usage/AccessLogs/Inflight/Models/RelayStations)
 │   ├── api/client.ts          ← 后端 API 封装
 │   └── router/index.ts        ← vue-router 路由
 
@@ -121,7 +126,7 @@ docs/
 ├── config-reference.md        ← config.yaml 完整字段
 ├── frontend.md                ← 前端管理 UI
 ├── operations.md              ← 部署 / 脚本 / 监控
-├── 踩坑与排错.md               ← 22 个实战坑
+├── 踩坑与排错.md               ← 30 个实战坑(2026-08-25 补 #29/#30)
 └── provider厂商定制包指南.md     ← 新增厂商 6 步实操
 ```
 
@@ -220,6 +225,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | Key 调度树状模型(十七轮) | 同 provider key 顺序黏性(sticky 先用尽一把再切) / 候选名单天然化(catch_all `{}`) / 429 同 key 重试10次 / route_order 排序改写(方案B,表+GET/PUT+热生效) / 前端拖拽树状图 | 加 priority 无需字段;层内 provider 按最早 key 时间;route_order 改写覆盖(Level2 provider/Level3 key);保存→重进保持;低耦合:StickyScheduler 无状态(始终选最高优先级可用 key,恢复自动回位)、顺序覆盖接口注入、枚举单源(8893971+769a927+d9341a2+5674a5a+994a710+682dd62+b23ea78+0a234c8+0682a6d+0ba9b49+13f07c1)<br>/十八轮(2026-08-10):补「熔断/网络错误恢复后 sticky 回位」— StickyScheduler 删 current/Rewind,改为始终选 keys[0](最高优先级可用 key);额度 poll 与熔断 HALF_OPEN→CLOSED 恢复的 key 重建 bucket 后即 keys[0,自动回位;429 仍重试 10 次、网络错误仍走熔断(用户选型 B) | 修复 key-1 一次 connection 错误把 sticky 永久推到 weige 的卡死:高位 key 恢复后不再粘死在低位(放弃 current 指针的"stay-put",改最高优先级优先,满足"先耗尽再切、恢复回位";无状态更纯,删死代码) |
 | 模型进 DB + 排障实录(十九轮,2026-08-20) | provider_models 成模型/定价唯一真相源(上游同步 + 手工定价 + 模型管理页) / 下线 gemini/qwen/glm 三厂商(历史用量 glm 53、qwen/gemini 0) / 排障 8 连修:ListModels 硬编码 /v1/models 路径、mimo openai 面双 /v1(ChatPath 默认撞上已含 /v1 的 endpoint,该面 0 条成功记录)、默认模型字典序(MiniMax-M3 会掉到 M2 → sort_order 保上游顺序)、跨命名空间外键(Provider.Models 关联 → AutoMigrate 建 vendor FK → 启动崩溃循环)、按面计费源取 key(tp- key 发 api 端点必 401)、前端 dist 未重建、AutoMigrate 只加不删留下 NOT NULL 死列 | 网关从「全部 503」恢复至三厂商(deepseek/minimax/mimo)正常路由,默认模型与改动前逐家一致;守卫测试 ×5 防回潮(503e614+2792a5a+25c9e0f+6984bf4+96ae49a) |
 | 模型归属下沉到协议面(二十轮,2026-08-21) | 新表 `provider_model_faces`(`(face, model_id)` 唯一)把模型归属从 vendor 下沉到注册面 —— 中转站厂商(rightapi 三个后缀端点、模型互不相通)不再让 codex/grok 面拿到 claude 模型发给自己端点(404 model not found,两面 0 条成功记录);`provider_models` 保持不动继续当定价唯一真相源(不加 face 列:deepseek 双面共享模型,加列会重复行、同一模型填两次价);核心不变式 = **该面**无归属行时回退 vendor 级全量(覆盖「未同步过」与「anthropic 面无模型端点」两种正当情形,按 vendor 判定会让 deepseek-anthropic 失去全部候选);同步只有成功的面才整体替换归属(失败面不动,防抖动清空);模型管理页面 tab + ⚠无归属标记 + 「清理无归属」(prune 对无归属数据的 vendor 整体跳过,防 `NOT IN (空集)` 删光) | rightapi 三面首次全部跑通(grok-4.5 / gpt-5.4 / claude-opus-5 各 200);deepseek/minimax/mimo 行为不变;守卫测试 ×8 防回潮(踩坑 #25) |
+| 中转站直通模式 + Provider 绑定下沉(二十一轮,2026-08-25) | 新表 `relay_stations`:中转站从 DB 动态注册(name/base_url/protocol_mode/primary_protocol/keys),热重载允许 Registry 覆盖注册;`relay.LoadFromDatabase` 启动时加载启用中转站;多协议模式按后缀拆分注册面(如 rightapi-openai / rightapi-anthropic);前端 RelayStations 页 CRUD + 热重载按钮。**中转站直通模式**(P-relay-passthrough):Gateway Key 绑定的 Providers **全是**中转站 → 路由跳过白名单选择,proxy 跳过白名单校验,直接透传客户端模型名;混合绑定(中转站+普通厂商) → 中转站也参与普通路由,使用 default_model;`isRelayPassthrough` 两维度判定(Providers 字段 / ProviderKeyIDs 反查)。**Provider 绑定下沉路由层**(P19):Router.routeCatchAllAuto 在候选收集时就过滤 `WithAllowedProviders`,不允许的 provider 不 acquire key(防止 sticky 指针被推进 / metrics 污染 / Inflight 闪现);白名单(AllowedModels)仍在 proxy 层逐候选校验(需 req.Model / result.ModelID 双路 fallback)。test fake 补 `AddFaceModels` / `CountVendorModels`;删 loader/anthropic/openai/proxy 的 DEBUG 打印;handler listProviderModels Manager=nil 时不过滤(降级保险);anthropic test 改 TestListModels_NoPool | 全测试通过;中转站按需透传/路由两用;Provider 绑定过滤位置正确(路由层);守卫测试 ×2(fake 完整性);踩坑 #29(直通语义) / #30(过滤位置) |
 
 **单点修复:**
 

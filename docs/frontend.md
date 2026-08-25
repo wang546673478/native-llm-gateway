@@ -28,11 +28,13 @@
 | `/overview` | `Overview.vue` | 总览:24h 请求数 / Token / 错误 / 费用 + 按 Model 用量 |
 | `/providers` | `Providers.vue` | 厂商列表(按 vendor 聚合,展示协议面) |
 | `/provider-keys` | `ProviderKeys.vue` | 厂商 key 池管理(CRUD) |
-| `/keys` | `Keys.vue` | Gateway Key 管理(CRUD,白名单) |
+| `/keys` | `Keys.vue` | Gateway Key 管理(CRUD,白名单,Provider绑定) |
 | `/routing` | `Routing.vue` | 路由配置(默认策略 / catch_all / 链) |
 | `/usage` | `Usage.vue` | 用量统计含 `/usage/by_model/:model_id/providers` |
 | `/access-logs` | `AccessLogs.vue` | 接入日志 + 详情 + 导出 JSONL + 故障排查 |
 | `/models` | `ModelManager.vue` | 模型管理(上游同步 + 手工定价,按 vendor 分组) |
+| `/relay-stations` | `RelayStations.vue` | 中转站配置(CRUD + 热重载,2026-08-22) |
+| `/inflight` | `Inflight.vue` | 活跃请求快照(1s 轮询,2026-08) |
 
 ---
 
@@ -96,6 +98,28 @@
 - 手工定价:`PUT /api/v1/providers/models` 三档每百万价格(input / cache_read / output)
 - 注意:同步只带 model id 不带价格,同步后价格需手工填;未定价模型 cost 记 0
 
+### 3.9 RelayStations(中转站配置,2026-08-22)
+
+- 中转站 = 纯透传代理,无需编写代码,只需配置 URL + 协议
+- **CRUD**:添加 / 编辑 / 删除中转站(存 `relay_stations` 表)
+- **协议模式**:
+  - `single`:单协议(如 tokenmarket 只提供 openai 面)
+  - `multi`:多协议(如 rightapi 按后缀拆分 openai / anthropic / google 三个面)
+- **热重载**:编辑后点「热重载」按钮 → `POST /api/v1/relay-stations/reload`
+  → 后端重新从 DB 读取并注册所有启用的中转站(旧的先删除)
+- **自动同步 keys**:每次加载/重载时,中转站的 keys 字段(JSON 数组)会自动
+  同步到 `provider_api_keys` 表(增删双向同步,以 relay_stations.keys 为准)
+- **中转站直通模式**(P-relay-passthrough,2026-08-25):
+  - Gateway Key 绑定的 Providers **全是**中转站时 → 跳过白名单选择逻辑,直接透传
+    客户端请求的模型名(不替换为 default_model)
+  - 混合绑定(中转站 + 普通厂商)时 → 中转站也按普通路由走(使用 default_model)
+
+### 3.10 Inflight(活跃请求快照,2026-08)
+
+- 1 秒轮询 `GET /api/v1/inflight`
+- 显示正在处理的请求:trace_id / 客户端模型 / 实际 provider+model / 开始时间
+- 流式请求可持续数分钟,非流式一般秒级
+
 ### 3.7.2 Key 名字("key-1" / "weige")
 
 - DB 存 ID 数字,前端 fallback 显示 ID
@@ -153,5 +177,7 @@ npm run build            # 输出 dist/
 | Usage | `GET /api/v1/usage` `GET /api/v1/usage/by_model/:model/providers` |
 | AccessLogs | `GET /api/v1/access-logs` `GET /api/v1/access-logs/:id/detail` `GET /api/v1/access-logs/export` |
 | Models | `GET /api/v1/providers/models` `POST /api/v1/providers/sync-models` `POST /api/v1/providers/sync-all-models` `PUT /api/v1/providers/models` |
+| RelayStations | `GET /api/v1/relay-stations` `POST /api/v1/relay-stations` `PUT /api/v1/relay-stations/:id` `DELETE /api/v1/relay-stations/:id` `POST /api/v1/relay-stations/reload` |
+| Inflight | `GET /api/v1/inflight` |
 
 详细 API 文档见 `docs/api.md` / `docs/http-api.md`(若存在)。

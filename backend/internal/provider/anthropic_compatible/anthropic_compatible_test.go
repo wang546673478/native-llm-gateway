@@ -553,11 +553,14 @@ func TestSendRequest_UsesRouteKey_429OnlyCooldownsThatKey(t *testing.T) {
 	}
 }
 
-func TestListModels_NotSupported(t *testing.T) {
+// TestListModels_NoPool anthropic 面自 2026-08 起实现 ListModels(New API /api/models
+// 优先 + 标准 /v1/models 降级,供中转站用);没注入 keypool 时必须报错且不返回模型,
+// 由 SyncVendorModels 按「该面失败 → 不动已有归属」跳过(踩坑 #25)。
+func TestListModels_NoPool(t *testing.T) {
 	b := NewBase(Config{Name: "test", Endpoint: "http://example.com"})
 	got, err := b.ListModels(context.Background())
-	if !errors.Is(err, provider.ErrListModelsNotSupported) {
-		t.Errorf("err = %v, want ErrListModelsNotSupported", err)
+	if err == nil {
+		t.Error("err = nil, want error(keypool 未注入)")
 	}
 	if got != nil {
 		t.Errorf("models = %v, want nil", got)

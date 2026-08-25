@@ -206,13 +206,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	b.cfg.Pool.ReportSuccess(key)
 
 	// 解析 Usage - 使用注入的 UsageParser
-	// DEBUG: 打印 parser 类型
-	fmt.Printf("[DEBUG] usageParser type: %T\n", b.usageParser)
 	usage := b.usageParser.Parse(body)
-	if usage != nil {
-		fmt.Printf("[DEBUG] Parsed usage: prompt=%d, completion=%d, cache_read=%d, cache_creation=%d\n",
-			usage.PromptTokens, usage.CompletionTokens, usage.CacheReadTokens, usage.CacheCreationTokens)
-	}
 
 	return &provider.Response{
 		StatusCode: httpResp.StatusCode,
@@ -439,8 +433,6 @@ func (b *Base) ListModels(ctx context.Context) ([]string, error) {
 	}
 
 	fullURL := endpoint + modelsPath
-	fmt.Printf("DEBUG: ListModels for %s: Endpoint=%q, ModelsPath=%q, FullURL=%q\n",
-		b.cfg.Name, b.cfg.Endpoint, b.cfg.ModelsPath, fullURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		return nil, err

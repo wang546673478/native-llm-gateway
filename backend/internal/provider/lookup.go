@@ -26,4 +26,6 @@ type ProviderLookup interface {
 	VendorFor(name string) string
 	// ModelsFor 返回某注册面按 vendor 归位后的模型 id 列表(见 Manager.ModelsFor)。
 	ModelsFor(name string) []string
+	// IsRelay 判断 provider 是否为中转站(中转站直通模式,透传客户端模型名)
+	IsRelay(name string) bool
 }

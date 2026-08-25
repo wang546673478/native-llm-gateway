@@ -382,27 +382,29 @@ func (a *Admin) listProviderModels(c *gin.Context) {
 		return
 	}
 
-	// 获取当前启用的 vendor 集合(从 Manager 的已加载 provider 里提取)
+	// 获取当前启用的 vendor 集合(从 Manager 的已加载 provider 里提取)。
+	// Manager=nil 时不过滤(测试场景 + 降级保险 — 即便 manager 故障也返回全量)
 	enabledVendors := make(map[string]bool)
-	if a.Manager != nil {
+	filterByEnabled := a.Manager != nil && a.Registry != nil
+	if filterByEnabled {
 		for _, name := range a.Manager.Names() {
 			vendor := a.Registry.VendorFor(name)
 			enabledVendors[vendor] = true
 		}
 	}
 
-	// 只收集当前启用 vendor 的模型
+	// 只收集当前启用 vendor 的模型(或 Manager=nil 时返回全部)
 	group := map[string][]dbpkg.ProviderModel{}
 	for _, r := range rows {
-		if enabledVendors[r.Vendor] {
+		if !filterByEnabled || enabledVendors[r.Vendor] {
 			group[r.Vendor] = append(group[r.Vendor], r)
 		}
 	}
 	// faces: vendor → face → [model_id...](AllFaces 已按 vendor/face/sort_order 排序)
-	// 同样只保留启用 vendor 的面数据
+	// 同样只保留启用 vendor 的面数据(或 Manager=nil 时返回全部)
 	faces := map[string]map[string][]string{}
 	for _, fr := range faceRows {
-		if enabledVendors[fr.Vendor] {
+		if !filterByEnabled || enabledVendors[fr.Vendor] {
 			if faces[fr.Vendor] == nil {
 				faces[fr.Vendor] = map[string][]string{}
 			}

@@ -16,6 +16,8 @@ type ProviderManager interface {
 	AddProvider(ctx context.Context, name string, p provider.Provider) error
 	RemoveProvider(name string)
 	GetAll() map[string]provider.Provider
+	// SetResponsesAPISupport P-responses: 设置 provider 的 Responses API 支持标记
+	SetResponsesAPISupport(name string, supported bool)
 }
 
 // LoadFromDatabase 从数据库加载所有启用的中转站并注册到 provider registry 和 manager
@@ -104,6 +106,12 @@ func registerAndLoadRelayStation(ctx context.Context, s database.RelayStation, m
 		// 加载到 manager
 		if err := mgr.AddProvider(ctx, s.Name, relayProvider); err != nil {
 			return fmt.Errorf("add provider %s to manager: %w", s.Name, err)
+		}
+
+		// P-responses: 设置 Responses API 支持标记
+		if s.SupportsResponsesAPI {
+			mgr.SetResponsesAPISupport(s.Name, true)
+			log.Printf("[relay] Set responses_api=true for %s", s.Name)
 		}
 	}
 

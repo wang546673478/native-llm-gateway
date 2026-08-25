@@ -62,6 +62,34 @@ func (s *fakeModelSyncStore) ReplaceFaceModels(ctx context.Context, vendor, face
 	return nil
 }
 
+func (s *fakeModelSyncStore) AddFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
+	if s.faceCalls == nil {
+		s.faceCalls = make(map[string][]string)
+	}
+	existing := s.faceCalls[face]
+	for _, id := range modelIDs {
+		found := false
+		for _, ex := range existing {
+			if ex == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, id)
+		}
+	}
+	s.faceCalls[face] = existing
+	return nil
+}
+
+func (s *fakeModelSyncStore) CountVendorModels(ctx context.Context, vendor string) (int, error) {
+	if vendor == s.vendor {
+		return len(s.modelIDs), nil
+	}
+	return 0, nil
+}
+
 func TestSyncVendorModels_FindsOpenAIFace(t *testing.T) {
 	openai := &fakeModelsProvider{
 		name:     "deepseek",
@@ -248,6 +276,17 @@ func (s *fakeCountingSyncStore) UpsertModels(ctx context.Context, vendor string,
 
 func (s *fakeCountingSyncStore) ReplaceFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
 	return nil
+}
+
+func (s *fakeCountingSyncStore) AddFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error {
+	return nil
+}
+
+func (s *fakeCountingSyncStore) CountVendorModels(ctx context.Context, vendor string) (int, error) {
+	if s.byVendor == nil {
+		return 0, nil
+	}
+	return len(s.byVendor[vendor]), nil
 }
 
 func TestSyncAllVendorModels_IteratesEveryVendor(t *testing.T) {

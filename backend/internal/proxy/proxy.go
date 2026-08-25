@@ -351,15 +351,30 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		})
 	}
 
-	// 4. 路由(failover iterator) — P34: 把 GatewayKey 绑定的 ProviderKeyIDs 传给 Router
+	// 4. 路由前检查：Gateway Key 是否绑定了纯中转站 → 直通模式（跳过白名单选择）
+	var isRelayPassthrough bool
+	if gk := e.gkCtx.Get(c); gk != nil {
+		isRelayPassthrough = e.isRelayPassthrough(gk)
+	}
+
+	// 5. 路由(failover iterator) — P34: 把 GatewayKey 绑定的 ProviderKeyIDs 传给 Router
 	var routeOpts []router.RouteOption
 	if gk := e.gkCtx.Get(c); gk != nil {
 		if len(gk.ProviderKeyIDs) > 0 {
 			routeOpts = append(routeOpts, router.WithProviderKeyIDs(gk.ProviderKeyIDs))
 		}
+		// P19: Provider 绑定传递给路由层 — 路由时就过滤，避免探针拿到不允许的 provider
+		if len(gk.Providers) > 0 {
+			routeOpts = append(routeOpts, router.WithAllowedProviders(gk.Providers))
+		}
+		// P-relay-passthrough: 中转站模式传递标志给路由层
+		if isRelayPassthrough {
+			routeOpts = append(routeOpts, router.WithRelayPassthrough(true))
+		}
+		// P-relay-passthrough: 中转站模式跳过白名单参与选择（中转站直接透传客户端模型名）
 		// P-whitelist-select: 白名单参与 catch_all 自动模式的候选模型选择 —
 		// key 允许的模型就是链上实际服务的模型(通配 * 不参与选择)
-		if len(gk.AllowedModels) > 0 && !(len(gk.AllowedModels) == 1 && gk.AllowedModels[0] == "*") {
+		if !isRelayPassthrough && len(gk.AllowedModels) > 0 && !(len(gk.AllowedModels) == 1 && gk.AllowedModels[0] == "*") {
 			routeOpts = append(routeOpts, router.WithAllowedModels(gk.AllowedModels))
 		}
 	}
@@ -1108,6 +1123,11 @@ func (e *Engine) tryCandidate(
 	lastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
 ) (candidateOutcome, bool, bool) {
+	// P-relay-passthrough: 中转站模式跳过白名单校验（直接透传客户端模型名）
+	if e.router.Manager().IsRelay(result.ProviderName) {
+		goto afterWhitelist
+	}
+
 	// P-catch-all: 白名单按候选逐个校验 — 白名单外的候选像没 key 一样跳过,
 	// 继续试链上其他候选。同 tier 内 provider 顺序不定,不能因第一个候选
 	// 不符就整请求 403;链上全部候选都被排除时由 handleAllFailed 收尾返 403
@@ -1147,8 +1167,8 @@ func (e *Engine) tryCandidate(
 				zap.String("trace_id", req.TraceID))
 			return outcomeContinue, false, false // 未实际尝试:不算失败、不计预算
 		}
-	afterWhitelist:
 	}
+afterWhitelist:
 	// P-catch-all: 记录实际使用的上游模型(候选的目标模型,如 MiniMax-M3 —
 	// 客户端请求名可能只是标签)。failover 时每次尝试都覆盖,最后一次成功者胜出
 	if entry != nil {

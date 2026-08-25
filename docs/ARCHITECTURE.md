@@ -23,6 +23,8 @@ database.Open + database.Migrate(GORM AutoMigrate — 唯一 schema 权威;已�
    ↓
 provider.Default() (Registry) + provider.NewManager + manager.LoadFromConfig
    ↓
+relay.LoadFromDatabase(db, manager)   ← 中转站动态注册(读 relay_stations 表)
+   ↓
 server.New(cfg, logger, db, manager)
    ↓   ↑ 这里构造:Provider Key Pool 从 DB(buildKeyPools+buildOnePool 读 provider_api_keys,
    |      SetPool 注入)—— main.go 不再 buildPools(config key 已废,P30 DB 唯一权威);
@@ -64,7 +66,9 @@ s.saveKeyStateSnapshot() ← 把 pool 的 QUOTA_EXCEEDED / COOLING / 余额写�
                  │           │              │
                  │           └─ provider ───┼── openai_compatible / anthropic_compatible / google
                  │              │           │
-                 │              │           └─ 厂商包:deepseek / minimax / mimo(2026-08-20 下线 glm/qwen/gemini)
+                 │              │           ├─ 厂商包:deepseek / minimax / mimo(2026-08-20 下线 glm/qwen/gemini)
+                 │              │           │
+                 │              │           └─ relay(中转站动态注册,2026-08-22)
                  │              │
                  ├─ accesslog ──┤
                  ├─ metrics ─────┤
@@ -122,7 +126,7 @@ type GatewayKey struct {
     KeyHash       string           // 哈希存
     Providers     []string         // 绑定的厂商(空 = 不限)
     ProviderKeyIDs []uint          // 绑定的 ProviderAPIKey.id(空 = 不限,P34)
-    AllowedModels []string         // 白名单
+    AllowedModels []string         // 白名单(catch_all 自动模式下也决定候选)
     RPM, TPM      int
 }
 
@@ -132,6 +136,7 @@ type Provider interface {
     SendRequest(ctx, req, result) (Response, error)
     SendStream(ctx, req, result, callback) error
     Models() []string
+    DefaultModel() string         // 默认模型(catch_all 自动模式候选首选)
     SetPool(*keypool.Pool)        // 注入 key 池
     ...
 }
@@ -196,20 +201,22 @@ proxy.runWithFirstResult → tryOneCandidate 循环
 
 `server.New` 顺序不能乱(改这里要先看注释):
 
-1. `buildKeyPools(cfg, db, logger)` — 从 DB 读 provider_api_keys 构造 Pool
-2. `restoreKeyStateSnapshots(pools, cfg, logger)` — 恢复 `key-state.json`(QE/COOLING/余额)
-3. `router.NewRouter(...)` — Router 拿 Pool
-4. `authn := cfg.Auth.Enabled ? auth.New(...) : nil` — 客户端鉴权
-5. `usage.NewCollector + usage.NewRepository + metrics.NewCollector`
-6. `accesslog.NewRecorder(accessCfg, db, logger)`
-7. `proxy.NewEngine(...)` — 注入 Router / Usage / Metrics / AccessLog / Auth
-8. `injectPools(manager, pools, logger)` — 把 Pool 注入每个 Provider
-9. `quotacheck.NewManager(...)` — 注入 pool 引用 + endpoint lookup
-10. `s.quotacheck.Manager.Start(ctx)` 在 Run 阶段触发
+1. `relay.LoadFromDB(db)` — 从 DB 读 relay_stations 并动态注册(2026-08-22)
+2. `buildKeyPools(cfg, db, logger)` — 从 DB 读 provider_api_keys 构造 Pool
+3. `restoreKeyStateSnapshots(pools, cfg, logger)` — 恢复 `key-state.json`(QE/COOLING/余额)
+4. `router.NewRouter(...)` — Router 拿 Pool
+5. `authn := cfg.Auth.Enabled ? auth.New(...) : nil` — 客户端鉴权
+6. `usage.NewCollector + usage.NewRepository + metrics.NewCollector`
+7. `accesslog.NewRecorder(accessCfg, db, logger)`
+8. `proxy.NewEngine(...)` — 注入 Router / Usage / Metrics / AccessLog / Auth
+9. `injectPools(manager, pools, logger)` — 把 Pool 注入每个 Provider
+10. `quotacheck.NewManager(...)` — 注入 pool 引用 + endpoint lookup
+11. `s.quotacheck.Manager.Start(ctx)` 在 Run 阶段触发
 
 **为什么这个顺序**:
-- 步骤 2 必须在 quotacheck.Start 之前(QE key 恢复后立即被 callback 重入堆,不等 poll 重新确认)
-- 步骤 7 在步骤 8 之前(Engine 构造时不依赖 Pool,Pool 注入在 Run 后通过 Provider.SetPool 完成)
+- 步骤 1 必须在步骤 2 之前(中转站注册到 Registry,后续 buildKeyPools 才能找到对应 Provider)
+- 步骤 3 必须在 quotacheck.Start 之前(QE key 恢复后立即被 callback 重入堆,不等 poll 重新确认)
+- 步骤 8 在步骤 9 之前(Engine 构造时不依赖 Pool,Pool 注入在 Run 后通过 Provider.SetPool 完成)
 
 ---
 
@@ -241,7 +248,17 @@ A:同厂商的多个协议面(`deepseek` openai + `deepseek-anthropic` anthropic
 A:转换丢失语义;Provider 特性(thinking、reasoning_content、Responses API)无法表达;调试困难。详见规格书 1.2 节。
 
 **Q:为什么 config.yaml + DB 都有配置?**
-A:config.yaml 存**结构性配置**(provider / endpoint / 模型清单 / 路由),DB 存**状态性数据**(provider_api_keys / gateway_keys / 模型别名)。前者加载即生效,后者通过管理 API 改。
+A:config.yaml 存**结构性配置**(provider / endpoint / 模型清单 / 路由),DB 存**状态性数据**(provider_api_keys / gateway_keys / 模型别名 / relay_stations)。前者加载即生效,后者通过管理 API 改。
+
+**Q:中转站(Relay Station)和内置厂商有什么区别?**
+A:
+- **内置厂商**(deepseek/minimax/mimo):代码静态注册,`init()` 触发,不可变
+- **中转站**(tokenmarket/rightapi):从 DB `relay_stations` 表动态注册,支持前端 CRUD + 热重载
+- 两者都复用协议 base(`openai_compatible` / `anthropic_compatible`),但注册机制不同
+- 中转站允许重复注册覆盖(支持编辑场景),内置厂商禁止重复注册(防代码错误)
+
+**Q:为什么中转站编辑后要允许重复注册?**
+A:用户随时可以在前端编辑中转站配置(修改 endpoint / 切换协议),需要重新注册覆盖旧配置。内置厂商是代码静态的,不会动态变化,重复注册就是错误。见踩坑 #26。
 
 ---
 

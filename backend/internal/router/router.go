@@ -60,6 +60,10 @@ type routeOpts struct {
 	ProviderKeyIDs []uint
 	// P-catch-all: gateway key 白名单 — catch_all 自动模式用它选择候选模型
 	AllowedModels []string
+	// P-relay-passthrough: 中转站直通模式标志 — 跳过白名单选择，直接透传客户端模型名
+	IsRelayPassthrough bool
+	// P19: Gateway Key 绑定的 Provider 限制 — 路由候选必须在此列表中
+	AllowedProviders []string
 }
 
 // WithProviderKeyIDs 让路由从指定 ProviderKeyIDs 子集里挑凭证
@@ -75,6 +79,22 @@ func WithProviderKeyIDs(ids []uint) RouteOption {
 func WithAllowedModels(models []string) RouteOption {
 	return func(o *routeOpts) {
 		o.AllowedModels = models
+	}
+}
+
+// WithRelayPassthrough P-relay-passthrough: 标记为中转站直通模式。
+// 中转站模式下，直接透传客户端模型名，跳过白名单选择逻辑。
+func WithRelayPassthrough(isRelay bool) RouteOption {
+	return func(o *routeOpts) {
+		o.IsRelayPassthrough = isRelay
+	}
+}
+
+// WithAllowedProviders P19: 限制路由候选必须在指定 Provider 列表中。
+// Gateway Key 的 Providers 绑定字段通过此选项传递给路由层。
+func WithAllowedProviders(providers []string) RouteOption {
+	return func(o *routeOpts) {
+		o.AllowedProviders = providers
 	}
 }
 
@@ -163,6 +183,11 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 	isResponses := reqProto == provider.ProtocolOpenAI && strings.HasSuffix(strings.ToLower(req.Path), "/responses")
 	var routes []ProviderRoute
 	for name, p := range r.manager.GetAll() {
+		// P19: Provider 绑定过滤 — Gateway Key 限制了 Provider 列表
+		if len(o.AllowedProviders) > 0 && !sliceContains(o.AllowedProviders, name) {
+			continue
+		}
+
 		// 检查协议匹配:支持多协议 Provider
 		if reqProto != "" && !supportsProtocol(p, reqProto) {
 			continue
@@ -175,6 +200,19 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		if isResponses && !r.manager.SupportsResponsesAPI(name) {
 			continue
 		}
+
+		// P-relay-passthrough: 中转站直通模式 — 仅当 Gateway Key 绑定的全是中转站时
+		// 才直接透传客户端模型名；否则中转站也参与普通路由（使用默认模型）
+		if r.manager.IsRelay(name) && o.IsRelayPassthrough {
+			routes = append(routes, ProviderRoute{
+				Name:          name,
+				Model:         req.Model, // 直接透传客户端请求的模型名
+				BillingSource: r.manager.BillingSourceFor(name),
+			})
+			continue
+		}
+
+		// 普通厂商（或非直通模式的中转站）：默认模型 + 白名单选择
 		model := r.manager.DefaultModelFor(name)
 		// P-whitelist-select: 白名单参与选择(非空且非通配)
 		if len(o.AllowedModels) > 0 && !sliceContains(o.AllowedModels, "*") {
@@ -188,7 +226,8 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 			continue
 		}
 		routes = append(routes, ProviderRoute{
-			Name: name, Model: model,
+			Name:          name,
+			Model:         model,
 			BillingSource: r.manager.BillingSourceFor(name), // P-mixed-tier-pool
 		})
 	}
@@ -399,6 +438,18 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		// P-per-key-circuit: provider 级健康过滤已移除 — 熔断器在 keypool(per-key)
 		// P-mixed-tier-pool: 补块级计费来源(显式 alias providers 列表里没写这个字段)
 		p.BillingSource = r.manager.BillingSourceFor(p.Name)
+
+		// P-relay-passthrough: 中转站直通模式 — 仅当 Gateway Key 绑定的全是中转站时
+		// 才跳过白名单选择，直接用客户端模型名；否则中转站也参与普通路由
+		if r.manager.IsRelay(p.Name) && o.IsRelayPassthrough {
+			if p.Model == "" {
+				p.Model = req.Model
+			}
+			out = append(out, p)
+			continue
+		}
+
+		// 普通厂商（或非直通模式的中转站）：白名单选择 + 默认模型 fallback
 		// P-whitelist-select: 白名单里有这个 provider 声明的模型 → 用白名单模型
 		// 覆盖显式 model 字段(用户配白名单 = 声明能用的模型,应优先)。
 		// 注意:不 continue 删除不匹配的 provider — 候选保留,由 proxy 的 tryCandidate
