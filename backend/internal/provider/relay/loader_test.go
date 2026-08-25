@@ -8,17 +8,9 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
-// fakeMgr 最小 ProviderManager 实现,只记录 SetResponsesAPISupport 的调用。
-// 用 slice 而非 map 记录:要能区分「没调用」和「调用了但传 false」——
-// 这两者正是本组守卫测试要盯的 bug(漏设 vs 设错)。
+// fakeMgr 最小 ProviderManager 实现,只记录 AddProvider 的注册名。
 type fakeMgr struct {
 	added []string
-	calls []responsesCall
-}
-
-type responsesCall struct {
-	name      string
-	supported bool
 }
 
 func (m *fakeMgr) AddProvider(ctx context.Context, name string, p provider.Provider) error {
@@ -27,75 +19,55 @@ func (m *fakeMgr) AddProvider(ctx context.Context, name string, p provider.Provi
 }
 func (m *fakeMgr) RemoveProvider(name string)           {}
 func (m *fakeMgr) GetAll() map[string]provider.Provider { return nil }
-func (m *fakeMgr) SetResponsesAPISupport(name string, supported bool) {
-	m.calls = append(m.calls, responsesCall{name: name, supported: supported})
-}
 
-// callFor 返回某个注册名的 SetResponsesAPISupport 调用(ok=false 表示压根没调用)
-func (m *fakeMgr) callFor(name string) (responsesCall, bool) {
-	for _, c := range m.calls {
-		if c.name == name {
-			return c, true
-		}
-	}
-	return responsesCall{}, false
-}
-
-// TestSingleProtocol_SetsResponsesFlagUnconditionally P-responses 守卫:
-// 单协议站必须无条件 set 标志,不能只在 true 时 set。
-// 只在 true 时 set 会让热重载时「DB 改回 false」清不掉内存里的旧 true ——
-// 关掉某站的 /responses 得重启进程才生效(2026-08-25 实测)。
-func TestSingleProtocol_SetsResponsesFlagUnconditionally(t *testing.T) {
-	for _, want := range []bool{true, false} {
-		mgr := &fakeMgr{}
-		s := database.RelayStation{
-			Name:                 "tm-single",
-			BaseURL:              "https://example.com",
-			ProtocolMode:         "single",
-			PrimaryProtocol:      string(provider.ProtocolOpenAI),
-			SupportsResponsesAPI: want,
-		}
-		if err := registerAndLoadRelayStation(context.Background(), s, mgr); err != nil {
-			t.Fatalf("register: %v", err)
-		}
-		got, ok := mgr.callFor("tm-single")
-		if !ok {
-			t.Fatalf("supports_responses_api=%v 时没调用 SetResponsesAPISupport"+
-				"(热重载改回 false 将清不掉内存旧值)", want)
-		}
-		if got.supported != want {
-			t.Errorf("SetResponsesAPISupport(%v), want %v", got.supported, want)
-		}
-	}
-}
-
-// TestMultiProtocol_SetsResponsesFlagPerFace P-responses 守卫:
-// 多协议站拆出的每个面都是独立注册名,router 按注册名查标志。
-// 这个分支原本压根没调用 SetResponsesAPISupport —— 多协议站配了
-// supports_responses_api=true 也永远拿不到 /responses(候选被筛空 → 503)。
-func TestMultiProtocol_SetsResponsesFlagPerFace(t *testing.T) {
+// TestSingleProtocol_RegistersOneFaceUnderStationName 守卫:
+// 单协议站只注册一个面,注册名就是站名本身(不带协议后缀)。
+// 面名是路由候选的最小单元 + route_order / provider_model_faces 的键,
+// 改了会让排序覆盖和模型归属行全部对不上。
+func TestSingleProtocol_RegistersOneFaceUnderStationName(t *testing.T) {
 	mgr := &fakeMgr{}
 	s := database.RelayStation{
-		Name:                 "tm-multi",
-		BaseURL:              "https://example.com",
-		ProtocolMode:         "multi",
-		PrimaryProtocol:      string(provider.ProtocolOpenAI),
-		SupportedProtocols:   `["openai","anthropic"]`,
-		SupportsResponsesAPI: true,
+		Name:            "tm-single",
+		BaseURL:         "https://example.com",
+		ProtocolMode:    "single",
+		PrimaryProtocol: string(provider.ProtocolOpenAI),
+	}
+	if err := registerAndLoadRelayStation(context.Background(), s, mgr); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if len(mgr.added) != 1 || mgr.added[0] != "tm-single" {
+		t.Errorf("AddProvider 注册名 = %v, want [tm-single]", mgr.added)
+	}
+}
+
+// TestMultiProtocol_RegistersOneFacePerProtocol 守卫:
+// 多协议站按 "<站名>-<协议>" 拆出独立的面,每个协议一个。
+// 拆面是中转站多协议的立足点 —— 同一个站的 openai / anthropic 端点模型互不相通,
+// 合成一个面会让某协议拿到另一协议的模型发给自己端点(404 model not found)。
+func TestMultiProtocol_RegistersOneFacePerProtocol(t *testing.T) {
+	mgr := &fakeMgr{}
+	s := database.RelayStation{
+		Name:               "tm-multi",
+		BaseURL:            "https://example.com",
+		ProtocolMode:       "multi",
+		PrimaryProtocol:    string(provider.ProtocolOpenAI),
+		SupportedProtocols: `["openai","anthropic"]`,
 	}
 	if err := registerAndLoadRelayStation(context.Background(), s, mgr); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	// 两个面都要注册,且都要带标志
-	for _, face := range []string{"tm-multi-openai", "tm-multi-anthropic"} {
-		got, ok := mgr.callFor(face)
-		if !ok {
-			t.Errorf("面 %s 没设置 Responses 标志(多协议分支漏设 → 该面永远拿不到 /responses)", face)
+	want := map[string]bool{"tm-multi-openai": false, "tm-multi-anthropic": false}
+	for _, name := range mgr.added {
+		if _, ok := want[name]; !ok {
+			t.Errorf("注册了预期外的面 %q", name)
 			continue
 		}
-		if !got.supported {
-			t.Errorf("面 %s 标志 = false, want true", face)
+		want[name] = true
+	}
+	for face, seen := range want {
+		if !seen {
+			t.Errorf("面 %s 没注册(多协议拆面漏了该协议)", face)
 		}
 	}
 	if len(mgr.added) != 2 {

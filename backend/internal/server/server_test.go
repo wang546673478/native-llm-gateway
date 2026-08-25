@@ -55,7 +55,7 @@ func newReloadTestServer(t *testing.T) *Server {
 	// 迁移后 key 都在 vendor 名下("deepseek")
 	if err := db.Create(&database.ProviderAPIKey{
 		ProviderName: "deepseek", Name: "k1", KeyHash: "hash1",
-		Enabled: true, BillingSource: "api",
+		Enabled: database.BoolPtr(true), BillingSource: "api",
 	}).Error; err != nil {
 		t.Fatalf("seed key: %v", err)
 	}

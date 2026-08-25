@@ -116,7 +116,7 @@ func toProviderKeyView(k dbpkg.ProviderAPIKey, status string) ProviderKeyView {
 		ProviderName:  k.ProviderName,
 		Name:          k.Name,
 		KeyMasked:     maskKey(k.KeyHash),
-		Enabled:       k.Enabled,
+		Enabled:       dbpkg.IsEnabled(k.Enabled),
 		Status:        status,
 		BillingSource: k.BillingSource,
 		Protocols:     k.Protocols,
@@ -307,7 +307,7 @@ func (h *ProviderKeysHandler) create(c *gin.Context) {
 		ProviderName:  providerName,
 		Name:          name,
 		KeyHash:       req.Key,
-		Enabled:       enabled,
+		Enabled:       dbpkg.BoolPtr(enabled),
 		BillingSource: billingSource,
 		Protocols:     strings.TrimSpace(req.Protocols),
 	}

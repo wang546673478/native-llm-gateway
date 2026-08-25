@@ -421,9 +421,6 @@ export interface RelayStation {
   enabled: boolean
   timeout_seconds: number
   billing_source: string
-  /** P-responses: 是否支持 OpenAI Responses API(/responses,Codex 客户端)。
-   *  false 的站在 /responses 请求里会被路由筛掉 —— 全部站都 false 时该类请求直接 503。 */
-  supports_responses_api: boolean
   keys?: string
   created_at?: string
   updated_at?: string

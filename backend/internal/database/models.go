@@ -4,6 +4,30 @@ package database
 
 import "time"
 
+// ── Enabled 为什么是 *bool ────────────────────────────────────────────────
+// GORM 的 Create 会跳过带 `default` tag 的零值字段,让 DB 的 DEFAULT 去填。
+// 而这几张表的 enabled 列恰好是 `default:true` —— 于是 `Enabled: false` 被跳过、
+// DB 填 true,用户在 UI 上取消勾选"启用"反而建出一个启用的行。中转站尤其危险:
+// 热重载会立刻把它加载进路由池,一个还没配好的站就开始接流量(2026-08-25 实测)。
+//
+// 用 *bool 而不是"去掉 default tag":后者会让 AutoMigrate 把生产库上已有的
+// DEFAULT true 删成 NULL(2026-08-25 scratch 表实测,GORM 对 DEFAULT 约束是
+// 会主动改的,不同于它对列/外键的"只加不删"),之后任何不带 enabled 的 INSERT
+// 都会炸 —— 那是隐式改生产 schema,不是纯代码改动。
+// *bool 保留 tag,AutoMigrate 看到的 spec 不变 → DDL 零风险,同时:
+//   nil   = 没指定,由 DB 的 DEFAULT true 填(保住"省略即启用"的既有语义)
+//   &false= 明确禁用,真的落库成 false
+// 读的时候一律走 IsEnabled(),别裸解引用。
+
+// BoolPtr 返回 v 的地址,给 *bool 字段赋显式值用。
+func BoolPtr(v bool) *bool { return &v }
+
+// IsEnabled 读 *bool 语义:nil 视为 true(与列上的 DEFAULT true 一致)。
+// 从 DB 查出来的行永远非 nil(列是 NOT NULL),nil 只出现在"手工构造了 struct
+// 但没设 Enabled"的情形 —— 那时按"默认启用"解释,与旧的 bool 零值行为相反,
+// 但与 DB 默认值一致,也是唯一不会让手工构造的行悄悄失效的解释。
+func IsEnabled(p *bool) bool { return p == nil || *p }
+
 // Provider Provider 主表
 type Provider struct {
 	ID       uint   `gorm:"primaryKey;autoIncrement" json:"id"`
@@ -99,10 +123,16 @@ type RelayStation struct {
 	PrimaryProtocol string `gorm:"column:primary_protocol;not null" json:"primary_protocol"`         // anthropic/openai/google
 	SupportedProtocols string `gorm:"column:supported_protocols" json:"supported_protocols"`         // JSON数组: ["anthropic","openai"]
 	Keys        string `gorm:"column:keys;type:text" json:"keys"`                                    // JSON数组: ["sk-xxx","sk-yyy"]
-	Enabled     bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	Enabled     *bool  `gorm:"column:enabled;not null;default:true" json:"enabled"`                   // *bool 的理由见文件头
+
 	Timeout     int    `gorm:"column:timeout_seconds;not null;default:60" json:"timeout_seconds"`
 	BillingSource string `gorm:"column:billing_source;not null;default:'api'" json:"billing_source"` // token_plan/api/free
-	SupportsResponsesAPI bool `gorm:"column:supports_responses_api;not null;default:false" json:"supports_responses_api"` // P-responses: OpenAI Responses API 支持
+	// 已废弃(2026-08-25 删):DB 列 supports_responses_api 仍存在(NOT NULL DEFAULT
+	// false,INSERT 不带它也能过),待确认无回退需求后手工 DROP COLUMN。
+	// 删除原因:中转站是纯透传,网关无从知道上游支不支持 /responses,拿一个手填列
+	// 当资格判定会把实际可用的站在进候选前筛掉(候选变 1 → 那家挂了无处可切 → 502)。
+	// router 改为对中转站豁免该判定(见 router.go isRelay 短路),此列遂无消费者。
+	// 内建厂商的 responses_api 走 config.yaml,不受影响。
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -137,7 +167,7 @@ type ProviderAPIKey struct {
 	Name         string `gorm:"column:name;not null;uniqueIndex:idx_provider_key_name" json:"name"`
 	// KeyHash 存明文(P30 暂不上加密,跟 GatewayKey 一样,生产可加)
 	KeyHash string `gorm:"column:key_hash;not null" json:"-"`
-	Enabled bool   `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	Enabled *bool  `gorm:"column:enabled;not null;default:true" json:"enabled"` // *bool 的理由见文件头
 	// P48: 单 key 的计费来源(token_plan / api / free)
 	// 默认 api(向后兼容);创建时如果不指定,可用 provider 的 billing_source 作默认值
 	BillingSource string `gorm:"column:billing_source;default:'api'" json:"billing_source"`
@@ -216,7 +246,7 @@ type GatewayKey struct {
 	DefaultModel string    `gorm:"column:default_model;default:''" json:"default_model"`
 	RPM          int       `gorm:"column:rpm;not null;default:100" json:"rpm"`
 	TPM          int       `gorm:"column:tpm;not null;default:500000" json:"tpm"`
-	Enabled      bool      `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	Enabled      *bool     `gorm:"column:enabled;not null;default:true" json:"enabled"` // *bool 的理由见文件头
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

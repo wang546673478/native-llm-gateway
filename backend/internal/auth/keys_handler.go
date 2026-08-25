@@ -76,7 +76,7 @@ func SeedFromConfig(ctx context.Context, db *gorm.DB, cfgKeys []GatewayKey) erro
 			DefaultModel:  k.DefaultModel,
 			RPM:           k.RateLimit.RPM,
 			TPM:           k.RateLimit.TPM,
-			Enabled:       enabled,
+			Enabled:       dbpkg.BoolPtr(enabled),
 		}
 		if err := store.Create(ctx, newK); err != nil {
 			return err
@@ -156,7 +156,7 @@ func toView(k dbpkg.GatewayKey) KeyView {
 		DefaultModel:   k.DefaultModel,
 		RPM:            k.RPM,
 		TPM:            k.TPM,
-		Enabled:        k.Enabled,
+		Enabled:        dbpkg.IsEnabled(k.Enabled),
 		CreatedAt:      k.CreatedAt.Format(time.RFC3339),
 	}
 }
@@ -172,7 +172,7 @@ func toViewSafe(k dbpkg.GatewayKey) KeyViewSafe {
 		DefaultModel:   k.DefaultModel,
 		RPM:            k.RPM,
 		TPM:            k.TPM,
-		Enabled:        k.Enabled,
+		Enabled:        dbpkg.IsEnabled(k.Enabled),
 		CreatedAt:      k.CreatedAt.Format(time.RFC3339),
 	}
 }
@@ -245,7 +245,7 @@ func (h *KeysHandler) create(c *gin.Context) {
 		DefaultModel:   req.DefaultModel,
 		RPM:            req.RPM,
 		TPM:            req.TPM,
-		Enabled:        enabled,
+		Enabled:        dbpkg.BoolPtr(enabled),
 	}
 	if err := h.store.Create(c.Request.Context(), k); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "create_failed", "detail": err.Error()})
@@ -292,7 +292,7 @@ func (h *KeysHandler) update(c *gin.Context) {
 	existing.RPM = req.RPM
 	existing.TPM = req.TPM
 	if req.Enabled != nil {
-		existing.Enabled = *req.Enabled
+		existing.Enabled = dbpkg.BoolPtr(*req.Enabled)
 	}
 
 	if err := h.store.Update(c.Request.Context(), name, existing); err != nil {

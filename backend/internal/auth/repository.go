@@ -68,7 +68,9 @@ func (s *gormKeyStore) Update(ctx context.Context, name string, k *dbpkg.Gateway
 			"allowed_models":   k.AllowedModels,
 			"rpm":              k.RPM,
 			"tpm":              k.TPM,
-			"enabled":          k.Enabled,
+			// 解成裸 bool 再进 map:map updates 不跳零值,false 照样落库;
+			// 而直接塞 *bool 的话 nil 会写成 NULL,enabled 是 NOT NULL 列。
+			"enabled":          dbpkg.IsEnabled(k.Enabled),
 			"updated_at":       k.UpdatedAt,
 		}).Error
 }

@@ -188,9 +188,11 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		// (DeepSeek / MiniMax;Qwen / Gemini 不支持,硬发会 400/404 且
 		// 404 归类 model_not_found 非 retryable,会中断 failover)
 		// 中转站不受此过滤:它是纯透传,网关无从知道上游支不支持 /responses。
-		// supports_responses_api 对内建厂商是代码事实(deepseek 支持、qwen 不支持),
-		// 对中转站只是一个手填的 DB 列,默认 false —— 拿它当资格判定会把实际可用的站
-		// (tokenmarket 各站 /v1/responses 实测 200)在进候选前就筛掉,failover 无处可切。
+		// responses_api 只对内建厂商有意义(config.yaml 里的代码事实:deepseek 支持、
+		// qwen 不支持)。中转站曾有一个手填 DB 列 supports_responses_api,默认 false ——
+		// 拿它当资格判定会把实际可用的站(tokenmarket 各站 /v1/responses 实测 200)在进
+		// 候选前就筛掉,failover 无处可切;该列的写入路径已于 2026-08-25 删除,中转站
+		// 不进 responsesAPI 表,查出来恒为零值 false,全靠这里的 isRelay 短路放行。
 		// 与 relayServesModel / provider_model_faces 同一条不变式:信息缺失时放行,不判死。
 		// 中转站真不支持时由 failover 兜(见 proxy.go candidateUnfitNotFatal)。
 		if isResponses && !r.manager.IsRelay(name) && !r.manager.SupportsResponsesAPI(name) {

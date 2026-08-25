@@ -436,19 +436,14 @@ func (m *Manager) LoadModelsFromStore(ctx context.Context, store ModelStore) err
 }
 
 // SupportsResponsesAPI P-responses: 该 provider 是否原生支持 OpenAI
-// Responses API(/v1/responses 透传,Codex 客户端)
+// Responses API(/v1/responses 透传,Codex 客户端)。
+// 只有内建厂商有意义(来源 config.yaml 的 responses_api,是代码事实);
+// 中转站不写这张表,router 对其豁免该判定 —— 纯透传网关无从知道上游支不支持,
+// 拿手填值当资格判定会把可用的站在进候选前筛掉(2026-08-25 删 relay 侧写入路径)。
 func (m *Manager) SupportsResponsesAPI(name string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.responsesAPI[name]
-}
-
-// SetResponsesAPISupport P-responses: 设置 provider 的 Responses API 支持标记
-// 用于 relay provider 在加载时动态注册能力标记
-func (m *Manager) SetResponsesAPISupport(name string, supported bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.responsesAPI[name] = supported
 }
 
 // DefaultModelFor P-catch-all: 返回 provider 承接未知模型名的默认模型

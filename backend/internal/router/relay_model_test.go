@@ -55,8 +55,10 @@ func newFakeRelayManager(t *testing.T, ps ...*fakeProvider) *provider.Manager {
 }
 
 // newFakeRelayManagerNoResponsesFlag 与 newFakeRelayManager 同构,但把 ResponsesAPI
-// 全设为 false —— 复现线上形态:supports_responses_api 是手填 DB 列,默认 false。
-// 中转站是纯透传,网关无从知道上游支不支持 /responses,所以这个 false 不能当资格判定。
+// 全设为 false —— 这正是中转站在 responsesAPI map 里的形态:2026-08-25 删掉
+// relay 侧写入路径后,中转站压根不进那张表,查出来恒为零值 false。
+// 中转站是纯透传,网关无从知道上游支不支持 /responses,所以这个 false 不能当资格判定;
+// router 的 isRelay 短路是唯一防线,本测试就是盯它的。
 func newFakeRelayManagerNoResponsesFlag(t *testing.T, ps ...*fakeProvider) *provider.Manager {
 	t.Helper()
 	reg := provider.NewRegistry()
@@ -98,9 +100,11 @@ func newFakeRelayManagerNoResponsesFlag(t *testing.T, ps ...*fakeProvider) *prov
 }
 
 // TestRelay_ResponsesFilter_DoesNotApplyToRelays 中转站不受 /responses 能力过滤。
-// 线上实测(2026-08-25):只有 codex 一个站 supports_responses_api=t,其余 8 个
-// openai 站全 f → /responses 候选名单长度恒为 1 → codex 403 之后 failover
-// 无处可切 → 502。而这 8 个站的 /v1/responses 实测都是 200,那个 false 是错的。
+// 起因(2026-08-25 线上):当时靠手填 DB 列 supports_responses_api 判定,只有 codex
+// 一个站是 t、其余 8 个 openai 站全 f → /responses 候选名单长度恒为 1 → codex 403
+// 之后 failover 无处可切 → 502。而这 8 个站的 /v1/responses 实测都是 200,那个 false
+// 是错的。该列已随写入路径一并删除,中转站现在恒为零值 false,只靠 isRelay 短路放行 ——
+// 删掉那个短路,本测试必须红。
 func TestRelay_ResponsesFilter_DoesNotApplyToRelays(t *testing.T) {
 	mgr := newFakeRelayManagerNoResponsesFlag(t,
 		&fakeProvider{name: "codex", proto: provider.ProtocolOpenAI,

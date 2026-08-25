@@ -47,7 +47,7 @@ func TestProviderKeyViewFromPool_IncludesQuotaKind(t *testing.T) {
 	now := time.Now()
 	live := &keypool.Key{Remaining: 43, QuotaKind: "percent", LastPolledAt: now}
 	v := toProviderKeyViewFromPool(dbpkg.ProviderAPIKey{
-		ProviderName: "test", Name: "k", KeyHash: "sk-1234567890", Enabled: true,
+		ProviderName: "test", Name: "k", KeyHash: "sk-1234567890", Enabled: dbpkg.BoolPtr(true),
 		BillingSource: "token_plan", CreatedAt: now, UpdatedAt: now,
 	}, "ACTIVE", live)
 
@@ -95,7 +95,7 @@ func TestProviderKeyViewFromPool_IncludesProtocols(t *testing.T) {
 	now := time.Now()
 	live := &keypool.Key{Remaining: 43, QuotaKind: "percent", LastPolledAt: now, Protocols: "anthropic"}
 	v := toProviderKeyViewFromPool(dbpkg.ProviderAPIKey{
-		ProviderName: "deepseek", Name: "k", KeyHash: "sk-1234567890", Enabled: true,
+		ProviderName: "deepseek", Name: "k", KeyHash: "sk-1234567890", Enabled: dbpkg.BoolPtr(true),
 		BillingSource: "api", Protocols: "openai,anthropic", CreatedAt: now, UpdatedAt: now,
 	}, "ACTIVE", live)
 

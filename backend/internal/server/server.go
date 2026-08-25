@@ -508,7 +508,7 @@ func buildOnePool(ctx context.Context, name string, sched keypool.Scheduler, poo
 	}
 	keys := make([]*keypool.Key, 0, len(rows))
 	for _, row := range rows {
-		if !row.Enabled {
+		if !database.IsEnabled(row.Enabled) {
 			continue
 		}
 		bs := row.BillingSource

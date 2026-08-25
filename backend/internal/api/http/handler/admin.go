@@ -1387,13 +1387,19 @@ func (a *Admin) updateRelayStation(c *gin.Context) {
 	existing.PrimaryProtocol = req.PrimaryProtocol
 	existing.SupportedProtocols = req.SupportedProtocols
 	existing.Keys = req.Keys
-	existing.Enabled = req.Enabled
-	existing.Timeout = req.Timeout
+	// enabled 省略 = 不改动。不能裸赋值:Update 走 Save(全字段写),
+	// req.Enabled 为 nil 时会往 NOT NULL 列写 NULL。
+	if req.Enabled != nil {
+		existing.Enabled = req.Enabled
+	}
+	// timeout 省略/传 0 = 不改动。同样不能裸赋值:Update 走 Save(全字段写),
+	// 0 会覆盖掉已配好的值。运行时 relay.go 见 0 会退回 60s,所以不会挂死请求,
+	// 但配了 120s 的站会被静默打回 60s —— 是配置丢失,不是崩溃,更难发现。
+	// create 路径本来就有这道闸(见上面 req.Timeout == 0 → 60),这里补齐。
+	if req.Timeout > 0 {
+		existing.Timeout = req.Timeout
+	}
 	existing.BillingSource = req.BillingSource
-	// P-responses: 漏了这一行会让「从 UI 编辑任何中转站」都把该标志静默清成 false
-	// (create 是整 struct bind 所以没这个问题,update 是逐字段 copy)。
-	// 标志为 false 的站在 /responses 请求里会被 router 筛掉 → 候选变空 → 503。
-	existing.SupportsResponsesAPI = req.SupportsResponsesAPI
 
 	if err := a.RelayStationStore.Update(c.Request.Context(), existing); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update relay station: " + err.Error()})

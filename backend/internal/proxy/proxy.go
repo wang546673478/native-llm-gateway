@@ -330,9 +330,10 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		GatewayKeyID: e.gkCtx.ID(c),
 		TraceID:      traceID,
 	}
-	if entry != nil {
-		entry.Protocol = req.Headers.Get("anthropic-version") // best-effort
-	}
+	// 注意:此刻还没路由,协议未知 —— 不要拿 anthropic-version 请求头凑数。
+	// 那个头是 API 版本(如 2023-06-01),不是协议名,写进 protocol 列是错的;
+	// 且 openai 客户端不发这个头,只会留空。真协议在路由出来后补(见 attemptOne
+	// 里 entry.Protocol = result.Protocol,与 usage 同源)。
 
 	// Inflight:请求已确定 model/is_stream/gateway key,即将开始路由 —
 	// 写入活跃请求快照(provider 此刻未知,由 attemptOne 里的 SetProvider 补)。
@@ -1075,6 +1076,11 @@ func (e *Engine) runCandidateLoop(
 		// 名字不落库 — 查询时按 ID 现查 provider_api_keys(改名即时生效,不存快照)
 		if entry != nil && result.Key != nil {
 			entry.ProviderKeyID = result.Key.ID
+		}
+		// 协议按实际路由到的面记,与 usage_records 同源(result.Protocol)。
+		// failover 换面后覆盖为最终那面的协议,和 ProviderKeyID 语义一致。
+		if entry != nil && result.Protocol != "" {
+			entry.Protocol = string(result.Protocol)
 		}
 		if attempted {
 			attempts++
