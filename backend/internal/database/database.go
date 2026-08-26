@@ -86,6 +86,8 @@ func Migrate(db *gorm.DB) error {
 		&AccessLog{},       // P67: 接入日志
 		&MimoQuotaCookie{}, // P-mimo-quota: MIMO 控制台 cookie(单行)
 		&RouteOrder{},      // P-2026-08-10: Level 2/3 排序改写
+		&AdminUser{},       // P-admin-auth: 管理员账号
+		&AdminSession{},    // P-admin-auth: 管理员会话
 	}
 	if err := db.AutoMigrate(tables...); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
@@ -97,6 +99,10 @@ func Migrate(db *gorm.DB) error {
 	// P-provider-vendor: 协议变体并入厂商名,并标协议
 	if err := migrateProviderVendorKeys(db); err != nil {
 		return fmt.Errorf("vendor key migrate: %w", err)
+	}
+	// P-admin-auth: 初始化默认 root 账号
+	if err := initDefaultAdminUser(db); err != nil {
+		return fmt.Errorf("init admin user: %w", err)
 	}
 	return nil
 }
@@ -163,4 +169,24 @@ func ensureDir(dsn string) error {
 		return nil
 	}
 	return os.MkdirAll(dir, 0o755)
+}
+
+// initDefaultAdminUser 初始化默认 root 账号(幂等)
+// 密码: admin123 (首次登录应强制修改,暂不实现强制改密逻辑)
+// bcrypt hash: $2a$10$N9qo8uLOickgx2ZMRZoMye6p9J4tNKYvZ0bEMYnH8F9XH.BxmI4G6
+func initDefaultAdminUser(db *gorm.DB) error {
+	var count int64
+	if err := db.Model(&AdminUser{}).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil // 已有账号,不覆盖
+	}
+	root := &AdminUser{
+		Username:     "root",
+		PasswordHash: "$2a$10$N9qo8uLOickgx2ZMRZoMye6p9J4tNKYvZ0bEMYnH8F9XH.BxmI4G6", // admin123
+		Role:         "root",
+		Enabled:      true,
+	}
+	return db.Create(root).Error
 }

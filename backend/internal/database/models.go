@@ -225,6 +225,37 @@ type RoutingConfig struct {
 // TableName
 func (RoutingConfig) TableName() string { return "routing_configs" }
 
+// AdminUser 管理员账号表
+type AdminUser struct {
+	ID             uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	Username       string     `gorm:"column:username;uniqueIndex;not null;size:50" json:"username"`
+	PasswordHash   string     `gorm:"column:password_hash;not null;size:255" json:"-"` // bcrypt hash，不序列化到 JSON
+	Role           string     `gorm:"column:role;not null;default:'admin';size:20" json:"role"` // root | admin | readonly
+	Enabled        bool       `gorm:"column:enabled;not null;default:true" json:"enabled"`
+	FailedAttempts int        `gorm:"column:failed_attempts;not null;default:0" json:"failed_attempts"`
+	LockedUntil    *time.Time `gorm:"column:locked_until" json:"locked_until,omitempty"`
+	LastLoginAt    *time.Time `gorm:"column:last_login_at" json:"last_login_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// TableName
+func (AdminUser) TableName() string { return "admin_users" }
+
+// AdminSession 管理员会话表
+type AdminSession struct {
+	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID    uint      `gorm:"column:user_id;not null;index" json:"user_id"`
+	Token     string    `gorm:"column:token;uniqueIndex;not null;size:64" json:"token"`
+	IPAddress string    `gorm:"column:ip_address;size:45" json:"ip_address,omitempty"`
+	UserAgent string    `gorm:"column:user_agent;type:text" json:"user_agent,omitempty"`
+	ExpiresAt time.Time `gorm:"column:expires_at;not null;index" json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TableName
+func (AdminSession) TableName() string { return "admin_sessions" }
+
 // GatewayKey 客户端使用的 Gateway API Key(P7 阶段真正生效)
 type GatewayKey struct {
 	ID      uint   `gorm:"primaryKey;autoIncrement" json:"id"`

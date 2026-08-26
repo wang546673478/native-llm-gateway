@@ -388,3 +388,10 @@ usage:
 fingerprint:
   # enabled: true
   # canonical_device_id: ""
+
+admin_auth:
+  enabled: false
+  # session_ttl: 168h
+  # max_login_attempts: 5
+  # login_ban_duration: 15m
+  # session_cleanup_age: 720h
