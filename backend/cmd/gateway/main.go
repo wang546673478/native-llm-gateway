@@ -23,6 +23,7 @@ import (
 
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/builtin" // 触发所有内置 Provider init() 注册(deepseek/gemini/glm/mimo/minimax/qwen)
 
+	"github.com/wang546673478/native-llm-gateway/internal/adminauth"
 	"github.com/wang546673478/native-llm-gateway/internal/config"
 	"github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -104,6 +105,18 @@ func run(cmd *cobra.Command, args []string) error {
 	// P-relay: 从数据库加载中转站配置并注册(必须在 manager 创建后)
 	if err := relay.LoadFromDatabase(db, manager); err != nil {
 		logger.Warn("failed to load relay stations from database", zap.Error(err))
+	}
+
+	// P-admin-auth: 确保至少有一个 root 用户(首次启动自动创建)
+	if cfg.AdminAuth.Enabled {
+		if created, err := ensureRootUser(db, logger); err != nil {
+			logger.Warn("failed to ensure root user", zap.Error(err))
+		} else if created {
+			logger.Info("created default root user",
+				zap.String("username", "admin"),
+				zap.String("password", "Gateway@2026"),
+			)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -194,4 +207,13 @@ func defaultStr(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// ensureRootUser 确保数据库中至少有一个 root 用户
+func ensureRootUser(db *gorm.DB, logger *zap.Logger) (bool, error) {
+	created, err := adminauth.EnsureRootUser(db)
+	if err != nil {
+		return false, err
+	}
+	return created, nil
 }

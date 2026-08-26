@@ -6,6 +6,30 @@ const client = axios.create({
   timeout: 10_000,
 })
 
+// 请求拦截器：自动注入 admin token
+client.interceptors.request.use(config => {
+  const token = localStorage.getItem('admin_token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// 响应拦截器：401 清除 token
+client.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('admin_token')
+      // 如果不在登录页，跳转到登录页
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
+    return Promise.reject(error)
+  }
+)
+
 // P-provider-vendor: /providers 按 vendor 聚合 — 一个厂商多个注册名(协议面)
 export interface ProviderNameInfo {
   name: string
@@ -456,4 +480,49 @@ export async function updateRelayStation(id: number, data: Partial<RelayStation>
 
 export async function deleteRelayStation(id: number): Promise<void> {
   await client.delete(`/relay-stations/${id}`)
+}
+
+// 管理员认证 API
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+export interface LoginResponse {
+  token: string
+  expires_at: string
+}
+
+export interface AdminUserInfo {
+  id?: number
+  username: string
+  role: string
+  login_attempts?: number
+  locked?: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export const authApi = {
+  login: (data: LoginRequest) =>
+    client.post<LoginResponse>('/auth/login', data).then(r => r.data),
+  logout: () =>
+    client.post('/auth/logout').then(r => r.data),
+  me: () =>
+    client.get<AdminUserInfo>('/auth/me').then(r => r.data),
+  changePassword: (data: { old_password: string; new_password: string }) =>
+    client.post('/auth/change-password', data).then(r => r.data),
+}
+
+export const adminUsersApi = {
+  list: () =>
+    client.get<{ users: AdminUserInfo[]; count: number }>('/admin-users').then(r => r.data),
+  create: (data: { username: string; password: string; role: string }) =>
+    client.post<AdminUserInfo>('/admin-users', data).then(r => r.data),
+  update: (id: number, data: { role?: string; locked?: boolean }) =>
+    client.put<AdminUserInfo>(`/admin-users/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    client.delete(`/admin-users/${id}`).then(r => r.data),
+  resetPassword: (id: number, data: { new_password: string }) =>
+    client.post(`/admin-users/${id}/reset-password`, data).then(r => r.data),
 }
