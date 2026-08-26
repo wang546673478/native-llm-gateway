@@ -27,6 +27,8 @@ type Config struct {
 	Usage     UsageConfig         `mapstructure:"usage"`
 	// Fingerprint 设备指纹归一化配置(见 docs/fingerprint-sanitize-plan.md)。
 	Fingerprint FingerprintConfig `mapstructure:"fingerprint"`
+	// AdminAuth 管理员认证配置
+	AdminAuth AdminAuthConfig `mapstructure:"admin_auth"`
 }
 
 // ServerConfig HTTP 服务配置
@@ -68,6 +70,9 @@ const (
 	// 的"双份真相"(operator 改 config 只局部生效的孤岛隐患)。
 	DefaultUsageBatchSize     = 100
 	DefaultUsageFlushInterval = 10 * time.Second
+
+	// AdminAuth 管理员认证默认值
+	DefaultAdminSessionExpiry = 24 * time.Hour
 )
 
 // DatabaseConfig 数据库配置
@@ -262,6 +267,15 @@ type FingerprintConfig struct {
 // FingerprintEnabled 归一化的最终开关;nil 视为默认开。
 func (c *FingerprintConfig) FingerprintEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
+}
+
+// AdminAuthConfig 管理员认证配置
+type AdminAuthConfig struct {
+	Enabled           bool          `mapstructure:"enabled"`            // 是否启用管理员认证
+	SessionTTL        time.Duration `mapstructure:"session_ttl"`        // session 有效期,默认 7 天
+	MaxLoginAttempts  int           `mapstructure:"max_login_attempts"` // 最大登录尝试次数,默认 5
+	LoginBanDuration  time.Duration `mapstructure:"login_ban_duration"` // 登录封禁时长,默认 15 分钟
+	SessionCleanupAge time.Duration `mapstructure:"session_cleanup_age"` // session 清理阈值,默认 30 天
 }
 
 // Load 从指定路径加载配置文件

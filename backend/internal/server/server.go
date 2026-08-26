@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/wang546673478/native-llm-gateway/internal/accesslog"
+	"github.com/wang546673478/native-llm-gateway/internal/adminauth"
 	"github.com/wang546673478/native-llm-gateway/internal/api/http/handler"
 	"github.com/wang546673478/native-llm-gateway/internal/api/http/middleware"
 	"github.com/wang546673478/native-llm-gateway/internal/auth"
@@ -60,6 +61,7 @@ type Server struct {
 	accessR           *accesslog.Recorder // P67: 接入日志 Recorder
 	quotaM            *quotacheck.Manager // P68: 配额恢复 worker
 	inflightR         *inflight.Registry  // P-inflight: 活跃请求内存快照表
+	adminAuthM        *adminauth.Manager  // P-admin-auth: 管理员认证管理器
 	// fpEnabled 设备指纹归一化开关原子值(运行时热切,PATCH /api/v1/fingerprint 翻转)。
 	// 指针:engine 闭包与 server 持有同一个实例,热切换共享。默认 = cfg.Fingerprint 开关。
 	// atomic 保证热路径只读一次、无锁。
@@ -225,6 +227,17 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	}
 	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
 
+	// P-admin-auth: 管理员认证管理器(若启用)
+	var adminAuthM *adminauth.Manager
+	if cfg.AdminAuth.Enabled {
+		adminAuthM = adminauth.NewManager(db, adminauth.Config{
+			SessionTTL:        cfg.AdminAuth.SessionTTL,
+			MaxFailedAttempts: cfg.AdminAuth.MaxLoginAttempts,
+			LockDuration:      cfg.AdminAuth.LoginBanDuration,
+		})
+		logger.Info("admin auth enabled")
+	}
+
 	s := &Server{
 		cfg:               cfg,
 		logger:            logger,
@@ -241,6 +254,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		accessR:           accessR,
 		quotaM:            quotaM,
 		inflightR:         inflightR,
+		adminAuthM:        adminAuthM,
 		fpEnabled:         fpEnabled,
 		fpSnapshot:        fpSnap,
 	}
@@ -996,7 +1010,16 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	// 在 /providers 显示陈旧零值。注入带锁读最新 s.pools 的闭包修正(见 poolFor/poolSnapshot)。
 	admin.PoolLookup = s.poolFor
 	admin.PoolsSnapshot = s.poolSnapshot
-	admin.Register(r.Group("/api/v1"))
+
+	// P-admin-auth: 管理端点鉴权(若启用)
+	adminGroup := r.Group("/api/v1")
+	if s.adminAuthM != nil {
+		adminGroup.Use(middleware.AdminAuthMiddleware(s.adminAuthM))
+		// 登录/登出端点不需要鉴权
+		authHandler := handler.NewAdminAuthHandler(s.adminAuthM)
+		authHandler.Register(r.Group("/api/v1"))
+	}
+	admin.Register(adminGroup)
 
 	// P16: Gateway Keys CRUD handler
 	// 注意:CRUD 端点本身不要求 auth.enabled,这样即使没启用 auth 也能管理 keys
@@ -1007,7 +1030,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		}
 	}
 	keysHandler := auth.NewKeysHandler(s.db, noopReload)
-	keysHandler.Register(r.Group("/api/v1"))
+	keysHandler.Register(adminGroup)
 
 	// P30: Provider API keys 管理(给已插件化的 Provider 加上游 LLM key)
 	pkHandler := auth.NewProviderKeysHandler(s.db, s.ReloadProviderPool)
@@ -1050,7 +1073,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 			}
 		}
 	})
-	pkHandler.RegisterOn(r.Group("/api/v1"))
+	pkHandler.RegisterOn(adminGroup)
 
 	// P5: 真代理接入
 	// 注册具体协议路径 + NoRoute 兜底(覆盖其他 /v1/* 子路径)

@@ -387,3 +387,11 @@ fingerprint:
   # canonical_device_id: 统一 device_id。留空则启动时随机生成一次(存内存,不落盘);
   # 想固定或更换统一值,填一个 64 字符 hex 字符串。
   # canonical_device_id: ""
+
+# P-admin-auth: 管理员认证配置(保护 /admin/* 端点)
+admin_auth:
+  enabled: false                    # 是否启用管理员认证,默认关闭
+  # session_ttl: 168h              # session 有效期,默认 7 天
+  # max_login_attempts: 5          # 最大登录尝试次数,默认 5
+  # login_ban_duration: 15m        # 登录封禁时长,默认 15 分钟
+  # session_cleanup_age: 720h      # session 清理阈值,默认 30 天
