@@ -125,7 +125,9 @@ type RelayStation struct {
 	Keys        string `gorm:"column:keys;type:text" json:"keys"`                                    // JSON数组: ["sk-xxx","sk-yyy"]
 	Enabled     *bool  `gorm:"column:enabled;not null;default:true" json:"enabled"`                   // *bool 的理由见文件头
 
-	Timeout     int    `gorm:"column:timeout_seconds;not null;default:60" json:"timeout_seconds"`
+	// default 跟 relay.DefaultTimeout 对齐(400s)。原为 60s —— 大 body 非流式推理
+	// 撑不下,每个候选都在 60s 整点被切,failover 试完全部候选仍全败。
+	Timeout     int    `gorm:"column:timeout_seconds;not null;default:400" json:"timeout_seconds"`
 	BillingSource string `gorm:"column:billing_source;not null;default:'api'" json:"billing_source"` // token_plan/api/free
 	// 已废弃(2026-08-25 删):DB 列 supports_responses_api 仍存在(NOT NULL DEFAULT
 	// false,INSERT 不带它也能过),待确认无回退需求后手工 DROP COLUMN。

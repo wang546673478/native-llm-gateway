@@ -13,6 +13,18 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider/openai_compatible"
 )
 
+// DefaultTimeout 中转站单次请求超时的兜底值(DB 里 timeout_seconds 没填时用)。
+//
+// 这是**非流式**路径的实际上限:流式两个 Base 都按 StreamTimeoutFloor(600s)取下限,
+// 不受这里影响。原值 60s 太小 —— 大 body(40k+ token)的非流式推理本身就要 60s 以上,
+// 每个候选都在 60s 整点被切断,failover 试完所有候选仍然全败(踩坑:kiro2 全 502)。
+//
+// 与 server.write_timeout(600s)的关系:write_timeout 是整个响应的绝对写上限,
+// 单次超时除进去 = 还能试几个候选。400s 意味着 600s 预算内只够 1 次多一点,
+// 即"宁可等单个上游,不追求多次 failover"——这是权衡后选定的取值,不是笔误。
+// 改这里要连带看 RelayStations.vue 的 :max(跟 write_timeout 对齐)。
+const DefaultTimeout = 400 * time.Second
+
 // Config 通用中转站配置
 type Config struct {
 	Name               string
@@ -48,7 +60,7 @@ func NewGenericRelayProvider(cfg Config) (*GenericRelayProvider, error) {
 
 	timeout := time.Duration(cfg.Timeout) * time.Second
 	if timeout == 0 {
-		timeout = 60 * time.Second
+		timeout = DefaultTimeout
 	}
 
 	implementations := make(map[provider.Protocol]provider.Provider)

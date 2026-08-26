@@ -48,7 +48,9 @@
           />
         </n-form-item>
         <n-form-item label="超时(秒)" path="timeout_seconds">
-          <n-input-number v-model:value="form.timeout_seconds" :min="1" :max="300" style="width: 100%" />
+          <!-- max 跟 server.write_timeout(600s)对齐:单次超时超过整个响应写上限就没意义了。
+               原来是 300 —— 比实际在用的 400 还小,编辑已有站会被静默夹回 300。 -->
+          <n-input-number v-model:value="form.timeout_seconds" :min="1" :max="600" style="width: 100%" />
         </n-form-item>
         <n-form-item label="计费来源" path="billing_source">
           <n-select v-model:value="form.billing_source" :options="billingSourceOptions" />
@@ -107,7 +109,7 @@ const form = ref({
   protocol_mode: 'single' as 'single' | 'multi',
   primary_protocol: 'openai',
   supported_protocols_array: [] as string[],
-  timeout_seconds: 60,
+  timeout_seconds: 400,
   billing_source: 'api',
   keys_text: '',
   enabled: true,
@@ -255,7 +257,7 @@ function openCreate() {
     protocol_mode: 'single',
     primary_protocol: 'openai',
     supported_protocols_array: [],
-    timeout_seconds: 60,
+    timeout_seconds: 400,
     billing_source: 'api',
     keys_text: '',
     enabled: true,

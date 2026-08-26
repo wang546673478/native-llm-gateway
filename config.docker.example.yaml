@@ -14,7 +14,7 @@ server:
   read_timeout: 30s
   # 非流式响应的绝对写上限;流式响应按 chunk 续期(proxy.doStream 的
   # SetWriteDeadline),实际语义变成「上游静默多久才算断流」— 活跃流不被掐断
-  write_timeout: 300s
+  write_timeout: 600s
   idle_timeout: 120s
   shutdown_timeout: 30s
   # P-web-static: 前端构建产物目录(Go 直接托管,无 nginx;未命中 SPA fallback index.html)。

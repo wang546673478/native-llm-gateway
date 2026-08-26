@@ -39,26 +39,28 @@ func (p *RelayOpenAIProvider) Protocol() provider.Protocol {
 
 // createAnthropicImplementation 创建 Anthropic 协议实现
 func createAnthropicImplementation(name, baseURL string, timeout int) (provider.Provider, error) {
+	d := time.Duration(timeout) * time.Second
 	if timeout <= 0 {
-		timeout = 60
+		d = DefaultTimeout
 	}
 	base := anthropic_compatible.NewBase(anthropic_compatible.Config{
 		Name:     name,
 		Endpoint: baseURL,
-		Timeout:  time.Duration(timeout) * time.Second,
+		Timeout:  d,
 	})
 	return &RelayAnthropicProvider{Base: base, name: name}, nil
 }
 
 // createOpenAIImplementation 创建 OpenAI 协议实现
 func createOpenAIImplementation(name, baseURL string, timeout int) (provider.Provider, error) {
+	d := time.Duration(timeout) * time.Second
 	if timeout <= 0 {
-		timeout = 60
+		d = DefaultTimeout
 	}
 	base := openai_compatible.NewBase(openai_compatible.Config{
 		Name:        name,
 		Endpoint:    baseURL,
-		Timeout:     time.Duration(timeout) * time.Second,
+		Timeout:     d,
 		StreamUsage: true,
 	})
 	return &RelayOpenAIProvider{Base: base, name: name}, nil
