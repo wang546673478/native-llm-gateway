@@ -1015,10 +1015,12 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 	adminGroup := r.Group("/api/v1")
 	if s.adminAuthM != nil {
 		adminGroup.Use(middleware.AdminAuthMiddleware(s.adminAuthM))
-		// 登录/登出端点不需要鉴权
-		authHandler := handler.NewAdminAuthHandler(s.adminAuthM)
-		authHandler.Register(r.Group("/api/v1"))
 	}
+
+	// 登录/登出端点始终注册(即使未启用认证,也应返回明确错误而非 404)
+	authHandler := handler.NewAdminAuthHandler(s.adminAuthM)
+	authHandler.Register(r.Group("/api/v1"))
+
 	admin.Register(adminGroup)
 
 	// P16: Gateway Keys CRUD handler

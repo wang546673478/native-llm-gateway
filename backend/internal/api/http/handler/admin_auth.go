@@ -24,8 +24,13 @@ func NewAdminAuthHandler(am *adminauth.Manager) *AdminAuthHandler {
 
 // Register 注册路由
 func (h *AdminAuthHandler) Register(r *gin.RouterGroup) {
-	// 不需要鉴权的端点
+	// 登录端点始终注册(即使未启用,也返回明确错误而非 404)
 	r.POST("/auth/login", h.login)
+
+	// 其他端点仅在启用时注册
+	if h.am == nil {
+		return
+	}
 
 	// 需要鉴权的端点
 	authed := r.Group("/auth")
@@ -48,6 +53,11 @@ func (h *AdminAuthHandler) Register(r *gin.RouterGroup) {
 
 // login 登录
 func (h *AdminAuthHandler) login(c *gin.Context) {
+	if h.am == nil {
+		c.JSON(503, gin.H{"error": gin.H{"type": "feature_disabled", "message": "admin authentication is disabled"}})
+		return
+	}
+
 	var req struct {
 		Username string `json:"username" binding:"required"`
 		Password string `json:"password" binding:"required"`
