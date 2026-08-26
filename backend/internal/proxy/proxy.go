@@ -898,12 +898,15 @@ func (e *Engine) recordUsageWithTokens(
 		r.InputTokens = u.PromptTokens
 		r.OutputTokens = u.CompletionTokens
 		r.TotalTokens = u.TotalTokens
-		r.CacheReadTokens = u.CacheReadTokens         // ⭐ 新增:缓存读取 token
-		r.CacheCreationTokens = u.CacheCreationTokens // ⭐ 新增:缓存写入 token
-		// P37 + P40 + P-quota-512k: 算 cost(支持 cache pricing + 长上下文悬崖,单位 CNY ¥)
-		// 逻辑见 provider.ComputeCost — cost = prompt*input + cache_creation*cache_create
-		// (0 则 fallback 到 input)+ cache_read*cache_read + completion*output;
-		// 输入含缓存超过 long_context_input_threshold 时全项乘 multiplier(M3 512k 悬崖)
+		r.CacheReadTokens = u.CacheReadTokens
+		r.CacheCreationTokens = u.CacheCreationTokens
+		// P37 + P40: 算 cost(单位 CNY ¥),逻辑见 provider.ComputeCost —
+		// cost = prompt*input + cache_read*cache_read + completion*output。
+		//
+		// P-cache-dedup: 这里存的 InputTokens 是「**不计** 缓存」的输入 ——
+		// 与 CacheReadTokens 互斥、不重叠(契约见 provider.Usage 注释),
+		// 否则缓存部分会被 input 价和 cache 价各收一次。
+		// 聚合/明细的缓存拆列(usage/tokensplit.go)依赖这个口径。
 		if mgr := e.router.Manager(); mgr != nil {
 			c := mgr.CostFor(result.ProviderName, result.ModelID)
 			r.Cost = provider.ComputeCost(c, u)
@@ -1056,7 +1059,7 @@ func (e *Engine) runCandidateLoop(
 			// 本层尝试预算耗尽:跳过剩余同层候选,取下一层候选做层切换判定
 			peek, perr := peekNextTier()
 			if perr != nil {
-				e.logger.Info("P54 DEBUG: no more candidates", zap.Error(perr))
+				e.logger.Debug("failover: no more candidates", zap.Error(perr))
 				break
 			}
 			if !acceptTier(peek.Tier) {
@@ -1067,7 +1070,7 @@ func (e *Engine) runCandidateLoop(
 		} else {
 			result, err = next()
 			if err != nil {
-				e.logger.Info("P54 DEBUG: no more candidates", zap.Error(err))
+				e.logger.Debug("failover: no more candidates", zap.Error(err))
 				break
 			}
 			if result.Tier != currentTier {
@@ -1077,7 +1080,7 @@ func (e *Engine) runCandidateLoop(
 			}
 		}
 
-		e.logger.Info("P54 DEBUG: trying",
+		e.logger.Debug("failover: trying candidate",
 			zap.String("provider", result.ProviderName),
 			zap.String("key_id", keyIDOf(result.Key)),
 			zap.String("key_status", keyStatusOf(result.Key)),

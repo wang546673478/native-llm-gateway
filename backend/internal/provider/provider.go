@@ -264,6 +264,26 @@ type StreamChunk struct {
 //   - CacheReadTokens:     命中已有 cache 的 token(DeepSeek prompt_cache_hit_tokens,Anthropic cache_read_input_tokens)
 //   - CompletionTokens:    输出 token
 //
+// P-cache-dedup 不变式(**解析器必须遵守**):PromptTokens 与 CacheReadTokens
+// **互斥不重叠**。ComputeCost 把两者分别按 input 价和 cache 价各计一次,
+// 任何一方把缓存量塞进 PromptTokens 就是重复计费。
+//
+// 两族上游口径不同,解析器负责换算到上面这个统一契约:
+//
+//	OpenAI 系(含 Responses / DeepSeek / MiniMax):缓存量是完整输入的**子集**
+//	  上游 prompt_tokens(或 input_tokens)= 未命中 + 命中
+//	  上游 total_tokens = prompt_tokens + completion_tokens
+//	  → 解析器要减:PromptTokens = prompt_tokens - CacheReadTokens
+//	Anthropic 系:缓存量在 input 之**外**另计
+//	  上游 input_tokens 本身已经不含 cache
+//	  上游 total = input + output + cache_creation + cache_read
+//	  → 解析器直接取,不用减
+//
+// 换算后统一满足:PromptTokens + CacheReadTokens + CacheCreationTokens
+// + CompletionTokens == TotalTokens(个别上游 total 有 ±1 舍入噪声)。
+// 历史事故:openai 两个解析器直取上游 prompt_tokens(含缓存)→ 170 条记录
+// 缓存部分被双收,tokenmarket-codex 单站多算约 4.4 千万 cached token。
+//
 // P65: 新增 Model 字段 — 上游响应里的真实 model 名
 //   - OpenAI 协议: 响应顶层 "model" 字段
 //   - Anthropic 协议: 响应顶层 "model" 字段

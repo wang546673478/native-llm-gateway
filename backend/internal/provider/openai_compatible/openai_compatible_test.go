@@ -267,12 +267,20 @@ func TestParseOpenAIUsage_DeepSeekExtensions(t *testing.T) {
 	if u == nil {
 		t.Fatal("expected non-nil usage")
 	}
-	if u.PromptTokens != 100 {
-		t.Errorf("PromptTokens = %d, want 100", u.PromptTokens)
+	// P-cache-dedup: prompt_tokens(100)是含缓存的完整输入,契约要求 PromptTokens 只算
+	// 未命中部分 → 100 - 80 = 20,正好等于上游自己给的 prompt_cache_miss_tokens。
+	// 这个巧合是校验点:减法口径与 DeepSeek 官方的 miss 字段必须一致。
+	if u.PromptTokens != 20 {
+		t.Errorf("PromptTokens = %d, want 20 (= prompt_tokens 100 - hit 80 = prompt_cache_miss_tokens)", u.PromptTokens)
 	}
 	// P-provider-vendor: cached_tokens 缺省 0 时,CacheReadTokens = prompt_cache_hit_tokens
 	if u.CacheReadTokens != 80 {
 		t.Errorf("CacheReadTokens = %d, want 80 (prompt_cache_hit_tokens)", u.CacheReadTokens)
+	}
+	// 契约不变式:两个量互斥且加起来等于完整输入(否则 ComputeCost 会重复计费)
+	if u.PromptTokens+u.CacheReadTokens != 100 {
+		t.Errorf("PromptTokens(%d) + CacheReadTokens(%d) = %d, want 100 (完整输入)",
+			u.PromptTokens, u.CacheReadTokens, u.PromptTokens+u.CacheReadTokens)
 	}
 	if u.RawUsage["prompt_cache_hit_tokens"] != 80 {
 		t.Errorf("prompt_cache_hit_tokens in RawUsage = %v, want 80", u.RawUsage["prompt_cache_hit_tokens"])
@@ -300,8 +308,10 @@ func TestParseOpenAIUsage_MiniMaxCachedTokens(t *testing.T) {
 	if u.CacheReadTokens != 800 {
 		t.Fatalf("CacheReadTokens = %d, want 800", u.CacheReadTokens)
 	}
-	if u.PromptTokens != 1200 {
-		t.Fatalf("PromptTokens = %d, want 1200", u.PromptTokens)
+	// P-cache-dedup: MiniMax 只给「完整输入 + cached」两个数,没有 miss 字段,
+	// uncached 必须靠减法算:1200 - 800 = 400。
+	if u.PromptTokens != 400 {
+		t.Fatalf("PromptTokens = %d, want 400 (= prompt_tokens 1200 - cached 800)", u.PromptTokens)
 	}
 }
 
@@ -325,6 +335,12 @@ func TestParseOpenAIUsage_CachedTokensSum(t *testing.T) {
 	}
 	if u.CacheReadTokens != 880 {
 		t.Fatalf("CacheReadTokens = %d, want 880 (80 + 800)", u.CacheReadTokens)
+	}
+	// P-cache-dedup: 两种风格并存时也走同一条减法,2000 - 880 = 1120。
+	// 注意这里刻意**不**等于上游的 prompt_cache_miss_tokens(1920)——这是人造 body,
+	// 真实上游不会同时给两套自相矛盾的 cache 字段。校验的是减法口径统一,不是数字巧合。
+	if u.PromptTokens != 1120 {
+		t.Fatalf("PromptTokens = %d, want 1120 (= 2000 - 880)", u.PromptTokens)
 	}
 }
 
@@ -760,4 +776,185 @@ func TestListModels_NonJSONBodyReportsStatus(t *testing.T) {
 	if strings.Contains(err.Error(), "decode models") {
 		t.Errorf("err = %v, 不应把 404 埋成 decode 错", err)
 	}
+}
+
+// ── P-responses-usage: OpenAI Responses API 的 usage 形状 ─────────────────
+//
+// 背景:Codex 客户端走 /v1/responses,usage 字段名与层级都和 Chat Completions
+// 不同(input_tokens 而非 prompt_tokens;流式还嵌在 response 里)。此前解析器
+// 只认 Chat Completions → gpt-5.6-sol 的 206 条流式记录 input/output/cache 全 0。
+
+// responsesStreamCompletedBody 是实测 tokenmarket-codex(gpt-5.6-sol)的流式末帧,
+// 数值取自真实 access log body(trace 6465c492)。
+const responsesStreamCompletedBody = `{"type":"response.completed","response":{
+	"id":"resp_00fe402b","object":"response","model":"gpt-5.6-sol","status":"completed",
+	"usage":{
+		"input_tokens":341797,
+		"input_tokens_details":{"cached_tokens":331648},
+		"output_tokens":156,
+		"output_tokens_details":{"reasoning_tokens":0},
+		"total_tokens":341953}}}`
+
+func TestParseResponsesUsage_StreamCompleted(t *testing.T) {
+	u := parseResponsesUsage([]byte(responsesStreamCompletedBody))
+	if u == nil {
+		t.Fatal("parseResponsesUsage returned nil — 流式末帧的 usage 必须被认出,否则整条记录 0 token")
+	}
+	// P-cache-dedup: input_tokens(341797)含缓存,契约口径只算未命中部分:
+	// 341797 - 331648 = 10149。这条真实语料的缓存命中率 97%,正是重复计费最严重的形状。
+	if u.PromptTokens != 10149 {
+		t.Errorf("PromptTokens = %d, want 10149 (= input 341797 - cached 331648)", u.PromptTokens)
+	}
+	if u.CompletionTokens != 156 {
+		t.Errorf("CompletionTokens = %d, want 156", u.CompletionTokens)
+	}
+	if u.TotalTokens != 341953 {
+		t.Errorf("TotalTokens = %d, want 341953", u.TotalTokens)
+	}
+	if u.CacheReadTokens != 331648 {
+		t.Errorf("CacheReadTokens = %d, want 331648", u.CacheReadTokens)
+	}
+	// Responses 无 cache 创建概念
+	if u.CacheCreationTokens != 0 {
+		t.Errorf("CacheCreationTokens = %d, want 0", u.CacheCreationTokens)
+	}
+	// P65: model 从 response 内层取(顶层没有)
+	if u.Model != "gpt-5.6-sol" {
+		t.Errorf("Model = %q, want gpt-5.6-sol", u.Model)
+	}
+}
+
+// TestParseResponsesUsage_OpenAISemantics 锁死上游口径 + 契约口径的换算关系。
+//
+// 上游口径(Responses / Chat Completions):cached 是 input 的**子集**,
+//   total = input + output,不含 cache 项。
+// 契约口径(provider.Usage):PromptTokens 是**不计 cache** 的输入,与 CacheReadTokens 互斥。
+//
+// 所以解析后必须满足 prompt + cache_read + completion == total。
+// 若哪天有人把 PromptTokens 改回上游原值(含缓存),这条会红:
+// 相加会超出 total 一个 cached 的量 —— 那正是 ComputeCost 重复计费的金额。
+func TestParseResponsesUsage_OpenAISemantics(t *testing.T) {
+	u := parseResponsesUsage([]byte(responsesStreamCompletedBody))
+	if u == nil {
+		t.Fatal("parseResponsesUsage returned nil")
+	}
+	if got := u.PromptTokens + u.CacheReadTokens + u.CompletionTokens; got != u.TotalTokens {
+		t.Errorf("prompt(%d) + cache_read(%d) + completion(%d) = %d, want total %d — "+
+			"PromptTokens 若含缓存会超出 total,缓存部分被 input 价和 cache 价各收一次",
+			u.PromptTokens, u.CacheReadTokens, u.CompletionTokens, got, u.TotalTokens)
+	}
+	// PromptTokens 已扣掉缓存,不能再是缓存的超集(否则说明减法没生效)
+	if u.PromptTokens >= u.TotalTokens-u.CompletionTokens && u.CacheReadTokens > 0 {
+		t.Errorf("PromptTokens(%d) 仍是完整输入 — 减法没生效", u.PromptTokens)
+	}
+}
+
+func TestParseResponsesUsage_NonStream(t *testing.T) {
+	// 非流式:usage 在顶层,字段名仍是 input_tokens
+	body := []byte(`{"id":"resp_x","model":"gpt-5.6-sol","usage":{
+		"input_tokens":4390,"input_tokens_details":{"cached_tokens":3840},
+		"output_tokens":6,"total_tokens":4396}}`)
+	u := parseResponsesUsage(body)
+	if u == nil {
+		t.Fatal("parseResponsesUsage returned nil for 顶层 usage")
+	}
+	// P-cache-dedup: 4390 - 3840 = 550 未命中输入
+	if u.PromptTokens != 550 || u.CompletionTokens != 6 || u.CacheReadTokens != 3840 {
+		t.Errorf("usage wrong: %+v (want prompt=550 completion=6 cache_read=3840)", u)
+	}
+	if u.Model != "gpt-5.6-sol" {
+		t.Errorf("Model = %q, want gpt-5.6-sol", u.Model)
+	}
+}
+
+// TestParseResponsesUsage_NullUsage 流早期事件带 "usage":null —— 必须返回 nil,
+// 否则会在流式循环里把末帧的真实 usage 覆盖成 0(lastUsage 被后写的零值顶掉)。
+func TestParseResponsesUsage_NullUsage(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"response.created 顶层 null", `{"type":"response.created","response":{"id":"r","usage":null}}`},
+		{"in_progress", `{"type":"response.in_progress","response":{"id":"r","usage":null}}`},
+		{"delta 无 usage", `{"type":"response.custom_tool_call_input.delta","delta":"x"}`},
+		{"usage 全零", `{"response":{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`},
+		{"非法 JSON", `not json`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if u := parseResponsesUsage([]byte(c.body)); u != nil {
+				t.Errorf("expected nil, got %+v", u)
+			}
+		})
+	}
+}
+
+// TestParseResponsesUsage_TotalFallback total_tokens 缺失时用 input+output 兜底
+func TestParseResponsesUsage_TotalFallback(t *testing.T) {
+	u := parseResponsesUsage([]byte(`{"usage":{"input_tokens":100,"output_tokens":20}}`))
+	if u == nil {
+		t.Fatal("parseResponsesUsage returned nil")
+	}
+	if u.TotalTokens != 120 {
+		t.Errorf("TotalTokens = %d, want 120 (input+output 兜底)", u.TotalTokens)
+	}
+}
+
+// ── 分派器:两套形状共存 ────────────────────────────────────────────────
+//
+// DefaultOpenAIUsageParser.Parse 先判 Responses 再回落 Chat Completions。
+// 顺序不能反 —— 见 Parse 的注释:两套共用 total_tokens 字段名,而 Chat
+// Completions 解析器只判「usage 键存在」就返回,反序会把 Responses 非流式
+// body 认成 prompt=0/completion=0 的半条零值记录且永不回落。
+
+func TestUsageParser_DispatchesBothShapes(t *testing.T) {
+	p := &DefaultOpenAIUsageParser{}
+
+	t.Run("chat completions 不被 Responses 抢走", func(t *testing.T) {
+		u := p.Parse([]byte(`{"model":"deepseek-v4-pro","usage":{
+			"prompt_tokens":1200,"completion_tokens":300,"total_tokens":1500,
+			"prompt_tokens_details":{"cached_tokens":800}}}`))
+		if u == nil {
+			t.Fatal("Parse returned nil for chat completions body")
+		}
+		// P-cache-dedup: 1200 - 800 = 400 未命中输入
+		if u.PromptTokens != 400 || u.CompletionTokens != 300 || u.CacheReadTokens != 800 {
+			t.Errorf("chat completions 解析被破坏: %+v (want prompt=400 completion=300 cache_read=800)", u)
+		}
+	})
+
+	t.Run("responses 流式末帧", func(t *testing.T) {
+		u := p.Parse([]byte(responsesStreamCompletedBody))
+		if u == nil {
+			t.Fatal("Parse returned nil for responses body")
+		}
+		// P-cache-dedup: 341797 - 331648 = 10149
+		if u.PromptTokens != 10149 || u.CompletionTokens != 156 || u.CacheReadTokens != 331648 {
+			t.Errorf("responses 解析错: %+v (want prompt=10149 completion=156 cache_read=331648)", u)
+		}
+	})
+
+	t.Run("responses 非流式不退化成零值行", func(t *testing.T) {
+		// 这条是分派顺序的核心回归点:顶层有 usage,但字段名是 Responses 的。
+		// 若先跑 Chat Completions,会返回 prompt=0/completion=0/total=4396。
+		u := p.Parse([]byte(`{"model":"gpt-5.6-sol","usage":{
+			"input_tokens":4390,"input_tokens_details":{"cached_tokens":3840},
+			"output_tokens":6,"total_tokens":4396}}`))
+		if u == nil {
+			t.Fatal("Parse returned nil")
+		}
+		if u.PromptTokens == 0 || u.CompletionTokens == 0 {
+			t.Fatalf("退化成零值行(分派顺序错了): %+v", u)
+		}
+		// P-cache-dedup: 4390 - 3840 = 550
+		if u.PromptTokens != 550 || u.CompletionTokens != 6 {
+			t.Errorf("usage wrong: %+v (want prompt=550 completion=6)", u)
+		}
+	})
+
+	t.Run("两套都不命中返回 nil", func(t *testing.T) {
+		if u := p.Parse([]byte(`{"id":"x","choices":[]}`)); u != nil {
+			t.Errorf("expected nil, got %+v", u)
+		}
+	})
 }

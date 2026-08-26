@@ -505,7 +505,23 @@ func (b *Base) SetPool(p *keypool.Pool) {
 // 支持标准 OpenAI 格式 + DeepSeek 扩展字段 + MiniMax/qwen 等标准缓存字段
 type DefaultOpenAIUsageParser struct{}
 
+// Parse 按响应形状分派到对应解析器(本身不解析,只选形状)。
+//
+// P-responses-usage: OpenAI 有两套互不兼容的 usage 形状,同一个 openai 协议面
+// 两者都会遇到(Chat Completions 走 /chat/completions,Codex 客户端走 /responses):
+//
+//	Chat Completions: {"usage":{"prompt_tokens":N,"completion_tokens":M,...}}
+//	Responses:        {"response":{"usage":{"input_tokens":N,"output_tokens":M,...}}}
+//
+// 顺序是 Responses 先判、Chat Completions 回落 —— 不能反过来:
+// Responses 非流式的 usage 也在顶层,但字段名是 input_tokens,而两套共用
+// total_tokens。若先跑 Chat Completions,它只判「usage 键是否存在」就返回,
+// 会得到 prompt/completion=0、total 有值的半条零值记录,且永不回落。
+// 反向则安全:Chat Completions 没有 input_tokens,不会被 Responses 误判。
 func (p *DefaultOpenAIUsageParser) Parse(body []byte) *provider.Usage {
+	if u := parseResponsesUsage(body); u != nil {
+		return u
+	}
 	return parseOpenAIUsage(body)
 }
 
@@ -566,20 +582,135 @@ func parseOpenAIUsage(body []byte) *provider.Usage {
 		"reasoning_tokens":         reasoningTokens,
 	}
 
+	cacheRead := resp.Usage.PromptCacheHitTokens + cachedTokens
+
 	u := &provider.Usage{
-		Model:            resp.Model, // P65: 上游响应的真实 model 名
-		PromptTokens:     resp.Usage.PromptTokens,
+		Model: resp.Model, // P65: 上游响应的真实 model 名
+		// P-cache-dedup: 契约要求 PromptTokens = **不计 cache** 的输入(见 provider.Usage 注释),
+		// 而 OpenAI 系的 prompt_tokens 是含缓存的完整输入 → 必须扣掉,否则缓存部分
+		// 先按 input 价、再按 cache_read 价各计一次(重复计费)。
+		PromptTokens:     uncachedInput(resp.Usage.PromptTokens, cacheRead),
 		CompletionTokens: resp.Usage.CompletionTokens,
 		TotalTokens:      resp.Usage.TotalTokens,
-		// P40: DeepSeek 的 cache 模型 — prompt_cache_hit_tokens 视为 cache read,
-		// prompt_cache_miss_tokens 已经包含在 PromptTokens 里(完整输入)
+		// P40: DeepSeek 的 cache 模型 — prompt_cache_hit_tokens 视为 cache read。
 		// P-provider-vendor: OpenAI 标准 cached_tokens(MiniMax 等)同样按缓存价计费,
-		// 与 DeepSeek 风格并存相加
-		CacheReadTokens:     resp.Usage.PromptCacheHitTokens + cachedTokens,
+		// 与 DeepSeek 风格并存相加(同一响应不会两种都给,相加等价于取到哪个算哪个)。
+		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: 0,
 		RawUsage:            raw,
 	}
 	return u
+}
+
+// uncachedInput 把「含缓存的完整输入」换算成契约要求的「不计 cache 的输入」。
+//
+// 为什么用减法而不是直接取上游的 miss 字段:只有 DeepSeek 风格给
+// prompt_cache_miss_tokens,OpenAI 标准形状(cached_tokens)和 Responses 形状
+// 都只给「完整输入 + 命中量」两个数,uncached 必须自己算。用一个公式覆盖三种形状,
+// 避免"按厂商分叉"退化成各写一份(那正是重复计费能藏这么久的原因)。
+//
+// 正确性依赖「命中量是完整输入的子集」。该前提已在 39532 份真实上游响应体上验证:
+// DeepSeek prompt == hit+miss(11 例 0 反例)、OpenAI prompt >= cached(50 例 0 反例)、
+// Responses input >= cached(837 例,唯一反例是 total 差 1 的上游舍入噪声,
+// 子集性质本身仍成立)。
+//
+// floor 到 0 是防御上游偶发的不自洽(命中量 > 完整输入):宁可把该请求算成
+// 「全部命中」少收一点,也不能返回负 token 让 cost 变成负数冲掉别的账。
+func uncachedInput(promptTokens, cacheReadTokens int) int {
+	if n := promptTokens - cacheReadTokens; n > 0 {
+		return n
+	}
+	return 0
+}
+
+// parseResponsesUsage 从 OpenAI Responses API 响应中抽取 usage(P-responses-usage)
+//
+// 两个位置都要认 —— 流式和非流式 usage 挂的层级不一样:
+//
+//	非流式: {"usage":{"input_tokens":N,...}}                     顶层
+//	流式:   data: {"type":"response.completed","response":{"usage":{...}}}  嵌在 response 里
+//
+// 实测 tokenmarket-codex(gpt-5.6-sol)流式末帧:
+//
+//	{"type":"response.completed","response":{...,"usage":{
+//	   "input_tokens":341797,"input_tokens_details":{"cached_tokens":331648},
+//	   "output_tokens":156,"output_tokens_details":{"reasoning_tokens":0},
+//	   "total_tokens":341953}}}
+//
+// 语义与 Chat Completions 一致(**不同于** Anthropic):
+//   - input_tokens 是完整输入,已含 cached_tokens(cached 是其子集)
+//   - 故 PromptTokens = input_tokens、CacheReadTokens = cached_tokens,
+//     与 parseOpenAIUsage 保持同一口径(total = input + output)
+//   - Responses 无 cache 创建概念 → CacheCreationTokens = 0
+//
+// 流早期的 response.created / response.in_progress 事件带的是 "usage":null,
+// 中间 delta 事件根本没有 usage → 两者都返回 nil,不会覆盖末帧的真实值。
+func parseResponsesUsage(body []byte) *provider.Usage {
+	type responsesUsage struct {
+		InputTokens       int `json:"input_tokens"`
+		OutputTokens      int `json:"output_tokens"`
+		TotalTokens       int `json:"total_tokens"`
+		InputTokensDetail *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"input_tokens_details"`
+		OutputTokensDetail *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"output_tokens_details"`
+	}
+	var resp struct {
+		Model    string          `json:"model"`
+		Usage    *responsesUsage `json:"usage"`
+		Response *struct {
+			Model string          `json:"model"`
+			Usage *responsesUsage `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil
+	}
+
+	// 取到哪个算哪个:顶层(非流式)优先,否则钻进 response(流式末帧)
+	u, model := resp.Usage, resp.Model
+	if u == nil && resp.Response != nil {
+		u, model = resp.Response.Usage, resp.Response.Model
+	}
+	// 关键守卫:usage 缺失 / null / 全零 一律返回 nil。
+	// 判 input+output 而不判 total —— total 是两套形状共用的字段名,
+	// 只判 total 会把 Chat Completions 的 body 认成 Responses(见 Parse 注释)。
+	if u == nil || (u.InputTokens == 0 && u.OutputTokens == 0) {
+		return nil
+	}
+
+	cachedTokens := 0
+	if u.InputTokensDetail != nil {
+		cachedTokens = u.InputTokensDetail.CachedTokens
+	}
+	reasoningTokens := 0
+	if u.OutputTokensDetail != nil {
+		reasoningTokens = u.OutputTokensDetail.ReasoningTokens
+	}
+
+	totalTokens := u.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = u.InputTokens + u.OutputTokens
+	}
+
+	return &provider.Usage{
+		Model: model, // P65: 上游响应的真实 model 名
+		// P-cache-dedup: input_tokens 是含缓存的完整输入,扣掉命中量才符合
+		// PromptTokens「不计 cache 的输入」契约(同 parseOpenAIUsage,理由见 uncachedInput)。
+		PromptTokens:     uncachedInput(u.InputTokens, cachedTokens),
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      totalTokens,
+		CacheReadTokens:  cachedTokens,
+		RawUsage: map[string]interface{}{
+			"input_tokens":     u.InputTokens,
+			"output_tokens":    u.OutputTokens,
+			"total_tokens":     totalTokens,
+			"cached_tokens":    cachedTokens,
+			"reasoning_tokens": reasoningTokens,
+		},
+	}
 }
 
 // injectStreamUsage 若请求 body 没有 stream_options,自动注入 include_usage=true
