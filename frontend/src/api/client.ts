@@ -185,7 +185,11 @@ export interface InflightResp {
 //   - 之前误用 AggregateRow 表达 total,本次拆分清楚
 export interface AggregateResult {
   total_requests: number
+  // P-token-split: total_input_tokens 是「**未缓存**输入」的总量,不是
+  // SUM(input_tokens) —— 后端按 tokensplit.go 的规则逐行归一后再 SUM
+  // (库里 input_tokens 口径漂移过三个时代,裸加没有意义)。
   total_input_tokens: number
+  total_cached_input_tokens: number
   total_output_tokens: number
   total_tokens: number
   total_cost: number
@@ -202,7 +206,9 @@ export interface AggregateResult {
 export interface AggregateRow {
   model_id: string
   total_requests: number
+  // P-token-split: 未缓存输入(口径同 AggregateResult.total_input_tokens)
   total_input_tokens: number
+  total_cached_input_tokens: number
   total_output_tokens: number
   total_tokens: number
   total_cost: number
@@ -222,7 +228,9 @@ export interface DashboardResp {
   by_billing_source: Array<{
     billing_source: string
     total_requests: number
+    // P-token-split: 未缓存输入(口径同 AggregateResult.total_input_tokens)
     total_input_tokens: number
+    total_cached_input_tokens: number
     total_output_tokens: number
     total_tokens: number
     total_cost: number

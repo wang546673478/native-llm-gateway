@@ -834,6 +834,7 @@ func (a *Admin) dashboard(c *gin.Context) {
 	for _, r := range rows {
 		total.TotalRequests += r.TotalRequests
 		total.TotalInput += r.TotalInput
+		total.TotalCachedInput += r.TotalCachedInput
 		total.TotalOutput += r.TotalOutput
 		total.TotalTokens += r.TotalTokens
 		total.TotalCost += r.TotalCost

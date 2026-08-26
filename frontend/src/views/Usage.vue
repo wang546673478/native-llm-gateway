@@ -73,6 +73,16 @@ function rowTps(row: any): string {
   return singleTps(tokens, row.latency_ms)
 }
 
+// P-token-split: 「缓存输入 / 未缓存输入」的拆分规则**不在前端**。
+//
+// 规则单源在后端 backend/internal/usage/tokensplit.go —— 因为聚合表的
+// SUM 必须在 SQL 里算,若前端再写一份 TS 实现,两份必然漂移(本项目历史上
+// 多次事故的同一根因)。所以后端明细行直接返回 cached_input_tokens /
+// uncached_input_tokens 两个算好的字段,前端只负责显示。
+//
+// 规则本身不平凡(库里 input_tokens 口径漂移过三个时代,不能直接读某一列),
+// 想了解为什么这么拆去看 tokensplit.go 的注释,不要在这里重新实现。
+
 // P66: 最近请求后端分页状态
 // 分页状态 + handlers 收敛到共享 usePagination(消除此前内联 reactive + 两份
 // onPageChange/onPageSizeChange;魔数 20/[20,50,100,200] 单源)。
@@ -128,8 +138,28 @@ const columns = [
   },
   { title: 'Model', key: 'model_id' },
   { title: '请求', key: 'total_requests' },
-  { title: 'Input', key: 'total_input_tokens' },
-  { title: 'Output', key: 'total_output_tokens' },
+  // P-token-split: 与下方明细表同口径的三列。
+  //
+  // 此前只有一个 Input 列,显示裸 SUM(input_tokens) —— 两个问题:
+  //   1. 该列口径混着三个时代(见后端 tokensplit.go),直接相加没有意义
+  //   2. 缓存量在聚合层完全不可见,而缓存输入往往是总量的大头
+  //      (实测 tokenmarket-codex 单条请求 44.9 万缓存 / 6.4 万未缓存)
+  // 现在两列都由后端按统一规则归一后 SUM,可与明细表逐行对账。
+  {
+    title: '缓存输入',
+    key: 'total_cached_input_tokens',
+    render: (row: AggregateRow) => fmtNum(row.total_cached_input_tokens),
+  },
+  {
+    title: '未缓存输入',
+    key: 'total_input_tokens',
+    render: (row: AggregateRow) => fmtNum(row.total_input_tokens),
+  },
+  {
+    title: 'Output',
+    key: 'total_output_tokens',
+    render: (row: AggregateRow) => fmtNum(row.total_output_tokens),
+  },
   { title: '总 Token', key: 'total_tokens' },
   { title: '错误', key: 'error_count' },
   {
@@ -157,14 +187,18 @@ const recordColumns = [
   { title: 'Protocol', key: 'protocol' },
   { title: '状态', key: 'status_code' },
   { title: '延迟(ms)', key: 'latency_ms' },
-  // P-token-split: 缓存输入 = total - input - output(MiniMax 语义 total 另计缓存,
-  // 精确;DeepSeek 命中已在 input 内 → 缓存列 0)。DB 未存 cache 拆分,这是精确可得的分解
+  // P-token-split: 两列直接读后端算好的字段(规则单源在 tokensplit.go)。
+  // 不要改回在前端读 input_tokens —— 那一列的口径混着三个时代。
   {
     title: '缓存输入',
-    key: 'cache_input_tokens',
-    render: (row: any) => fmtNum(Math.max(0, row.total_tokens - row.input_tokens - row.output_tokens)),
+    key: 'cached_input_tokens',
+    render: (row: any) => fmtNum(row.cached_input_tokens),
   },
-  { title: '未缓存输入', key: 'input_tokens', render: (row: any) => fmtNum(row.input_tokens) },
+  {
+    title: '未缓存输入',
+    key: 'uncached_input_tokens',
+    render: (row: any) => fmtNum(row.uncached_input_tokens),
+  },
   { title: '输出', key: 'output_tokens', render: (row: any) => fmtNum(row.output_tokens) },
   { title: 'TPS', key: 'tps', render: (row: any) => rowTps(row) },
   { title: '首字(ms)', key: 'ttft_ms', render: (row: any) => (row.ttft_ms > 0 ? row.ttft_ms : '—') },

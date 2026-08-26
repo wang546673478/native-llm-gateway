@@ -29,8 +29,22 @@ type Repository struct {
 // NewRepository 构造 Repository
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
-// Query 返回符合过滤条件的 usage 记录
-func (r *Repository) Query(ctx context.Context, f QueryFilter) ([]dbpkg.UsageRecord, error) {
+// RecordView 一条明细记录 + 按 P-token-split 规则拆好的输入侧两个数。
+//
+// 为什么后端算而不让前端算:同一条规则若在 SQL(聚合必需)和前端 TS(明细)
+// 各写一份,必然漂移 —— 本项目历史上多次事故都是这个根因。规则单源在
+// tokensplit.go,聚合与明细都从那里取,前端只负责显示。
+//
+// 用匿名嵌入而不是平铺所有字段:平铺意味着 UsageRecord 每加一列都要记得
+// 在这里补一遍,漏了就是静默丢字段。嵌入让新列自动可见。
+type RecordView struct {
+	dbpkg.UsageRecord
+	CachedInputTokens   int `json:"cached_input_tokens"`
+	UncachedInputTokens int `json:"uncached_input_tokens"`
+}
+
+// Query 返回符合过滤条件的 usage 记录(含拆好的输入侧两个数)
+func (r *Repository) Query(ctx context.Context, f QueryFilter) ([]RecordView, error) {
 	q := r.db.WithContext(ctx).Model(&dbpkg.UsageRecord{})
 	if !f.StartTime.IsZero() {
 		q = q.Where("created_at >= ?", f.StartTime)
@@ -55,8 +69,13 @@ func (r *Repository) Query(ctx context.Context, f QueryFilter) ([]dbpkg.UsageRec
 	}
 	q = q.Order("created_at DESC").Limit(f.Limit).Offset(f.Offset)
 
-	var out []dbpkg.UsageRecord
-	if err := q.Find(&out).Error; err != nil {
+	// P-token-split: 明细行也带上拆好的两个数,与聚合共用 tokensplit.go 的片段。
+	// 必须显式列出 * —— 只写计算列会让 GORM 丢掉本体字段。
+	var out []RecordView
+	if err := q.Select(`*,
+		` + SQLCachedInput + ` as cached_input_tokens,
+		` + SQLUncachedInput + ` as uncached_input_tokens
+	`).Scan(&out).Error; err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -93,20 +112,29 @@ func (r *Repository) Count(ctx context.Context, f QueryFilter) (int64, error) {
 
 // AggregateResult 聚合结果
 type AggregateResult struct {
-	TotalRequests int64   `json:"total_requests"`
-	TotalInput    int64   `json:"total_input_tokens"`
-	TotalOutput   int64   `json:"total_output_tokens"`
-	TotalTokens   int64   `json:"total_tokens"`
-	TotalCost     float64 `json:"total_cost"`
-	AvgLatencyMs  float64 `json:"avg_latency_ms"`
+	TotalRequests int64 `json:"total_requests"`
+	// TotalInput P-token-split: 「**未缓存**输入」的总量,不是 SUM(input_tokens)。
+	//
+	// 裸 SUM(input_tokens) 在混口径的库上没有意义 —— 该列含义漂移过三次
+	// (见 tokensplit.go),同一个 SUM 会把「含缓存的输入」和「已扣缓存的输入」
+	// 加到一起。故这里按 SQLUncachedInput 逐行归一后再 SUM,
+	// 与明细页「未缓存输入」列同一口径、可直接对账。
+	TotalInput int64 `json:"total_input_tokens"`
+	// TotalCachedInput 「缓存输入」总量。此前聚合层完全没有这个数,
+	// 缓存量在按 model / 按 billing_source 两张聚合表里都不可见。
+	TotalCachedInput int64   `json:"total_cached_input_tokens"`
+	TotalOutput      int64   `json:"total_output_tokens"`
+	TotalTokens      int64   `json:"total_tokens"`
+	TotalCost        float64 `json:"total_cost"`
+	AvgLatencyMs     float64 `json:"avg_latency_ms"`
 	// TotalLatencyMs 时间窗内总耗时(SUM(latency_ms)),给前端算聚合 TPS 用。
 	// 注意:TPS 聚合必须是「总 token ÷ 总耗时」,不能对每条 TPS 求平均 ——
 	// 每条 avg 会因 token 大小差异失真。故这里单独累加出一个总耗时字段。
 	TotalLatencyMs int64 `json:"total_latency_ms"`
 	// AvgTtftMs 平均首字时间:只对 is_stream=true 且 ttft>0 的记录求平均,
 	// 非流式 ttft=0 不参与,避免被 0 稀释。
-	AvgTtftMs   float64 `json:"avg_ttft_ms"`
-	ErrorCount  int64   `json:"error_count"`
+	AvgTtftMs  float64 `json:"avg_ttft_ms"`
+	ErrorCount int64   `json:"error_count"`
 }
 
 // Aggregate 按 Model 聚合(P65:去掉 provider 维度,只按 model_id)
@@ -117,6 +145,7 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 		ModelID      string
 		Count        int64
 		InputTokens  int64
+		CachedTokens int64
 		OutputTokens int64
 		TotalTokens  int64
 		Cost         float64
@@ -138,10 +167,13 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 	}
 
 	var rows []row
+	// P-token-split: input 侧按 tokensplit.go 的规则逐行归一后再 SUM。
+	// 不能裸 SUM(input_tokens) —— 该列口径混着三个时代。
 	err := q.Select(`
 		model_id,
 		COUNT(*) as count,
-		COALESCE(SUM(input_tokens),0) as input_tokens,
+		COALESCE(SUM(` + SQLUncachedInput + `),0) as input_tokens,
+		COALESCE(SUM(` + SQLCachedInput + `),0) as cached_tokens,
 		COALESCE(SUM(output_tokens),0) as output_tokens,
 		COALESCE(SUM(total_tokens),0) as total_tokens,
 		COALESCE(SUM(cost),0) as cost,
@@ -159,15 +191,16 @@ func (r *Repository) Aggregate(ctx context.Context, f QueryFilter) ([]AggregateR
 		out[i] = AggregateRow{
 			ModelID: r.ModelID,
 			AggregateResult: AggregateResult{
-				TotalRequests:  r.Count,
-				TotalInput:     r.InputTokens,
-				TotalOutput:    r.OutputTokens,
-				TotalTokens:    r.TotalTokens,
-				TotalCost:      r.Cost,
-				AvgLatencyMs:   r.AvgLatency,
-				TotalLatencyMs: r.TotalLatency,
-				AvgTtftMs:      r.AvgTtft,
-				ErrorCount:     r.ErrorCount,
+				TotalRequests:    r.Count,
+				TotalInput:       r.InputTokens,
+				TotalCachedInput: r.CachedTokens,
+				TotalOutput:      r.OutputTokens,
+				TotalTokens:      r.TotalTokens,
+				TotalCost:        r.Cost,
+				AvgLatencyMs:     r.AvgLatency,
+				TotalLatencyMs:   r.TotalLatency,
+				AvgTtftMs:        r.AvgTtft,
+				ErrorCount:       r.ErrorCount,
 			},
 		}
 	}
@@ -226,6 +259,7 @@ func (r *Repository) AggregateByBillingSource(ctx context.Context, f QueryFilter
 		BillingSource string
 		Count         int64
 		InputTokens   int64
+		CachedTokens  int64
 		OutputTokens  int64
 		TotalTokens   int64
 		Cost          float64
@@ -247,10 +281,13 @@ func (r *Repository) AggregateByBillingSource(ctx context.Context, f QueryFilter
 	}
 
 	var rows []row
+	// P-token-split: 与 Aggregate 同一片段(单源在 tokensplit.go),口径必须一致 ——
+	// 两张聚合表在 dashboard 上并列,一边归一一边不归一会对不上账。
 	err := q.Select(`
 		billing_source,
 		COUNT(*) as count,
-		COALESCE(SUM(input_tokens),0) as input_tokens,
+		COALESCE(SUM(` + SQLUncachedInput + `),0) as input_tokens,
+		COALESCE(SUM(` + SQLCachedInput + `),0) as cached_tokens,
 		COALESCE(SUM(output_tokens),0) as output_tokens,
 		COALESCE(SUM(total_tokens),0) as total_tokens,
 		COALESCE(SUM(cost),0) as cost,
@@ -268,15 +305,16 @@ func (r *Repository) AggregateByBillingSource(ctx context.Context, f QueryFilter
 		out[i] = BillingSourceRow{
 			BillingSource: r.BillingSource,
 			AggregateResult: AggregateResult{
-				TotalRequests:  r.Count,
-				TotalInput:     r.InputTokens,
-				TotalOutput:    r.OutputTokens,
-				TotalTokens:    r.TotalTokens,
-				TotalCost:      r.Cost,
-				AvgLatencyMs:   r.AvgLatency,
-				TotalLatencyMs: r.TotalLatency,
-				AvgTtftMs:      r.AvgTtft,
-				ErrorCount:     r.ErrorCount,
+				TotalRequests:    r.Count,
+				TotalInput:       r.InputTokens,
+				TotalCachedInput: r.CachedTokens,
+				TotalOutput:      r.OutputTokens,
+				TotalTokens:      r.TotalTokens,
+				TotalCost:        r.Cost,
+				AvgLatencyMs:     r.AvgLatency,
+				TotalLatencyMs:   r.TotalLatency,
+				AvgTtftMs:        r.AvgTtft,
+				ErrorCount:       r.ErrorCount,
 			},
 		}
 	}
