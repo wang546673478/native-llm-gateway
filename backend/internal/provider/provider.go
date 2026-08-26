@@ -72,6 +72,141 @@ func ParseMiniMaxBaseResp(body []byte) (int, string) {
 	return parsed.BaseResp.StatusCode, parsed.BaseResp.StatusMsg
 }
 
+// ── HTTP 200 之后藏在 SSE 事件里的上游错误(P-sse-stream-error)─────────────
+//
+// 上游可以先回 200 + text/event-stream 头,再在流里发一个错误事件然后收流。
+// 只看状态码的分类器(ClassifyErrorWithBody)看到的是 200,整条请求被记成成功:
+// 不冷却 key、不 failover,客户端只看到"流没跑完"。实测两种形状:
+//
+//	tokenmarket-codex(OpenAI Responses):
+//	  data: {"type":"response.failed","response":{"status":"failed",
+//	         "error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded..."}}}
+//	minimax(Anthropic 面,流中途内容审核):
+//	  data: {"type":"error","error":{"type":"api_error","message":"output new_sensitive (1027)"}}
+//
+// 判定只认**结构**(存在 error 对象 / response.status=="failed"),不做关键词嗅探 —
+// 正文里出现 "error" 字样的正常回答不会命中(那是字符串值,不是顶层 error 键)。
+
+// SSEStreamError 是从 SSE 事件里解析出的上游错误。
+type SSEStreamError struct {
+	EventType string // 事件 type,如 response.failed / error(可为空)
+	Code      string // 上游错误码,如 rate_limit_exceeded(可为空)
+	Message   string // 上游错误描述(可为空)
+}
+
+// sseErrorDetail 是 error 对象的公共形状(顶层与 response 内层同构)
+type sseErrorDetail struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (d *sseErrorDetail) present() bool {
+	return d != nil && (d.Code != "" || d.Message != "" || d.Type != "")
+}
+
+// MayContainSSEError 是 ParseSSEStreamError 的廉价前置筛(纯字节包含,不解析 JSON)。
+// 给每 chunk 都要过的流式热路径用:绝大多数正常 chunk 在这里就被挡掉,不进 JSON 解析。
+//
+// ⚠ 不变式:本函数必须是 ParseSSEStreamError 能命中集合的**超集** —— 返回 false
+// 就等于宣布"这段不可能有错误",解析器再也没机会看。给解析器加新错误形状时,
+// 必须同步确认这里的关键词能覆盖(所以两个函数刻意贴在一起,别拆开)。
+// 有守卫测试从解析器的正样本反向校验这条不变式。
+func MayContainSSEError(fragment []byte) bool {
+	// "error" 覆盖顶层/内层 error 对象;"failed" 覆盖只给 status=failed 不给
+	// error 细节的形状(那种片段里一个 error 字样都没有)。
+	return bytes.Contains(fragment, []byte(`"error"`)) || bytes.Contains(fragment, []byte(`failed`))
+}
+
+// ParseSSEStreamError 从 SSE 片段(可含多行 data: 帧,也可是裸 JSON)里找明确的
+// 上游错误事件。找到返回非 nil;没有错误事件返回 nil。
+//
+// 与 ParseMiniMaxStreamBaseResp 同构:两者都是"HTTP 200 但 body 里是错误"的
+// 识别器,只是错误形状不同(base_resp vs SSE error 事件)。
+func ParseSSEStreamError(fragment []byte) *SSEStreamError {
+	if e := parseSSEErrorEvent(fragment); e != nil {
+		return e
+	}
+	for _, line := range bytes.Split(fragment, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		if e := parseSSEErrorEvent(bytes.TrimSpace(line[5:])); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// parseSSEErrorEvent 解析单个事件 JSON。非错误事件(含解析失败)返回 nil。
+func parseSSEErrorEvent(payload []byte) *SSEStreamError {
+	var ev struct {
+		Type     string          `json:"type"`
+		Error    *sseErrorDetail `json:"error"`
+		Response *struct {
+			Status string          `json:"status"`
+			Error  *sseErrorDetail `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		return nil
+	}
+
+	// 顶层 error 对象(Anthropic error 事件 / 通用形状)
+	if ev.Error.present() {
+		return &SSEStreamError{EventType: ev.Type, Code: firstNonEmpty(ev.Error.Code, ev.Error.Type), Message: ev.Error.Message}
+	}
+	if ev.Response == nil {
+		return nil
+	}
+	// response 内层 error 对象(OpenAI Responses response.failed)
+	if ev.Response.Error.present() {
+		return &SSEStreamError{
+			EventType: ev.Type,
+			Code:      firstNonEmpty(ev.Response.Error.Code, ev.Response.Error.Type),
+			Message:   ev.Response.Error.Message,
+		}
+	}
+	// 只说 failed 没给细节 — 仍然是失败,不能当成功
+	if ev.Response.Status == "failed" {
+		return &SSEStreamError{EventType: ev.Type, Message: "upstream reported response status=failed"}
+	}
+	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// ClassifySSEStreamError 把流内错误映射成 ErrorType。
+//
+// 只有真额度耗尽(复用 LooksLikeQuotaError 的强配额词表)才升级 quota_exceeded;
+// 其余一律 server_error。
+//
+// ⚠ 刻意**不**映射到 ErrorTypeRateLimit,哪怕上游 code 就叫 rate_limit_exceeded:
+// rate_limit 会走 retrySameKeyRateLimit —— 同一把 key 无延迟重试 10 次。那个策略
+// 隐含假设"429 很便宜"(上游几百毫秒就拒),但流内错误是上游先收下请求、挂住
+// ~32s 才失败,10 次 ≈ 320s,比不识别更难受,客户端早超时了。
+// server_error 落 isNetworkClass → 立刻 swapToOtherKey 换 key 重试一次,并计入
+// per-key 熔断(5 次 OPEN 60s,HALF_OPEN 自动恢复)。
+// 语义上也站得住:上游回了 200 却没能产出内容,对网关就是一次上游故障 —
+// 行为正常的上游会在开流**之前**用 429 表达并发限制。
+func ClassifySSEStreamError(e *SSEStreamError) ErrorType {
+	if e == nil {
+		return ""
+	}
+	if LooksLikeQuotaError([]byte(e.Code + " " + e.Message)) {
+		return ErrorTypeQuotaExceeded
+	}
+	return ErrorTypeServerError
+}
+
 // ParseProtocol 解析协议字符串,失败返回 error
 func ParseProtocol(s string) (Protocol, error) {
 	switch s {

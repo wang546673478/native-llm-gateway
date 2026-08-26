@@ -628,6 +628,23 @@ func (e *Engine) doStream(
 		if len(chunk.Data) == 0 {
 			continue
 		}
+		// P-sse-stream-error: 流**中途**的上游错误事件(Provider 的 peek 窗口只覆盖
+		// 流头,窗口之外由这里兜底 — 实测 minimax 在第 42 个事件才发内容审核错误)。
+		// HTTP 头已发出、状态码锁死 200,failover 来不及,但 access log 不能记成 ok。
+		// 刻意**不**动 key 状态:流已正常开跑(Provider 早已 ReportSuccess),
+		// 中途错误多是内容级(审核/敏感词),不是这把 key 的问题,冷却它是误杀。
+		// 先做廉价字节预筛再解析 — 这是每 chunk 都过的热路径,不能无条件 JSON 解析。
+		// 预筛与解析器同住 provider 包(超集不变式由那边的守卫测试锁),proxy 不自己
+		// 拼关键词 —— 否则解析器加新形状时这里会静默漏判。
+		if entry != nil && entry.ErrorType == "" && provider.MayContainSSEError(chunk.Data) {
+			if se := provider.ParseSSEStreamError(chunk.Data); se != nil {
+				entry.ErrorType = "upstream_stream_error"
+				e.logger.Warn("upstream error event mid-stream",
+					zap.String("provider", result.ProviderName),
+					zap.String("code", se.Code),
+					zap.String("message", se.Message))
+			}
+		}
 		// TTFT:第一个有效数据 chunk 到达时记录首字时间(整个流只记录一次)。
 		if ttftMs == 0 {
 			ttftMs = time.Since(streamStart).Milliseconds()

@@ -71,6 +71,9 @@
 | Provider 绑定留到 proxy 层否决 | 下沉路由层过滤(否则白 acquire key 推歪 sticky,#30) |
 | 改完 DB 接口不补 test fake | fake 缺方法 = 整包 build failed(`make test` 必跑) |
 | 排障 `fmt.Printf("DEBUG:...")` 留在代码里 | 提交前清干净或改 logger.Debug |
+| 失败判定只看状态码 | 200 也可能是错误(流内错误事件 / base_resp,#31) |
+| 加 error_type 新值只改写入方 | 同步三处:写入 + admin 白名单 + 前端过滤项 |
+| 热路径预筛比解析器窄 | 预筛必须是解析器命中集的**超集**(否则静默漏判,#31) |
 
 ---
 
@@ -126,7 +129,7 @@ docs/
 ├── config-reference.md        ← config.yaml 完整字段
 ├── frontend.md                ← 前端管理 UI
 ├── operations.md              ← 部署 / 脚本 / 监控
-├── 踩坑与排错.md               ← 30 个实战坑(2026-08-25 补 #29/#30)
+├── 踩坑与排错.md               ← 31 个实战坑(2026-08-26 补 #31:流内上游错误)
 └── provider厂商定制包指南.md     ← 新增厂商 6 步实操
 ```
 
@@ -226,6 +229,7 @@ sudo systemctl start llm-gateway # systemd 托管
 | 模型进 DB + 排障实录(十九轮,2026-08-20) | provider_models 成模型/定价唯一真相源(上游同步 + 手工定价 + 模型管理页) / 下线 gemini/qwen/glm 三厂商(历史用量 glm 53、qwen/gemini 0) / 排障 8 连修:ListModels 硬编码 /v1/models 路径、mimo openai 面双 /v1(ChatPath 默认撞上已含 /v1 的 endpoint,该面 0 条成功记录)、默认模型字典序(MiniMax-M3 会掉到 M2 → sort_order 保上游顺序)、跨命名空间外键(Provider.Models 关联 → AutoMigrate 建 vendor FK → 启动崩溃循环)、按面计费源取 key(tp- key 发 api 端点必 401)、前端 dist 未重建、AutoMigrate 只加不删留下 NOT NULL 死列 | 网关从「全部 503」恢复至三厂商(deepseek/minimax/mimo)正常路由,默认模型与改动前逐家一致;守卫测试 ×5 防回潮(503e614+2792a5a+25c9e0f+6984bf4+96ae49a) |
 | 模型归属下沉到协议面(二十轮,2026-08-21) | 新表 `provider_model_faces`(`(face, model_id)` 唯一)把模型归属从 vendor 下沉到注册面 —— 中转站厂商(rightapi 三个后缀端点、模型互不相通)不再让 codex/grok 面拿到 claude 模型发给自己端点(404 model not found,两面 0 条成功记录);`provider_models` 保持不动继续当定价唯一真相源(不加 face 列:deepseek 双面共享模型,加列会重复行、同一模型填两次价);核心不变式 = **该面**无归属行时回退 vendor 级全量(覆盖「未同步过」与「anthropic 面无模型端点」两种正当情形,按 vendor 判定会让 deepseek-anthropic 失去全部候选);同步只有成功的面才整体替换归属(失败面不动,防抖动清空);模型管理页面 tab + ⚠无归属标记 + 「清理无归属」(prune 对无归属数据的 vendor 整体跳过,防 `NOT IN (空集)` 删光) | rightapi 三面首次全部跑通(grok-4.5 / gpt-5.4 / claude-opus-5 各 200);deepseek/minimax/mimo 行为不变;守卫测试 ×8 防回潮(踩坑 #25) |
 | 中转站直通模式 + Provider 绑定下沉(二十一轮,2026-08-25) | 新表 `relay_stations`:中转站从 DB 动态注册(name/base_url/protocol_mode/primary_protocol/keys),热重载允许 Registry 覆盖注册;`relay.LoadFromDatabase` 启动时加载启用中转站;多协议模式按后缀拆分注册面(如 rightapi-openai / rightapi-anthropic);前端 RelayStations 页 CRUD + 热重载按钮。**中转站直通模式**(P-relay-passthrough):Gateway Key 绑定的 Providers **全是**中转站 → 路由跳过白名单选择,proxy 跳过白名单校验,直接透传客户端模型名;混合绑定(中转站+普通厂商) → 中转站也参与普通路由,使用 default_model;`isRelayPassthrough` 两维度判定(Providers 字段 / ProviderKeyIDs 反查)。**Provider 绑定下沉路由层**(P19):Router.routeCatchAllAuto 在候选收集时就过滤 `WithAllowedProviders`,不允许的 provider 不 acquire key(防止 sticky 指针被推进 / metrics 污染 / Inflight 闪现);白名单(AllowedModels)仍在 proxy 层逐候选校验(需 req.Model / result.ModelID 双路 fallback)。test fake 补 `AddFaceModels` / `CountVendorModels`;删 loader/anthropic/openai/proxy 的 DEBUG 打印;handler listProviderModels Manager=nil 时不过滤(降级保险);anthropic test 改 TestListModels_NoPool | 全测试通过;中转站按需透传/路由两用;Provider 绑定过滤位置正确(路由层);守卫测试 ×2(fake 完整性);踩坑 #29(直通语义) / #30(过滤位置) |
+| 流内上游错误识别 + failover(二十二轮,2026-08-26) | **HTTP 200 之后在流里发错误事件** → 此前记成 `200/ok`:不冷却 key、不喂熔断、**不换 key**(实测 `tokenmarket-codex` 整条流只有一个 `response.failed` + `rate_limit_exceeded`,262 字节、挂住 ~32s;用户侧 `stream disconnected before completion`)。根因:失败判定只看状态码,`doStream` 在读第一个 chunk **之前**就 `reportKeySuccess` + 写 200 头,循环里只看 `chunk.Err` 从不看 `chunk.Data`。修复沿用**已有范式**(两个 Base 早就在 `ReportSuccess` 前 peek 流头 2 行跑 `ParseMiniMaxStreamBaseResp`),在同一位置加 SSE 错误判定 → 客户端零字节收到,failover 仍可行:①openai Base ②anthropic Base(对称)③proxy chunk 循环兜底 peek 窗口外的中途错误(**只标 error_type 不动 key**:流已正常开跑,实测中途错误是内容审核 `output new_sensitive (1027)`,冷却是误杀)。分类**刻意不用** `ErrorTypeRateLimit`(那走 `retrySameKeyRateLimit` 同 key 无延迟 10 次,而每次挂 ~32s ≈ 320s,比不识别更糟)→ 用 `ErrorTypeServerError` 落 `isNetworkClass` 立刻 `swapToOtherKey` + 喂 per-key 熔断。判定**认结构不认关键词**(顶层/`response` 内层 `error` 对象、`status=="failed"`),正文含 "error" 字样的正常回答放过。新 `upstream_stream_error` 同步三处(写入 + `validStatusTokens` + AccessLogs.vue)。覆盖面:12 个 `SendStreamRequest` 全部是这两个 Base 或委托它们(中转站内嵌 `*openai_compatible.Base` 未覆写 → codex 面自动覆盖) | 语料回放 24605 条真实 body 跑真分类器:16 流头命中 + 1 中途命中、**0 误判**、预筛拒绝 93.9%;两个负向验证都红在准确断言上(去 openai 修复 → "却返回成功 — failover 不会启动";去 proxy 兜底 → `error_type = "", want upstream_stream_error`)且配套正常流测试保持绿;守卫测试 11 函数 / 27 用例,含**预筛超集不变式**(首版预筛只查 `"error"` 漏掉只给 `status=failed` 的形状 → 反向从解析器正样本校验,不手抄第二份清单)+ 分类决策锁死(防改回 rate_limit);线上 3 条真实请求 200/9KB 零误判,但上游当时 `limit_reached:false` **未复现并发限制** → failover 未在线上实录(踩坑 #31) |
 
 **单点修复:**
 

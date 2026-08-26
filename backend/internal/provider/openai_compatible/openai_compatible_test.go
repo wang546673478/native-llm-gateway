@@ -583,6 +583,97 @@ func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
 	}
 }
 
+// TestSendStreamRequest_SSEStreamErrorFailsFast 证明**接线**生效,不只是分类器认得。
+//
+// 上游行为抄自生产实测(2026-08-26,tokenmarket-codex):HTTP 200 +
+// text/event-stream 头,然后整条流只有一个 response.failed 事件就收流。
+// 此前网关把它当成功流透传 → access log 记 200/ok、key 不冷却、不 failover,
+// 客户端只看到"流没跑完"。
+//
+// 断言链对应 failover 的三个必要条件:
+//  1. 返 *ProviderError(非 nil)—— attemptOne 靠 ok=false 才进 failover
+//  2. 一个 chunk 都没转发 —— 客户端零字节,换 key 重发才是干净的
+//  3. 不是 rate_limit —— 否则走同 key 重试 10 次(实测每次 ~32s)
+func TestSendStreamRequest_SSEStreamErrorFailsFast(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded for account, please retry later"}}}` + "\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","stream":true}`),
+	})
+	if err == nil {
+		t.Fatal("上游流里发了 response.failed 却返回成功 — failover 不会启动")
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeServerError {
+		t.Errorf("error type = %q, want server_error", pe.ErrorType)
+	}
+	if pe.ErrorType == provider.ErrorTypeRateLimit {
+		t.Error("不能是 rate_limit:会触发同 key 重试 10 次 × ~32s")
+	}
+	if resp != nil {
+		t.Errorf("resp 应为 nil,got %+v", resp)
+	}
+	if ch != nil {
+		if c := <-ch; c != nil {
+			t.Errorf("不该转发任何 chunk(客户端必须零字节): %+v", c)
+		}
+	}
+	// key 记了错误(喂 per-key 熔断),但不该被误升级成额度耗尽
+	if got := pool.Status().QuotaExceededKeys; got != 0 {
+		t.Errorf("并发限制被误判成额度耗尽,QE keys = %d, want 0", got)
+	}
+}
+
+// TestSendStreamRequest_NormalStreamUnaffected 回归防线:新增的流头检查
+// 不能把正常流拦下来。事件里带 error:null(OpenAI Responses 的常态)也必须放过。
+func TestSendStreamRequest_NormalStreamUnaffected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","error":null}}` + "\n\n"))
+		w.Write([]byte(`data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t, "sk-test")
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, _, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","stream":true}`),
+	})
+	if err != nil {
+		t.Fatalf("正常流被误拦: %v", err)
+	}
+	var got int
+	for c := range ch {
+		if c.Err != nil {
+			break
+		}
+		if len(c.Data) > 0 {
+			got++
+		}
+	}
+	if got < 3 {
+		t.Errorf("转发了 %d 个 chunk,期望 3(created/delta/DONE)", got)
+	}
+}
+
 func TestListModels(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {

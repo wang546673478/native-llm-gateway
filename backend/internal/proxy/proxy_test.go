@@ -429,6 +429,104 @@ func TestProxy_Stream_MidError_NotMaskedAsOK(t *testing.T) {
 	}
 }
 
+// TestProxy_Stream_UpstreamErrorEventMidStream_NotMaskedAsOK 流**中途**的上游
+// 错误事件不许记成 ok(P-sse-stream-error 的 proxy 兜底)。
+//
+// Provider 层的 peek 窗口只覆盖流头;错误在窗口之外时(实测 minimax 在第 42 个
+// 事件才发内容审核错误)HTTP 头早已发出、状态码锁死 200,failover 来不及,
+// 但 access log / usage 不能伪装成成功 —— 否则这类失败在报表里完全不可见。
+//
+// 与上面 MidError 测试的区别:那个是**传输**断了(chunk.Err),这个是传输正常、
+// 上游在 SSE 事件里**自己说**失败了 —— 老代码只看 chunk.Err,对后者完全无感。
+func TestProxy_Stream_UpstreamErrorEventMidStream_NotMaskedAsOK(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"choices":[{"delta":{"content":"Hello"}}]}` + "\n\n"),
+		// 上游自报失败(形状抄自生产 minimax anthropic 面的内容审核错误)
+		[]byte(`data: {"type":"error","error":{"type":"api_error","message":"output new_sensitive (1027)"}}` + "\n\n"),
+	}
+	p := &fakeProvider{
+		name: "fake", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		streamChunks: chunks,
+	}
+	e, rec := buildEngine(t, p, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "fake", Model: "m", Priority: 1},
+		}},
+	})
+	r := gin.New()
+	r.POST("/v1/chat/completions", e.HandleStreamRequest)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"x","stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// 1. 状态码仍是 200(头已发出,改不了)
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (headers already committed)", w.Code)
+	}
+	// 2. 两个 chunk 都照原样转给客户端 —— 刻意不拦:头已发出,截断反而让客户端
+	//    看不到上游给的失败原因
+	body := w.Body.String()
+	if !strings.Contains(body, "Hello") {
+		t.Errorf("正常 chunk 丢了: %s", body)
+	}
+	if !strings.Contains(body, "new_sensitive") {
+		t.Errorf("上游错误事件没转给客户端: %s", body)
+	}
+	// 3. 不 failover(头已发出)
+	p.mu.Lock()
+	calls := p.callCount
+	p.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider called %d times, want 1 (no failover after stream starts)", calls)
+	}
+	// 4. 关键:必须标 error_type,不能伪装成 ok
+	recs := rec.snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("usage records = %d, want 1", len(recs))
+	}
+	if recs[0].ErrorType != "upstream_stream_error" {
+		t.Errorf("usage error_type = %q, want %q — 上游自报失败被记成成功了",
+			recs[0].ErrorType, "upstream_stream_error")
+	}
+}
+
+// TestProxy_Stream_NormalStream_StaysOK 回归防线:流中途检查不能把正常流
+// 标成错误。正文里出现 error 字样(命中廉价预筛)也必须保持 ok —— 只有结构上
+// 真是错误事件才算。
+func TestProxy_Stream_NormalStream_StaysOK(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"choices":[{"delta":{"content":"how to handle an error"}}]}` + "\n\n"),
+		[]byte(`data: {"choices":[{"delta":{"content":"log the error details"}}]}` + "\n\n"),
+		[]byte("data: [DONE]\n\n"),
+	}
+	p := &fakeProvider{
+		name: "fake", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		streamChunks: chunks,
+	}
+	e, rec := buildEngine(t, p, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "fake", Model: "m", Priority: 1},
+		}},
+	})
+	r := gin.New()
+	r.POST("/v1/chat/completions", e.HandleStreamRequest)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"x","stream":true}`))
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	recs := rec.snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("usage records = %d, want 1", len(recs))
+	}
+	if recs[0].ErrorType != "" {
+		t.Errorf("正常流被标成 %q — 正文里的 error 字样不该命中", recs[0].ErrorType)
+	}
+}
+
 func TestExtractModelAndStream(t *testing.T) {
 	tests := []struct {
 		name       string

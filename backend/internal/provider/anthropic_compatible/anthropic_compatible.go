@@ -347,6 +347,16 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
 				fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
 		}
+		// P-sse-stream-error: 上游 200 之后在流里发错误事件然后收流。
+		// 与上面 base_resp 同一范式:错误落在 peek 窗口内 → 客户端还没收到任何字节,
+		// 直接失败让 failover 换 key 重试;错误在窗口之外(流中途)由 proxy 兜底标记。
+		if se := provider.ParseSSEStreamError(peeked); se != nil {
+			httpResp.Body.Close()
+			errType := provider.ClassifySSEStreamError(se)
+			b.cfg.Pool.ReportError(key, string(errType))
+			return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+				fmt.Sprintf("upstream stream error %s: %s", se.Code, se.Message), peeked)
+		}
 		// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
 		streamReader := io.MultiReader(bytes.NewReader(peeked), reader)
 

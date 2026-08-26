@@ -974,6 +974,7 @@ var validStatusTokens = map[string]bool{
 	"invalid_request":       true, // proxy.classifyError 回这个(clients request 400)
 	"stream_interrupted":    true, // proxy stream mid-error(上游断流),前端过滤 UI 有
 	"client_disconnected":   true,
+	"upstream_stream_error": true, // P-sse-stream-error: 200 之后流里发错误事件,前端过滤 UI 有
 	"unknown":               true,
 }
 

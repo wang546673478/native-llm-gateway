@@ -260,6 +260,7 @@ const statusOptions = [
   { label: '超时', value: 'timeout' },
   { label: '流中断', value: 'stream_interrupted' },
   { label: '客户端断开', value: 'client_disconnected' },
+  { label: '流内上游错误', value: 'upstream_stream_error' },
   { label: '未知错误', value: 'unknown' },
 ]
 

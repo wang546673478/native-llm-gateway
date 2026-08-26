@@ -190,6 +190,87 @@ func TestSendStreamRequest_MiniMaxBaseRespQuota(t *testing.T) {
 	}
 }
 
+// TestSendStreamRequest_SSEStreamErrorFailsFast anthropic 面的流头错误检查。
+//
+// 与 openai 面同构(P-sse-stream-error):上游 200 + text/event-stream,
+// 然后在流里发 error 事件。错误落在 peek 窗口内 → 客户端零字节,failover 来得及。
+// 事件形状抄自生产实测(minimax anthropic 面的内容审核错误),只是这里放在流头。
+func TestSendStreamRequest_SSEStreamErrorFailsFast(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"output new_sensitive (1027)\"}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[],"stream":true}`),
+	})
+	if err == nil {
+		t.Fatal("上游流里发了 error 事件却返回成功 — failover 不会启动")
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeServerError {
+		t.Errorf("error type = %q, want server_error", pe.ErrorType)
+	}
+	if resp != nil {
+		t.Errorf("resp 应为 nil,got %+v", resp)
+	}
+	if ch != nil {
+		if c := <-ch; c != nil {
+			t.Errorf("不该转发任何 chunk(客户端必须零字节): %+v", c)
+		}
+	}
+	// 内容级错误不是额度耗尽,不能误升级
+	if got := pool.Status().QuotaExceededKeys; got != 0 {
+		t.Errorf("内容审核错误被误判成额度耗尽,QE keys = %d, want 0", got)
+	}
+}
+
+// TestSendStreamRequest_NormalStreamUnaffected 回归防线:流头检查不能拦正常流。
+func TestSendStreamRequest_NormalStreamUnaffected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":5}}}\n\n"))
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"))
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, _, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[],"stream":true}`),
+	})
+	if err != nil {
+		t.Fatalf("正常流被误拦: %v", err)
+	}
+	var got int
+	for c := range ch {
+		if c.Err != nil {
+			break
+		}
+		if len(c.Data) > 0 {
+			got++
+		}
+	}
+	if got == 0 {
+		t.Error("正常流一个 chunk 都没转发")
+	}
+}
+
 // TestSendRequest_ForceThinkingDisabled P-deepseek-thinking: deepseek-anthropic 开启
 // force_thinking_disabled 时,上行 body 的 thinking 字段必须被重写成 disabled —
 // DeepSeek /anthropic 在 thinking 模式下校验历史 assistant 消息必须回带 thinking 块
