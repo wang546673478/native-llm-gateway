@@ -752,21 +752,41 @@ func (s *Server) Run(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		s.logger.Info("shutdown signal received")
-		s.usageC.Stop() // flush 剩余记录
 		// P-quota-worker: 停止 quota restore / 轮询 worker(否则热重载重启的
-		// goroutine 不受控地泄漏,跨进程完全退出)
+		// goroutine 不受控地泄漏,跨进程完全退出)。
+		// 放在排空之前:它是后台生产者,不是请求路径的下游消费者,提前停掉
+		// 只是少发几轮探测,不会影响在飞请求的落库。
 		if s.quotaM != nil {
 			s.quotaM.Stop()
 		}
+
+		// 顺序要紧(2026-08-26 修 panic + 静默丢数据):
+		// 先排空 HTTP,**再**停 usage / accesslog 这两个下游消费者。
+		// 原先两者都在 shutdown() 之前关,于是排空窗口里完成的请求:
+		//   - accesslog 往已关的 channel 发 → panic(gin Recovery 兜住,但该请求返 500)
+		//   - usage 往已停的 collector 发 → 静默丢用量
+		// 也就是说关停瞬间在飞的请求既拿不到正确响应也不留账。
+		shutdownErr := s.shutdown()
+
+		s.usageC.Stop() // flush 剩余记录
 		if s.accessR != nil {
 			_ = s.accessR.Close() // flush buffer + stop retention
 		}
-		shutdownErr := s.shutdown()
 		// P-state-persist: 排空完成(在飞请求全部结束)后写快照 — 状态最准。
 		// reload(SIGTERM)不丢 QE/COOLING/余额,重启后无需 poll 重新确认 2 轮
 		s.saveKeyStateSnapshot()
 		return shutdownErr
 	case err := <-errCh:
+		// ListenAndServe 意外退出(端口被占等)。这条分支也要收尾:
+		// accesslog worker 现在只由 Close() 终止(不再听 ctx.Done()),
+		// 直接 return 会把它连同已接收未落库的条目一起留在原地。
+		if s.quotaM != nil {
+			s.quotaM.Stop()
+		}
+		s.usageC.Stop()
+		if s.accessR != nil {
+			_ = s.accessR.Close()
+		}
 		if err != nil {
 			return fmt.Errorf("http server error: %w", err)
 		}

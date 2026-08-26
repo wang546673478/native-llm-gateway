@@ -82,9 +82,9 @@ func (r *Recorder) Start(ctx context.Context) {
 //   - r.buf.Close() flush 残余 + 退出 buffer worker
 //   - r.reten.Close() cancel retention ctx 并等待其 goroutine 退出
 //
-// 注意:Close 不可并发调用。Buffer.Close() 内部 Get/Set 是 mutex 保护的,
-// 但不是原子的;两次并发 Close 可能都越过 guard 然后对同一 channel close(b.ch)
-// 触发 panic。Task 4 review 已明确记录这一点。
+// 2026-08-26:Close 现在可并发、可重入调用。Buffer.Close() 改用 sync.Once
+// 保护停止信号,并且不再 close 数据 channel(见 buffer.go 的 channel 所有权说明),
+// 原先"两次并发 Close 都越过 Get/Set guard → double close → panic"的隐患已消除。
 func (r *Recorder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
