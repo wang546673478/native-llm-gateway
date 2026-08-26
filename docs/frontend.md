@@ -3,6 +3,8 @@
 > Vue 3 + TypeScript + Naive UI + Vite
 >
 > **进入路径**:`http://<gateway>:8080/`(镜像内 gateway 进程直接托管构建产物,无 nginx)
+>
+> **认证保护**:`config.yaml` 中 `admin_auth.enabled: true` 启用后，访问管理后台需要登录
 
 ---
 
@@ -24,6 +26,7 @@
 
 | 路径 | 视图 | 用途 |
 |---|---|---|
+| `/login` | `Login.vue` | 管理员登录页(admin_auth 启用后必须先登录) |
 | `/` | (redirect)→ `/overview` | — |
 | `/overview` | `Overview.vue` | 总览:24h 请求数 / Token / 错误 / 费用 + 按 Model 用量 |
 | `/providers` | `Providers.vue` | 厂商列表(按 vendor 聚合,展示协议面) |
@@ -35,10 +38,39 @@
 | `/models` | `ModelManager.vue` | 模型管理(上游同步 + 手工定价,按 vendor 分组) |
 | `/relay-stations` | `RelayStations.vue` | 中转站配置(CRUD + 热重载,2026-08-22) |
 | `/inflight` | `Inflight.vue` | 活跃请求快照(1s 轮询,2026-08) |
+| `/admin-users` | `AdminUsers.vue` | 管理员用户管理(仅 root 角色可见,2026-08-26) |
 
 ---
 
 ## 3. 关键页面
+
+### 3.0 Login(管理员登录,2026-08-26)
+
+- **触发条件**:`config.yaml` 中 `admin_auth.enabled: true`
+- **默认凭据**(首次启动自动创建):
+  - 用户名:`admin`
+  - 密码:`Gateway@2026`
+  - **安全建议**:登录后立即在"管理员用户"页面修改默认密码
+- **认证机制**:
+  - 登录成功后获取 session token,存储在 `localStorage`
+  - 所有管理 API 请求自动携带 token(通过 axios 拦截器)
+  - token 过期自动跳转登录页
+- **暴力破解防护**:连续失败 5 次(默认)账户被锁定
+- **路由守卫**:未登录访问任何管理页面自动重定向到 `/login`
+
+### 3.0.1 AdminUsers(管理员用户管理,2026-08-26)
+
+- **权限要求**:仅 `root` 角色可见此菜单
+- **功能**:
+  - 查看所有管理员账户
+  - 创建新管理员(角色:`admin` 或 `root`)
+  - 重置密码
+  - 锁定/解锁账户
+  - 删除管理员(不能删除自己)
+- **角色差异**:
+  - `root`:超级管理员,可管理其他管理员账户
+  - `admin`:普通管理员,可使用所有功能但看不到"管理员用户"菜单
+- **侧边栏**:底部显示当前用户名和"登出"按钮
 
 ### 3.1 Overview
 
@@ -130,7 +162,13 @@
 
 ## 4. 状态管理
 
-只有一个 Pinia store:**`stores/health.ts`**(后端健康 + 启动时间)。
+使用 Pinia stores:
+- **`stores/health.ts`**:后端健康 + 启动时间
+- **`stores/auth.ts`**(2026-08-26):管理员认证状态
+  - `token`:session token(存储在 localStorage)
+  - `user`:当前登录用户信息(username / role)
+  - `isAuthenticated`:是否已登录
+  - `isRoot`:是否为超级管理员角色
 
 ---
 
@@ -169,6 +207,8 @@ npm run build            # 输出 dist/
 
 | 页面 | 主要 API |
 |---|---|
+| Login | `POST /api/v1/auth/login` `GET /api/v1/auth/me` |
+| AdminUsers | `GET /api/v1/admin-users` `POST /api/v1/admin-users` `PUT /api/v1/admin-users/:id` `DELETE /api/v1/admin-users/:id` `POST /api/v1/admin-users/:id/reset-password` |
 | Overview | `GET /api/v1/dashboard` |
 | Providers | `GET /api/v1/providers` |
 | ProviderKeys | `GET /api/v1/providers/:name/api-keys` `POST /api/v1/providers/:name/api-keys` |
@@ -179,5 +219,10 @@ npm run build            # 输出 dist/
 | Models | `GET /api/v1/providers/models` `POST /api/v1/providers/sync-models` `POST /api/v1/providers/sync-all-models` `PUT /api/v1/providers/models` |
 | RelayStations | `GET /api/v1/relay-stations` `POST /api/v1/relay-stations` `PUT /api/v1/relay-stations/:id` `DELETE /api/v1/relay-stations/:id` `POST /api/v1/relay-stations/reload` |
 | Inflight | `GET /api/v1/inflight` |
+
+**认证相关**:
+- 所有 `/api/v1/*` 管理端点(除 `/api/v1/auth/login`)都需要认证
+- token 通过 `X-Admin-Token` header 或 `session_token` cookie 传递
+- 401 响应自动跳转登录页
 
 详细 API 文档见 `docs/api.md` / `docs/http-api.md`(若存在)。

@@ -98,8 +98,21 @@ wire_api = "responses"
 
 ## 管理 API(`/api/v1`)
 
+**认证保护**(2026-08-26):
+- `config.yaml` 中设置 `admin_auth.enabled: true` 启用管理员认证
+- 启用后访问管理后台需要登录(`http://localhost:8080/login`)
+- 默认凭据:`admin` / `Gateway@2026`(建议登录后立即修改)
+- 所有管理端点(除 `/api/v1/auth/login`)需要认证
+- 支持暴力破解防护(连续失败 5 次锁定账户)
+
 | URL | 说明 |
 |---|---|
+| `POST /auth/login` | 管理员登录(获取 session token) |
+| `GET /auth/me` | 获取当前用户信息 |
+| `POST /auth/logout` | 登出(清除 session) |
+| `GET /admin-users` | 管理员用户列表(仅 root 角色) |
+| `POST /admin-users` | 创建管理员(仅 root 角色) |
+| `POST /admin-users/:id/reset-password` | 重置密码(仅 root 角色) |
 | `GET /providers` | 按厂商聚合的 Provider 列表(共享 pool、每把 key 的熔断/额度状态) |
 | `GET /providers/registered` | Registry 注册名列表(轻量,过滤下拉用) |
 | `GET /providers/models` | 模型清单(按 vendor 分组,DB `provider_models`,含三档价格) |

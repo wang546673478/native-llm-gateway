@@ -6,6 +6,44 @@
 
 ---
 
+## 2026-08-26 — 管理员认证系统启用
+
+### 新增
+
+- **登录保护**:`config.yaml` 中 `admin_auth.enabled: true` 启用后，所有管理 API 端点需要认证
+- **登录页面**:`/login` — 用户名/密码认证，支持暴力破解防护（连续失败 5 次锁定账户）
+- **管理员用户管理**:`/admin-users` — root 角色专属，可创建/删除管理员、重置密码
+- **路由守卫**:未登录访问管理页面自动跳转登录页
+- **侧边栏**:显示当前登录用户名和登出按钮
+- **默认账户**:首次启动自动创建 `admin` / `Gateway@2026`（建议登录后立即修改）
+
+### 角色权限
+
+- `root`:超级管理员，可管理其他管理员账户
+- `admin`:普通管理员，可使用所有功能但看不到"管理员用户"菜单
+
+### 安全特性
+
+- Session token 认证（存储在 localStorage）
+- 暴力破解防护（失败次数限制 + 账户锁定）
+- SQL 注入防护（GORM 参数化查询）
+- 路径遍历防护（Gin 框架路由）
+- 401 自动跳转登录页
+
+### 修改
+
+- `frontend.md`:添加登录和管理员用户管理页面说明
+- `backend/internal/database/database.go`:删除重复的默认用户创建逻辑
+- `backend/cmd/gateway/main.go`:统一使用 `adminauth.EnsureRootUser` 创建默认账户
+- `frontend/src/App.vue`:修复侧边栏布局（flexbox 替代 absolute 定位）
+- `frontend/src/views/Login.vue`:修复登录流程（先获取 token 再获取用户信息）
+
+### 背景
+
+公网访问管理后台时，没有认证保护会暴露敏感数据（Gateway Keys、Provider Keys）。本次启用管理员认证系统，确保只有授权用户可以访问管理后台。
+
+---
+
 ## 2026-08-08 — 文档更新(本会话)
 
 ### 新增
