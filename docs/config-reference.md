@@ -192,8 +192,10 @@ keypool:
 
 ```yaml
 retry:
-  max_attempts: 3                # 同一请求最多尝试几个候选
+  max_attempts: 0                # 每层最多试几个候选(0 = 动态,有几个试几个;正整数 = 显式封顶)
 ```
+
+**注意**: `max_attempts` 现在只被 proxy 引擎消费,用于限制候选循环。router 层不再持有这个配置。
 
 ---
 

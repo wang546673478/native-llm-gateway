@@ -97,7 +97,6 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	r := router.NewRouter(logger, manager, pools, router.Config{
 		Aliases:         toRouterAliases(cfg.Routing.Aliases, cfg.Routing.Chains),
 		DefaultStrategy: cfg.Routing.DefaultStrategy,
-		MaxAttempts:     cfg.Retry.MaxAttempts,
 		CatchAll:        toRouterCatchAll(cfg.Routing.CatchAll, cfg.Routing.Chains),
 	})
 	// P-per-key-circuit: 熔断器已下沉到 keypool(per-key)。
@@ -1199,8 +1198,8 @@ func (s *Server) Reload(newCfg *config.Config) {
 	s.router.ReloadAliases(toRouterAliases(newCfg.Routing.Aliases, newCfg.Routing.Chains))
 	// P-catch-all: 兜底路由与 aliases 同频热重载
 	s.router.ReloadCatchAll(toRouterCatchAll(newCfg.Routing.CatchAll, newCfg.Routing.Chains))
-	// 路由调度策略(default_strategy / max_attempts)同频热重载(此前会静默保留旧值)
-	s.router.ReloadStrategy(newCfg.Routing.DefaultStrategy, newCfg.Retry.MaxAttempts)
+	// 路由调度策略(default_strategy)同频热重载(此前会静默保留旧值)
+	s.router.ReloadStrategy(newCfg.Routing.DefaultStrategy)
 
 	// Manager 定价表(cost) — 不需要重建 Provider 实例,只刷 billingSource/responsesAPI
 	s.manager.ReloadPricing(toManagerConfigForReload(newCfg, s.pools))

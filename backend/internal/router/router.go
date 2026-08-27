@@ -27,7 +27,6 @@ type (
 type Config struct {
 	Aliases         map[string]AliasConfig
 	DefaultStrategy string
-	MaxAttempts     int
 	// P-catch-all: 兜底路由规则 — 客户端发任何 alias 表外且无 provider 声明的
 	// model 名(如 gpt-5 / 任意新探测名)时按此规则路由。nil = 不兜底。
 	// 任意 agent 任意模型名都能用,仍按 tier 计费(token_plan → api → free)
@@ -108,9 +107,6 @@ type Router struct {
 func NewRouter(logger *zap.Logger, manager provider.ProviderLookup, pools map[string]*keypool.Pool, cfg Config) *Router {
 	if cfg.DefaultStrategy == "" {
 		cfg.DefaultStrategy = "priority"
-	}
-	if cfg.MaxAttempts <= 0 {
-		cfg.MaxAttempts = 3
 	}
 	r := &Router{
 		logger:   logger,
@@ -712,25 +708,20 @@ func (r *Router) ReloadAliases(aliases map[string]AliasConfig) {
 	r.logger.Info("router aliases reloaded", zap.Int("count", len(aliases)))
 }
 
-// ReloadStrategy P14: 热重载 default_strategy / max_attempts。
-// 此前这俩只在 NewRouter 构造时固化,Server.Reload 只刷 aliases —— 热改配置里
-// 的 routing.default_strategy / retry.max_attempts 会静默保留旧值(路由/调度行为
-// 半新半旧)。这里补上,让热重载对路由策略也生效。
-func (r *Router) ReloadStrategy(defaultStrategy string, maxAttempts int) {
+// ReloadStrategy P14: 热重载 default_strategy。
+// 此前只在 NewRouter 构造时固化,Server.Reload 只刷 aliases —— 热改配置里
+// 的 routing.default_strategy 会静默保留旧值。这里补上,让热重载对路由策略也生效。
+func (r *Router) ReloadStrategy(defaultStrategy string) {
 	if defaultStrategy == "" {
 		defaultStrategy = "priority"
-	}
-	if maxAttempts <= 0 {
-		maxAttempts = 3
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cfg.DefaultStrategy = defaultStrategy
-	r.cfg.MaxAttempts = maxAttempts
 	// policies 固定集合(priority/weight/cost/health),strategy 名只需落在已知集,
 	// 未知名已在 Route() 里 fallback priority,无需重建
 	r.logger.Info("router strategy reloaded",
-		zap.String("default_strategy", defaultStrategy), zap.Int("max_attempts", maxAttempts))
+		zap.String("default_strategy", defaultStrategy))
 }
 
 // ReloadCatchAll P-catch-all: 原子替换兜底路由规则(与 ReloadAliases 同频)
