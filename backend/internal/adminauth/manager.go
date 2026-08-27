@@ -240,6 +240,16 @@ func (m *Manager) DeleteUser(id string) error {
 	})
 }
 
+// ResetPassword 重置用户密码(仅 root 可调用)
+func (m *Manager) ResetPassword(id string, newPassword string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	return m.db.Model(&dbpkg.AdminUser{}).Where("id = ?", id).Update("password_hash", string(hash)).Error
+}
+
 // generateToken 生成 session token (32 字节随机数 hex 编码 = 64 字符)
 func generateToken() (string, error) {
 	b := make([]byte, 32)

@@ -49,6 +49,7 @@ func (h *AdminAuthHandler) Register(r *gin.RouterGroup) {
 	users.POST("", h.createUser)
 	users.PUT("/:id", h.updateUser)
 	users.DELETE("/:id", h.deleteUser)
+	users.POST("/:id/reset-password", h.resetPassword)
 }
 
 // login 登录
@@ -203,4 +204,23 @@ func (h *AdminAuthHandler) deleteUser(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"message": "user deleted"})
+}
+
+// resetPassword 重置用户密码（仅 root）
+func (h *AdminAuthHandler) resetPassword(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		NewPassword string `json:"new_password" binding:"required,min=8"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+		return
+	}
+
+	if err := h.am.ResetPassword(id, req.NewPassword); err != nil {
+		c.JSON(500, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "password reset"})
 }
