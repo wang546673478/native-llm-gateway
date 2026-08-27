@@ -51,6 +51,10 @@ type Engine struct {
 	// 120s 掐断(Claude Code 报 Connection closed mid-response);doStream 每个
 	// chunk 后用 SetWriteDeadline 续期,把绝对上限变成「空闲超时」。
 	writeTimeout time.Duration
+	// streamIdleTimeout 流式空闲超时:连续 N 秒没收到新 chunk → 认为上游断流。
+	// 不等 provider.timeout(60s),更快检测断流 → 客户端可以快速重试。
+	// 默认 10s:平衡检测灵敏度(太短误判)和用户等待时间(太长体验差)。
+	streamIdleTimeout time.Duration
 	// streamBuf 持有当前正在累积的流式响应 buffer,key 是 traceID。
 	// Task 7: 配合 streamCnt 实现 F4 全局 1000 上限。
 	streamBuf sync.Map
@@ -92,6 +96,10 @@ type Config struct {
 	// WriteTimeout 流式写 deadline 续期预算(取 server.write_timeout)。
 	// 非流式响应仍是绝对上限;流式场景按 chunk 续期成空闲超时。<=0 时默认 2min。
 	WriteTimeout time.Duration
+	// StreamIdleTimeout 流式空闲超时:连续 N 秒没收到新 chunk → 认为上游断流。
+	// 不等 provider.timeout(60s),更快检测断流 → 客户端可以快速重试。
+	// 默认 10s:平衡检测灵敏度(太短误判)和用户等待时间(太长体验差)。
+	StreamIdleTimeout time.Duration
 	// GkContext 可选的 GatewayKey 提取抽象;nil 时用默认实现(defaultGatewayKeyContext)。
 	// 供测试 mock / 特殊上下文注入,生产留空即可。
 	GkContext GatewayKeyContext
@@ -118,6 +126,9 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 2 * time.Minute
 	}
+	if cfg.StreamIdleTimeout <= 0 {
+		cfg.StreamIdleTimeout = 10 * time.Second
+	}
 	if cfg.GkContext == nil {
 		cfg.GkContext = defaultGatewayKeyContext
 	}
@@ -133,6 +144,7 @@ func NewEngine(cfg Config) *Engine {
 		quotaChecker:         cfg.QuotaChecker,
 		maxRetry:             cfg.MaxRetry,
 		writeTimeout:         cfg.WriteTimeout,
+		streamIdleTimeout:    cfg.StreamIdleTimeout,
 		gkCtx:                cfg.GkContext,
 		fingerprintSanitizer: cfg.FingerprintSanitizer,
 	}
@@ -572,10 +584,6 @@ func (e *Engine) doStream(
 		}, 0
 	}
 
-	// 流式响应开始 — 此后不可 failover
-	// P-per-key-circuit: 熔断上报已并入 Pool.ReportSuccess(per-key)
-	e.reportKeySuccess(result)
-
 	// Task 7 / F4: 全局流上限由 acquireStreamSlot 内部处理 — 在 chunk
 	// loop 开始之前一次性申请 slot(每个 stream 只 +1 一次)。
 	// acquireStreamSlot 失败时不动计数器,appendStreamChunk 后续
@@ -584,6 +592,39 @@ func (e *Engine) doStream(
 	// 是否需要 -1,与 acquire 严格配对。
 	_, _ = e.acquireStreamSlot(req.TraceID)
 	defer e.finalizeStream(req.TraceID, entry)
+
+	// P-stream-failover: 延迟发送 HTTP 200 — 先读取第一个 chunk 确认上游能响应,
+	// 如果连第一个 chunk 都拿不到说明上游有问题，还可以 failover。
+	// 只缓冲 1 个:既能过滤"根本连不上"的 provider,又不显著增加 TTFT。
+	const bufferSize = 1
+	buffer := make([][]byte, 0, bufferSize)
+	for i := 0; i < bufferSize; i++ {
+		chunk, ok := <-chunkCh
+		if !ok {
+			// 流太短,没等到 N 个就结束了 — 这也算成功(有些模型输出很短)
+			break
+		}
+		if chunk.Err != nil {
+			// 前 N 个 chunk 内出错 → 还没发 200 → 可以 failover
+			var pe *provider.ProviderError
+			if errors.As(chunk.Err, &pe) {
+				e.reportKeyError(result, pe)
+				return false, nil, pe, 0
+			}
+			return false, nil, &provider.ProviderError{
+				ProviderName: result.ProviderName,
+				ErrorType:    provider.ErrorTypeConnection,
+				Message:      "stream failed early: " + chunk.Err.Error(),
+			}, 0
+		}
+		if len(chunk.Data) > 0 {
+			buffer = append(buffer, chunk.Data)
+		}
+	}
+
+	// 前 N 个 chunk 都成功 → 认为上游稳定 → 现在才报告 key 成功、发送 200
+	// P-per-key-circuit: 熔断上报已并入 Pool.ReportSuccess(per-key)
+	e.reportKeySuccess(result)
 
 	// 设置 SSE headers
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -603,78 +644,174 @@ func (e *Engine) doStream(
 	// gin 1.10 的 responseWriter 实现 Unwrap,ResponseController(Go 1.20+)可用。
 	rc := http.NewResponseController(c.Writer)
 
+	// 发送缓冲的 chunks 给客户端(已经确认上游稳定,现在才开始发数据)
 	var ttftMs int64
-	for chunk := range chunkCh {
-		if chunk.Err != nil {
-			if errors.Is(chunk.Err, io.EOF) {
-				break
-			}
-			// 流中途错误(上游断流 / 连接被杀 / context canceled):
-			// 写一个 error event 给客户端,然后退出。HTTP 头已发出、状态码锁死 200,
-			// 无法改状态,但 access log 必须标 stream_interrupted,不能伪装成 ok。
-			if entry != nil {
-				entry.ErrorType = "stream_interrupted"
-			}
-			e.logger.Warn("stream mid-error",
-				zap.String("provider", result.ProviderName),
-				zap.Error(chunk.Err))
-			fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":%q}}\n\n",
-				chunk.Err.Error())
-			if canFlush {
-				flusher.Flush()
-			}
-			break
+	for _, data := range buffer {
+		// TTFT:第一个有效数据 chunk(缓冲的第一个)
+		if ttftMs == 0 && len(data) > 0 {
+			ttftMs = time.Since(streamStart).Milliseconds()
 		}
-		if len(chunk.Data) == 0 {
-			continue
-		}
-		// P-sse-stream-error: 流**中途**的上游错误事件(Provider 的 peek 窗口只覆盖
-		// 流头,窗口之外由这里兜底 — 实测 minimax 在第 42 个事件才发内容审核错误)。
-		// HTTP 头已发出、状态码锁死 200,failover 来不及,但 access log 不能记成 ok。
-		// 刻意**不**动 key 状态:流已正常开跑(Provider 早已 ReportSuccess),
-		// 中途错误多是内容级(审核/敏感词),不是这把 key 的问题,冷却它是误杀。
-		// 先做廉价字节预筛再解析 — 这是每 chunk 都过的热路径,不能无条件 JSON 解析。
-		// 预筛与解析器同住 provider 包(超集不变式由那边的守卫测试锁),proxy 不自己
-		// 拼关键词 —— 否则解析器加新形状时这里会静默漏判。
-		if entry != nil && entry.ErrorType == "" && provider.MayContainSSEError(chunk.Data) {
-			if se := provider.ParseSSEStreamError(chunk.Data); se != nil {
+		// 缓冲阶段已经检查过上游错误事件,这里直接写入
+		if entry != nil && entry.ErrorType == "" && provider.MayContainSSEError(data) {
+			if se := provider.ParseSSEStreamError(data); se != nil {
 				entry.ErrorType = "upstream_stream_error"
-				e.logger.Warn("upstream error event mid-stream",
+				e.logger.Warn("upstream error event in buffered chunk",
 					zap.String("provider", result.ProviderName),
 					zap.String("code", se.Code),
 					zap.String("message", se.Message))
 			}
 		}
-		// TTFT:第一个有效数据 chunk 到达时记录首字时间(整个流只记录一次)。
-		if ttftMs == 0 {
-			ttftMs = time.Since(streamStart).Milliseconds()
-		}
-		// Task 7: 累积到 access log buffer(lookup-only,slot 已由
-		// doStream 开头的 acquireStreamSlot 一次性申请)
-		e.appendStreamChunk(req.TraceID, chunk.Data)
-		// chunk.Data 已经是 SSE data 行的内容(Provider 负责格式化)
-		if _, err := c.Writer.Write(chunk.Data); err != nil {
-			// 客户端断开 / 写失败 — 立刻 break 但要返 ProviderError 让
-			// caller 知道这不是正常结束,access_log error_type 标 client_disconnected
-			// (非 retryable,不需要 failover 到下一个 provider — 问题在 client)
+		e.appendStreamChunk(req.TraceID, data)
+		if _, err := c.Writer.Write(data); err != nil {
 			if entry != nil {
 				entry.ErrorType = "client_disconnected"
 			}
-			e.logger.Warn("write stream chunk (client likely disconnected)",
+			e.logger.Warn("write buffered chunk (client likely disconnected)",
 				zap.String("provider", result.ProviderName),
 				zap.Error(err))
 			return true, nil, &provider.ProviderError{
 				ProviderName: result.ProviderName,
 				ErrorType:    provider.ErrorTypeClientDisconnected,
-				Message:      "client disconnected during stream: " + err.Error(),
+				Message:      err.Error(),
 			}, ttftMs
 		}
 		if canFlush {
 			flusher.Flush()
 		}
-		// 续期写 deadline — 失败说明连接已不可写,后续 Write 会报错,忽略即可
-		_ = rc.SetWriteDeadline(time.Now().Add(e.writeTimeout))
+		// 续期写超时
+		if err := rc.SetWriteDeadline(time.Now().Add(e.writeTimeout)); err != nil {
+			e.logger.Debug("failed to extend write deadline", zap.Error(err))
+		}
 	}
+
+	// 继续转发剩余的 chunks(此后无法 failover,但可以检测中途错误标记 error_type)
+	// P-stream-idle-timeout: 动态超时检测 — 连续 N 秒没收到新 chunk → 认为断流。
+	// 不等 provider.timeout(60s),更快失败让客户端重试。
+	// 根据请求体大小动态调整超时:大请求(Codex 大上下文)需要更长思考时间。
+	lastChunkTime := time.Now()
+	idleTimeout := e.calculateIdleTimeout(len(req.Body))
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+
+	for {
+		select {
+		case chunk, ok := <-chunkCh:
+			if !ok {
+				// channel 关闭,正常结束
+				goto streamEnd
+			}
+
+			// 重置空闲计时器
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+			lastChunkTime = time.Now()
+
+			if chunk.Err != nil {
+				if errors.Is(chunk.Err, io.EOF) {
+					goto streamEnd
+				}
+				// 流中途错误(上游断流 / 连接被杀 / context canceled):
+				// 写一个 error event 给客户端,然后退出。HTTP 头已发出、状态码锁死 200,
+				// 无法改状态,但 access log 必须标 stream_interrupted,不能伪装成 ok。
+				if entry != nil {
+					entry.ErrorType = "stream_interrupted"
+				}
+				e.logger.Warn("stream mid-error",
+					zap.String("provider", result.ProviderName),
+					zap.Error(chunk.Err))
+				fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":%q}}\n\n",
+					chunk.Err.Error())
+				if canFlush {
+					flusher.Flush()
+				}
+				goto streamEnd
+			}
+			if len(chunk.Data) == 0 {
+				continue
+			}
+			// P-sse-stream-error: 流**中途**的上游错误事件(Provider 的 peek 窗口只覆盖
+			// 流头,窗口之外由这里兜底 — 实测 minimax 在第 42 个事件才发内容审核错误)。
+			// HTTP 头已发出、状态码锁死 200,failover 来不及,但 access log 不能记成 ok。
+			// 刻意**不**动 key 状态:流已正常开跑(Provider 早已 ReportSuccess),
+			// 中途错误多是内容级(审核/敏感词),不是这把 key 的问题,冷却它是误杀。
+			// 先做廉价字节预筛再解析 — 这是每 chunk 都过的热路径,不能无条件 JSON 解析。
+			// 预筛与解析器同住 provider 包(超集不变式由那边的守卫测试锁),proxy 不自己
+			// 拼关键词 —— 否则解析器加新形状时这里会静默漏判。
+			if entry != nil && entry.ErrorType == "" && provider.MayContainSSEError(chunk.Data) {
+				if se := provider.ParseSSEStreamError(chunk.Data); se != nil {
+					entry.ErrorType = "upstream_stream_error"
+					e.logger.Warn("upstream error event mid-stream",
+						zap.String("provider", result.ProviderName),
+						zap.String("code", se.Code),
+						zap.String("message", se.Message))
+				}
+			}
+			// TTFT:第一个有效数据 chunk 到达时记录首字时间(整个流只记录一次)。
+			if ttftMs == 0 {
+				ttftMs = time.Since(streamStart).Milliseconds()
+			}
+			// Task 7: 累积到 access log buffer(lookup-only,slot 已由
+			// doStream 开头的 acquireStreamSlot 一次性申请)
+			e.appendStreamChunk(req.TraceID, chunk.Data)
+			// chunk.Data 已经是 SSE data 行的内容(Provider 负责格式化)
+			if _, err := c.Writer.Write(chunk.Data); err != nil {
+				// 客户端断开 / 写失败 — 立刻 break 但要返 ProviderError 让
+				// caller 知道这不是正常结束,access_log error_type 标 client_disconnected
+				// (非 retryable,不需要 failover 到下一个 provider — 问题在 client)
+				if entry != nil {
+					entry.ErrorType = "client_disconnected"
+				}
+				e.logger.Warn("write stream chunk (client likely disconnected)",
+					zap.String("provider", result.ProviderName),
+					zap.Error(err))
+				return true, nil, &provider.ProviderError{
+					ProviderName: result.ProviderName,
+					ErrorType:    provider.ErrorTypeClientDisconnected,
+					Message:      "client disconnected during stream: " + err.Error(),
+				}, ttftMs
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+			// 续期写 deadline — 失败说明连接已不可写,后续 Write 会报错,忽略即可
+			_ = rc.SetWriteDeadline(time.Now().Add(e.writeTimeout))
+
+		case <-idleTimer.C:
+			// 空闲超时:连续 N 秒没收到新 chunk → 认为上游断流
+			// 快速失败让客户端重试,不等 provider.timeout(60s)
+			if entry != nil {
+				entry.ErrorType = "stream_idle_timeout"
+			}
+			idleDuration := time.Since(lastChunkTime)
+			e.logger.Warn("stream idle timeout",
+				zap.String("provider", result.ProviderName),
+				zap.Duration("idle_duration", idleDuration),
+				zap.Duration("idle_timeout", idleTimeout))
+			fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":{\"type\":\"stream_idle_timeout\",\"message\":\"no data received for %s\"}}\n\n",
+				idleDuration.Round(time.Second))
+			if canFlush {
+				flusher.Flush()
+			}
+			goto streamEnd
+
+		case <-ctx.Done():
+			// context 取消(客户端断开 / 超时)
+			if entry != nil {
+				entry.ErrorType = "context_canceled"
+			}
+			e.logger.Warn("stream context canceled",
+				zap.String("provider", result.ProviderName),
+				zap.Error(ctx.Err()))
+			goto streamEnd
+		}
+	}
+
+streamEnd:
 
 	// P42: headerResp.Usage 由各 provider 的 goroutine 在 close(ch) 前填好
 	// 我们 drain 完 channel 后安全读取
@@ -683,6 +820,37 @@ func (e *Engine) doStream(
 		streamUsage = headerResp.Usage
 	}
 	return true, streamUsage, nil, ttftMs
+}
+
+// calculateIdleTimeout 根据请求体大小动态计算流空闲超时时间。
+// 大请求(Codex 大上下文)需要更长的思考时间,每个 chunk 之间的间隔也更长。
+//
+// 分段策略:
+//   - < 100KB: 10s (小请求,快速响应)
+//   - 100KB-500KB: 15s (中等请求)
+//   - 500KB-1MB: 20s (大请求)
+//   - 1MB-2MB: 30s (超大请求,如 Codex 完整上下文)
+//   - > 2MB: 45s (极大请求)
+func (e *Engine) calculateIdleTimeout(bodySize int) time.Duration {
+	const (
+		kb100  = 100 * 1024
+		kb500  = 500 * 1024
+		mb1    = 1024 * 1024
+		mb2    = 2 * 1024 * 1024
+	)
+
+	switch {
+	case bodySize < kb100:
+		return 10 * time.Second
+	case bodySize < kb500:
+		return 15 * time.Second
+	case bodySize < mb1:
+		return 20 * time.Second
+	case bodySize < mb2:
+		return 30 * time.Second
+	default:
+		return 45 * time.Second
+	}
 }
 
 // writeNonStreamResponse 把 Provider Response 原样写回客户端,并同步写
