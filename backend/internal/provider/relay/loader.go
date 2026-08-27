@@ -46,24 +46,56 @@ func LoadFromDatabase(db *gorm.DB, mgr ProviderManager) error {
 	return nil
 }
 
-// registerAndLoadRelayStation 注册单个中转站到 provider registry 并加载到 manager
-func registerAndLoadRelayStation(ctx context.Context, s database.RelayStation, mgr ProviderManager) error {
-	// 解析支持的协议列表
-	var supportedProtocols []provider.Protocol
+// parseSupportedProtocols 解析 supported_protocols JSON 列并补齐模式默认值。
+// single 模式只认主协议;multi 模式未填时退回主协议。
+func parseSupportedProtocols(s database.RelayStation) ([]provider.Protocol, error) {
+	var protos []provider.Protocol
 	if s.SupportedProtocols != "" {
-		if err := json.Unmarshal([]byte(s.SupportedProtocols), &supportedProtocols); err != nil {
-			return fmt.Errorf("parse supported_protocols: %w", err)
+		if err := json.Unmarshal([]byte(s.SupportedProtocols), &protos); err != nil {
+			return nil, fmt.Errorf("parse supported_protocols: %w", err)
 		}
 	}
-
-	// 单协议模式:只支持主协议
 	if s.ProtocolMode == "single" {
-		supportedProtocols = []provider.Protocol{provider.Protocol(s.PrimaryProtocol)}
+		return []provider.Protocol{provider.Protocol(s.PrimaryProtocol)}, nil
 	}
+	if s.ProtocolMode == "multi" && len(protos) == 0 {
+		return []provider.Protocol{provider.Protocol(s.PrimaryProtocol)}, nil
+	}
+	return protos, nil
+}
 
-	// 多协议模式:如果没有指定支持的协议,默认支持主协议
-	if s.ProtocolMode == "multi" && len(supportedProtocols) == 0 {
-		supportedProtocols = []provider.Protocol{provider.Protocol(s.PrimaryProtocol)}
+// FaceNames 返回某中转站会注册的**全部**注册面名。
+//
+// 这是面名规则的唯一来源 —— registerAndLoadRelayStation 注册时用它,
+// handler 删站级联清理归属行时也用它。两处共用一个函数,规则改动不会漂移
+// (曾经的教训:删站不级联留下 81 行孤儿归属,codex 面的 gpt-5.6-luna
+// 在模型管理页隐身却仍占着 (face, model_id) 唯一索引)。
+//
+//	single 模式 → [name]
+//	multi  模式 → [name-协议, ...]（与注册时的 fmt.Sprintf("%s-%s") 一致）
+func FaceNames(s database.RelayStation) []string {
+	protos, err := parseSupportedProtocols(s)
+	if err != nil {
+		// 协议列解析失败时退回站名本身:宁可少删也不错删,
+		// 且 single 模式(绝大多数)本就只用站名。
+		return []string{s.Name}
+	}
+	if s.ProtocolMode != "multi" {
+		return []string{s.Name}
+	}
+	out := make([]string, 0, len(protos))
+	for _, proto := range protos {
+		out = append(out, fmt.Sprintf("%s-%s", s.Name, proto))
+	}
+	return out
+}
+
+// registerAndLoadRelayStation 注册单个中转站到 provider registry 并加载到 manager
+func registerAndLoadRelayStation(ctx context.Context, s database.RelayStation, mgr ProviderManager) error {
+	// 解析支持的协议列表(与 FaceNames 共用同一解析,防面名/注册不一致)
+	supportedProtocols, err := parseSupportedProtocols(s)
+	if err != nil {
+		return err
 	}
 
 	// 创建 GenericRelayProvider

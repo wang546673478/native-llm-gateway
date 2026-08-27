@@ -18,6 +18,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/inflight"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/provider/relay"
 	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 	"github.com/wang546673478/native-llm-gateway/internal/usage"
@@ -34,9 +35,9 @@ const (
 
 // Admin 持有管理 API 所需的依赖
 type Admin struct {
-	Manager   *provider.Manager
-	Registry  *provider.Registry
-	Pools     map[string]*keypool.Pool
+	Manager  *provider.Manager
+	Registry *provider.Registry
+	Pools    map[string]*keypool.Pool
 	// PoolLookup 动态读最新 pool(由 server 注入 s.poolFor,带锁读最新 s.pools)。
 	// Pools 是启动时拍下的旧 map —— ReloadProviderPool 会用新 map 整体替换 s.pools,
 	// 但不回头更新 admin.Pools,导致「运行中加 key」的厂商在 /providers 显示陈旧零值。
@@ -44,12 +45,12 @@ type Admin struct {
 	PoolLookup func(providerName string) (*keypool.Pool, bool)
 	// PoolsSnapshot 动态读全部最新 pools(同样由 server 注入,供 dashboard keypools)。
 	PoolsSnapshot func() map[string]*keypool.Pool
-	Router    *router.Router
-	Usage     *usage.Repository
-	Aliases   map[string]router.AliasConfig
-	Keys      []GatewayKeyInfo
-	AccessLog *accesslog.Recorder // P67: 接入日志 Recorder(可能为 no-op)
-	QuotaMgr  *quotacheck.Manager // P68/P-quota-balance: quota 恢复 worker(nil 时前端拿到 default)
+	Router        *router.Router
+	Usage         *usage.Repository
+	Aliases       map[string]router.AliasConfig
+	Keys          []GatewayKeyInfo
+	AccessLog     *accesslog.Recorder // P67: 接入日志 Recorder(可能为 no-op)
+	QuotaMgr      *quotacheck.Manager // P68/P-quota-balance: quota 恢复 worker(nil 时前端拿到 default)
 	// P-mimo-quota: MIMO 控制台 cookie 持久化仓库(可能为 nil — 无 DB 时跳过持久化)
 	MimoCookieStore MimoQuotaCookieStore
 	// P-mimo-quota 解耦:处理器不 import 具体 vendor 包(provider/mimo),由 server
@@ -85,6 +86,8 @@ type Admin struct {
 	RelayStationStore dbpkg.RelayStationStore
 	// RelayReloadFunc 中转站热重载函数(由 server 注入,调用 relay.ReloadFromDatabase)
 	RelayReloadFunc func() error
+	// P-relay-cascade: 删站时按面清 provider_api_keys(nil = 跳过该级联)。
+	ProviderKeyPurge ProviderKeyPurger
 }
 
 // MimoQuotaCookieStore P-mimo-quota: MIMO 控制台 cookie 存取(单行,id=1)。
@@ -92,6 +95,13 @@ type Admin struct {
 type MimoQuotaCookieStore interface {
 	Get(ctx context.Context) (*dbpkg.MimoQuotaCookie, error)
 	Upsert(ctx context.Context, cookie string) error
+}
+
+// ProviderKeyPurger P-relay-cascade: 按 provider/面名清空上游 key 行。
+// 窄接口定在消费侧(handler 不 import auth,只声明自己要的那一个方法),
+// 由 auth.ProviderKeyStore 结构化满足 —— 与 MimoQuotaCookieStore 同模式。
+type ProviderKeyPurger interface {
+	DeleteByProvider(ctx context.Context, providerName string) (int64, error)
 }
 
 // NewAdmin 构造 Admin(caller 端负责注入依赖)。
@@ -123,6 +133,7 @@ func NewAdmin(
 	modelReload func() error, // 可 nil(不热刷 manager)
 	relayStationStore dbpkg.RelayStationStore, // 可 nil(中转站管理不可用)
 	relayReloadFunc func() error, // 可 nil(中转站热重载不可用)
+	providerKeyPurge ProviderKeyPurger, // 可 nil(删站不级联清 provider_api_keys)
 ) *Admin {
 	return &Admin{
 		Manager:             mgr,
@@ -149,6 +160,7 @@ func NewAdmin(
 		ModelReload:         modelReload,
 		RelayStationStore:   relayStationStore,
 		RelayReloadFunc:     relayReloadFunc,
+		ProviderKeyPurge:    providerKeyPurge,
 	}
 }
 
@@ -491,11 +503,11 @@ func (a *Admin) syncAllProviderModels(c *gin.Context) {
 // saveProviderModelPricing PUT /api/v1/providers/models {vendor, model_id, cost_per_million_*}.
 func (a *Admin) saveProviderModelPricing(c *gin.Context) {
 	var body struct {
-		Vendor                 string  `json:"vendor"`
-		ModelID                string  `json:"model_id"`
-		CostPerMillionInput    float64 `json:"cost_per_million_input"`
+		Vendor                  string  `json:"vendor"`
+		ModelID                 string  `json:"model_id"`
+		CostPerMillionInput     float64 `json:"cost_per_million_input"`
 		CostPerMillionCacheRead float64 `json:"cost_per_million_cache_read"`
-		CostPerMillionOutput   float64 `json:"cost_per_million_output"`
+		CostPerMillionOutput    float64 `json:"cost_per_million_output"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Vendor == "" || body.ModelID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "vendor and model_id required"})
@@ -694,7 +706,7 @@ func (a *Admin) listRouting(c *gin.Context) {
 func (a *Admin) getRouteOrder(c *gin.Context) {
 	scope := c.Query("scope")
 	providerName := c.Query("provider")
-	if scope != "provider" && scope != "key" {
+	if scope != dbpkg.RouteScopeProvider && scope != dbpkg.RouteScopeKey {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_scope", "detail": "scope=provider|key"})
 		return
 	}
@@ -733,7 +745,7 @@ func (a *Admin) putRouteOrder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad_request", "detail": err.Error()})
 		return
 	}
-	if req.Scope != "provider" && req.Scope != "key" {
+	if req.Scope != dbpkg.RouteScopeProvider && req.Scope != dbpkg.RouteScopeKey {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_scope", "detail": "scope=provider|key"})
 		return
 	}
@@ -744,10 +756,10 @@ func (a *Admin) putRouteOrder(c *gin.Context) {
 	// P-route-order: 改写落库后按作用域热更新
 	//   scope=provider → 热更新 router 的 Level 2 排序
 	//   scope=key       → 重载该 provider 的 pool(接进 keypool 的 Level 3 排序)
-	if a.ProviderOrderReload != nil && req.Scope == "provider" {
+	if a.ProviderOrderReload != nil && req.Scope == dbpkg.RouteScopeProvider {
 		a.ProviderOrderReload()
 	}
-	if a.KeyOrderReload != nil && req.Scope == "key" {
+	if a.KeyOrderReload != nil && req.Scope == dbpkg.RouteScopeKey {
 		a.KeyOrderReload(req.Provider)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "scope": req.Scope, "provider": req.Provider, "order": req.Order})
@@ -1419,6 +1431,20 @@ func (a *Admin) updateRelayStation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"relay_station": existing})
 }
 
+// appendUnique 返回 base 加上 extra(extra 为空或已存在则原样返回)。
+// 只做去重不做排序 —— 级联清理要保持面名的原有顺序,便于日志比对。
+func appendUnique(base []string, extra string) []string {
+	if extra == "" {
+		return base
+	}
+	for _, b := range base {
+		if b == extra {
+			return base
+		}
+	}
+	return append(append(make([]string, 0, len(base)+1), base...), extra)
+}
+
 // deleteRelayStation DELETE /api/v1/relay-stations/:id — 删除中转站
 func (a *Admin) deleteRelayStation(c *gin.Context) {
 	if a.RelayStationStore == nil {
@@ -1432,9 +1458,79 @@ func (a *Admin) deleteRelayStation(c *gin.Context) {
 		return
 	}
 
+	// 删前取站:删掉之后就拿不到面名了,级联清理需要它。
+	// 取不到(已被并发删掉/不存在)时按无面处理,继续走删除保持幂等。
+	var faces []string
+	var stationName string
+	if st, err := a.RelayStationStore.Get(c.Request.Context(), uint(id)); err == nil && st != nil {
+		faces = relay.FaceNames(*st)
+		stationName = st.Name
+	}
+
 	if err := a.RelayStationStore.Delete(c.Request.Context(), uint(id)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete relay station: " + err.Error()})
 		return
+	}
+
+	// P-relay-cascade: 级联清理该站全部面的归属行。
+	// face 是字符串列而非外键 —— 不清就留下孤儿归属(历史欠账 81 行),
+	// 模型管理页看不到却仍占 (face, model_id) 唯一索引,且让「无归属」判定失真。
+	// 编排放 handler:两个 store 各自只干一件事,不让 Delete 兼职。
+	// 刻意**不**删 provider_models 定价行:vendor 可能仍有其他活面共享
+	// (如 mimo / mimo-token-plan),一并删会误伤;残留定价由模型管理页
+	// 「清理无归属」按需回收。
+	deletedFaceRows := int64(0)
+	if a.ModelStore != nil {
+		for _, face := range faces {
+			n, err := a.ModelStore.DeleteFaceModels(c.Request.Context(), face)
+			if err != nil {
+				// 站已删除,归属清理失败不回滚 —— 报明确错误让用户可重试
+				// (孤儿行不影响路由:Registry 里已无该面,不会成为候选)。
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "station deleted but face cleanup failed for " + face + ": " + err.Error(),
+				})
+				return
+			}
+			deletedFaceRows += n
+		}
+	}
+
+	// P-relay-cascade: 级联清理该站全部面的排序改写。
+	// route_order.provider / .name 同样是普通字符串列 —— 孤儿的危害比归属行更大:
+	// scope=provider 的孤儿仍占着层内 seq 名次,把活着的候选整体往后挤
+	// (实测两个已删厂商占了 api 层 seq 0/1 两个最高优先级位)。
+	deletedOrderRows := int64(0)
+	if a.RouteOrderStore != nil {
+		for _, face := range faces {
+			n, err := a.RouteOrderStore.DeleteByProvider(c.Request.Context(), face)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "station deleted but route order cleanup failed for " + face + ": " + err.Error(),
+				})
+				return
+			}
+			deletedOrderRows += n
+		}
+	}
+
+	// P-relay-cascade: 级联清理该站的上游 key 行。
+	// 注意清理集是「面名 ∪ 站名」而不是只有面名 —— syncRelayStationKeys 按
+	// **站名**写 provider_api_keys(multi 模式下站名不在 FaceNames 里),
+	// 而手工在「上游 Key」页加的 key 是按**面名**存的,两条来路都要覆盖。
+	// 多算一个名字只是 0 行 no-op(站已删,不可能误伤活面);少算就留下
+	// 幽灵条目 + 上游 key 明文无限期留库。
+	deletedKeyRows := int64(0)
+	if a.ProviderKeyPurge != nil {
+		for _, name := range appendUnique(faces, stationName) {
+			n, err := a.ProviderKeyPurge.DeleteByProvider(c.Request.Context(), name)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "station deleted but provider key cleanup failed for " + name + ": " + err.Error(),
+				})
+				return
+			}
+			deletedKeyRows += n
+		}
 	}
 
 	// P-relay-independent: 自动热重载 — 删除后立即卸载该中转站
@@ -1445,7 +1541,13 @@ func (a *Admin) deleteRelayStation(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":            "deleted",
+		"deleted_face_rows":  deletedFaceRows,
+		"deleted_order_rows": deletedOrderRows,
+		"deleted_key_rows":   deletedKeyRows,
+		"cleaned_faces":      faces,
+	})
 }
 
 // reloadRelayStations POST /api/v1/relay-stations/reload — 热重载所有中转站

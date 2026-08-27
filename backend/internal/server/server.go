@@ -1007,6 +1007,8 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 			}
 			return nil
 		},
+		// P-relay-cascade: 删站时按面清 provider_api_keys(和 relay 的 key 同步用同一张表)
+		auth.NewProviderKeyStore(s.db),
 	)
 	// P-provider-vendor: 让 admin 动态读最新 pools —— ReloadProviderPool 会整体替换
 	// s.pools(新 map)但不动 NewAdmin 拍下的旧 map 引用,导致「运行中加 key」的厂商

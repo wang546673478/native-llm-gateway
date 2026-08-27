@@ -301,6 +301,10 @@ type fakeProviderModelStore struct {
 	savedModel  string
 	prunedVendor string
 	pruneDeleted int64
+
+	// P-relay-cascade:记录 DeleteFaceModels 的调用序列(断言级联清了哪些面)
+	deletedFaces []string
+	deleteErr    error
 }
 
 func (s *fakeProviderModelStore) All(ctx context.Context) ([]dbpkg.ProviderModel, error) {
@@ -344,6 +348,23 @@ func (s *fakeProviderModelStore) AllFaces(ctx context.Context) ([]dbpkg.Provider
 func (s *fakeProviderModelStore) PruneOrphanModels(ctx context.Context, vendor string) (int64, error) {
 	s.prunedVendor = vendor
 	return s.pruneDeleted, nil
+}
+func (s *fakeProviderModelStore) DeleteFaceModels(ctx context.Context, face string) (int64, error) {
+	if s.deleteErr != nil {
+		return 0, s.deleteErr
+	}
+	s.deletedFaces = append(s.deletedFaces, face)
+	var kept []dbpkg.ProviderModelFace
+	var n int64
+	for _, r := range s.faceRows {
+		if r.Face == face {
+			n++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	s.faceRows = kept
+	return n, nil
 }
 
 // TestListProviderModels_ModelStoreNil P-model-sync:ModelStore=nil → 503。

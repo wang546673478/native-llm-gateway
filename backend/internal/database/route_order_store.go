@@ -19,6 +19,11 @@ type RouteOrderStore interface {
 	Replace(ctx context.Context, scope, provider, billingSource string, names []string) error
 	// ResetScope 删除某作用域全部改写 → 回到默认 created_at 顺序。
 	ResetScope(ctx context.Context, scope string, provider string) error
+	// DeleteByProvider 删掉某个 provider/面的全部排序改写,返回删除行数。
+	// provider 列和 name 列都是普通字符串(非外键),厂商/中转站被硬删后
+	// 这些行会成孤儿 —— 且 scope=provider 的孤儿仍占着层内 seq 名次,
+	// 把活着的候选往后挤(实测占了 api 层 seq 0/1 两个最高优先级位)。
+	DeleteByProvider(ctx context.Context, provider string) (int64, error)
 }
 
 type gormRouteOrderStore struct{ db *gorm.DB }
@@ -70,6 +75,26 @@ func (s *gormRouteOrderStore) Replace(ctx context.Context, scope, provider, bill
 		}
 		return nil
 	})
+}
+
+func (s *gormRouteOrderStore) DeleteByProvider(ctx context.Context, provider string) (int64, error) {
+	// 空串直接返回:provider="" 会匹配 scope=provider 行的空 provider 列,
+	// 一把删光全部层内 provider 排序(RouteOrder 的 provider 列在 scope=provider
+	// 时本就是空的,名字存在 name 列)。
+	if provider == "" {
+		return 0, nil
+	}
+	// 两个位置都要删,少一个就留下孤儿:
+	//   scope=provider → 名字在 name 列(该 provider 在层内的名次)
+	//   scope=key      → 名字在 provider 列(该 provider 内部的 key 顺序)
+	res := s.db.WithContext(ctx).
+		Where("(scope = ? AND name = ?) OR (scope = ? AND provider = ?)",
+			RouteScopeProvider, provider, RouteScopeKey, provider).
+		Delete(&RouteOrder{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
 }
 
 func (s *gormRouteOrderStore) ResetScope(ctx context.Context, scope string, provider string) error {

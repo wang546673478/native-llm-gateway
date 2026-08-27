@@ -344,9 +344,18 @@ func (MimoQuotaCookie) TableName() string { return "mimo_quota_cookie" }
 // Scope=provider → Provider 是 provider 名,Name 空,Seq 是层内 provider 位次;
 // Scope=key       → Provider 是所属 provider 名,Name 是 key 名,Seq 是 provider 内 key 位次。
 // BillingSource 可选:按层隔离顺序(token_plan/api 各自一段)。
+// RouteOrder.Scope 的合法取值 —— 两个 scope 把名字存在**不同列**里,
+// 这是 DeleteByProvider 必须查两处的原因:
+//	RouteScopeProvider:name = provider 名,provider 列为空(层内 provider 名次)
+//	RouteScopeKey:     provider = provider 名,name = key 名(provider 内 key 顺序)
+const (
+	RouteScopeProvider = "provider"
+	RouteScopeKey      = "key"
+)
+
 type RouteOrder struct {
 	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	Scope         string    `gorm:"column:scope;not null" json:"scope"` // "provider" | "key"
+	Scope         string    `gorm:"column:scope;not null" json:"scope"` // RouteScopeProvider | RouteScopeKey
 	Provider      string    `gorm:"column:provider;not null" json:"provider"`
 	Name          string    `gorm:"column:name;not null;default:''" json:"name"`
 	BillingSource string    `gorm:"column:billing_source;not null;default:''" json:"billing_source"`

@@ -35,6 +35,11 @@ type ProviderModelStore interface {
 	AddFaceModels(ctx context.Context, vendor, face string, modelIDs []string) error
 	// AllFaces 列出全部面归属行(按 vendor/face/sort_order 有序)。
 	AllFaces(ctx context.Context) ([]ProviderModelFace, error)
+	// DeleteFaceModels 删除某**面**的全部归属行,返回删除行数。
+	// 用于中转站删除时的级联清理 —— face 是字符串列而非外键,
+	// 删站不会自动带走归属行(见 handler.deleteRelayStation 的编排)。
+	// 只按 face 精确匹配:同 vendor 的其他面不受影响。
+	DeleteFaceModels(ctx context.Context, face string) (int64, error)
 	// PruneOrphanModels 删除该 vendor 下「在任何面都无归属」的 provider_models 行,
 	// 返回删除行数。用于清理上游下架/换 channel 后残留的模型(手工触发,不在同步里自动跑)。
 	PruneOrphanModels(ctx context.Context, vendor string) (int64, error)
@@ -209,6 +214,18 @@ func (s *gormProviderModelStore) AllFaces(ctx context.Context) ([]ProviderModelF
 		return nil, err
 	}
 	return out, nil
+}
+
+// DeleteFaceModels 删除某面的全部归属行(按 face 精确匹配)。
+// 只干一件事:删该面归属行。定价行(provider_models)的清理由调用方
+// 另行决定 —— vendor 可能仍有其他活面共享这些定价(如 mimo / mimo-token-plan),
+// 一并删会误伤。
+func (s *gormProviderModelStore) DeleteFaceModels(ctx context.Context, face string) (int64, error) {
+	if face == "" {
+		return 0, nil
+	}
+	res := s.db.WithContext(ctx).Where("face = ?", face).Delete(&ProviderModelFace{})
+	return res.RowsAffected, res.Error
 }
 
 // PruneOrphanModels 删除该 vendor 下无任何面归属的模型行。

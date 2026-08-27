@@ -23,6 +23,10 @@ type ProviderKeyStore interface {
 	List(ctx context.Context, providerName string) ([]dbpkg.ProviderAPIKey, error)
 	Create(ctx context.Context, k *dbpkg.ProviderAPIKey) error
 	Delete(ctx context.Context, id uint) error
+	// DeleteByProvider 删掉某 provider/面名下全部 key 行,返回删除行数。
+	// provider_name 是普通字符串列(非外键)—— 中转站被删后这些行会留下,
+	// 既在「上游 Key」页显示成幽灵条目,也让上游 key 明文无限期留库。
+	DeleteByProvider(ctx context.Context, providerName string) (int64, error)
 	GetPlainKeys(ctx context.Context, providerName string) ([]string, error) // 内部用,返回明文
 }
 
@@ -59,6 +63,21 @@ func (s *gormProviderKeyStore) Delete(ctx context.Context, id uint) error {
 		return gorm.ErrRecordNotFound
 	}
 	return nil
+}
+
+func (s *gormProviderKeyStore) DeleteByProvider(ctx context.Context, providerName string) (int64, error) {
+	// 空串直接返回:List 里 providerName=="" 意为「不过滤」,同样的空串落到
+	// Delete 上会清空整张表。
+	if providerName == "" {
+		return 0, nil
+	}
+	res := s.db.WithContext(ctx).
+		Where("provider_name = ?", providerName).
+		Delete(&dbpkg.ProviderAPIKey{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
 }
 
 // GetPlainKeys 返回某个 provider 的所有 enabled key 的明文(给 KeyPool 用)
