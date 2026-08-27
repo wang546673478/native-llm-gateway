@@ -92,7 +92,14 @@ type Config struct {
 	// QuotaChecker token_plan 降档的配额探测;nil = 不探测(直接当未耗尽)
 	// 由 server 注入 quotacheck.CheckQuota wrapper,proxy 不直接依赖 quotacheck 包
 	QuotaChecker QuotaChecker
-	MaxRetry     int // 最大 failover 次数,默认 3
+	// MaxRetry 每层最多「实际尝试」几个候选(白名单 skip 不计入)。
+	//	0 = 动态:该层有几个候选就试几个,走到层穷尽为止(默认)
+	//	正整数 = 显式封顶,给最坏延迟设上界
+	// 注意计的是**候选数**不是请求数 —— 换 key 重试(swapToOtherKey)和纯 429
+	// 同 key 重试都发生在单个候选内部,不额外消耗预算。
+	// 封顶从来不是防死循环的机制:RouteIterator 是有限单调的,层穷尽本身就是
+	// 终止边界;封顶只会砍掉「有但没试」的候选(见 runCandidateLoop 注释)。
+	MaxRetry int
 	// WriteTimeout 流式写 deadline 续期预算(取 server.write_timeout)。
 	// 非流式响应仍是绝对上限;流式场景按 chunk 续期成空闲超时。<=0 时默认 2min。
 	WriteTimeout time.Duration
@@ -120,8 +127,10 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.Metrics == nil {
 		cfg.Metrics = NoopMetricsRecorder{}
 	}
-	if cfg.MaxRetry <= 0 {
-		cfg.MaxRetry = 3
+	// 0 是**有效值**(动态,不封顶),所以只夹负数。
+	// 这是「候选预算」语义变更的唯一开关点:改回 <= 0 就退化成写死封顶。
+	if cfg.MaxRetry < 0 {
+		cfg.MaxRetry = 0
 	}
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 2 * time.Minute
@@ -1159,8 +1168,11 @@ const (
 //   - 层边界仅在「该层有实际失败且无额度证据」时 handleAllFailed 失败返回
 //     (不变式:不降档);纯 skip 层(白名单排除,无实际失败)自由推进
 //   - 有额度证据 → 接受新 tier 候选(降档),证据清零
-//   - maxRetry 是「每层安全阀」:某层实际尝试数到上限后跳过该层剩余候选,
-//     直取下一层候选做层切换判定(有证据照样降档,不被封顶截断);
+//   - maxRetry 是「每层候选预算」,**不是**防死循环机制:RouteIterator 有限
+//     单调(candidates 切片 + current++ 无回退),层穷尽本身就是终止边界。
+//     maxRetry == 0 → 动态:该层有几个候选就试几个(默认,#failover-stops-early);
+//     maxRetry > 0 → 显式封顶:某层实际尝试数到上限后跳过该层剩余候选,直取
+//     下一层候选做层切换判定(有证据照样降档,不被封顶截断);
 //     新层被接受 → 重置尝试预算
 //   - 所有失败统一由 handleAllFailed 收尾(含不可重试透传)
 func (e *Engine) runCandidateLoop(
@@ -1198,8 +1210,9 @@ func (e *Engine) runCandidateLoop(
 		tierSawFailure = false
 		currentTier = newTier
 		// I-2:每层重置尝试预算 — 层切换的两条路径(自然推进 / valve 封顶
-		// fetch-ahead)都经 acceptTier,在此重置才两条全覆盖。总界 =
-		// 每层 maxRetry × 每候选最多 2 次 key 尝试(原 key + 换 key 重试)
+		// fetch-ahead)都经 acceptTier,在此重置才两条全覆盖。
+		// maxRetry > 0 时总界 = 每层 maxRetry × 每候选最多 2 次 key 尝试;
+		// maxRetry == 0 时界 = 该层候选数(迭代器有限)
 		attempts = 0
 		return true
 	}
@@ -1223,7 +1236,8 @@ func (e *Engine) runCandidateLoop(
 		var result *router.RouteResult
 		var err error
 
-		if attempts >= e.maxRetry {
+		// maxRetry == 0 = 动态,不封顶:直接靠层穷尽终止,不进 valve 分支。
+		if e.maxRetry > 0 && attempts >= e.maxRetry {
 			// 本层尝试预算耗尽:跳过剩余同层候选,取下一层候选做层切换判定
 			peek, perr := peekNextTier()
 			if perr != nil {

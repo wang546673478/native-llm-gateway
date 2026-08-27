@@ -349,7 +349,13 @@ timeouts:
 
 retry:
   enabled: true
-  max_attempts: 3
+  # 每层(token_plan / api / free)最多实际尝试几个候选。
+  #   0 = 动态:该层有几个候选就试几个,走到层穷尽为止(推荐)
+  #   正整数 = 显式封顶,给最坏延迟设上界
+  # 计的是**候选数**不是请求数:换 key 重试、纯 429 同 key 重试都在单个候选内部。
+  # 候选很多且常 429 时最坏延迟 ≈ 候选数 × 10 次同 key 重试,受 write_timeout 兜底;
+  # 想收紧就把这里设成一个正整数(如 8)。
+  max_attempts: 0
   no_failover_on:
     - "invalid_request"
     - "auth"
