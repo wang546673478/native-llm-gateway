@@ -375,7 +375,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			defer func() {
 				// 在 close(ch) 前填 usage
 				if inputTokens > 0 || outputTokens > 0 || cacheCreation > 0 || cacheRead > 0 {
-					resp.Usage = &provider.Usage{
+					resp.SetUsage(&provider.Usage{
 						Model:               upstreamModel, // P65
 						PromptTokens:        inputTokens,
 						CompletionTokens:    outputTokens,
@@ -388,7 +388,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 							"cache_creation_input_tokens": cacheCreation,
 							"cache_read_input_tokens":     cacheRead,
 						},
-					}
+					})
 				}
 				close(ch)
 			}()

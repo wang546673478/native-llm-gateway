@@ -817,7 +817,7 @@ streamEnd:
 	// 我们 drain 完 channel 后安全读取
 	var streamUsage *provider.Usage
 	if headerResp != nil {
-		streamUsage = headerResp.Usage
+		streamUsage = headerResp.GetUsage()
 	}
 	return true, streamUsage, nil, ttftMs
 }

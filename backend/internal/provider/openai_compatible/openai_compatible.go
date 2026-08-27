@@ -339,7 +339,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	go func() {
 		defer func() {
 			// 在 channel 关闭前先填 usage,这样 caller drain 完就能安全读
-			resp.Usage = lastUsage
+			resp.SetUsage(lastUsage)
 			close(ch)
 		}()
 		defer httpResp.Body.Close()

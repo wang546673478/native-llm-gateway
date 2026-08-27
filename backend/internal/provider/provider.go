@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -249,6 +250,21 @@ type Response struct {
 	Headers    http.Header
 	Body       []byte
 	Usage      *Usage
+	usageMu    sync.RWMutex // 保护 Usage 字段的并发访问
+}
+
+// SetUsage 线程安全地设置 Usage
+func (r *Response) SetUsage(u *Usage) {
+	r.usageMu.Lock()
+	r.Usage = u
+	r.usageMu.Unlock()
+}
+
+// GetUsage 线程安全地读取 Usage
+func (r *Response) GetUsage() *Usage {
+	r.usageMu.RLock()
+	defer r.usageMu.RUnlock()
+	return r.Usage
 }
 
 // StreamChunk 流式响应的单条数据
