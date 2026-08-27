@@ -214,8 +214,25 @@ func TestSyncVendorModels_MergesFaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncVendorModels: %v", err)
 	}
-	if !reflect.DeepEqual(ids, []string{"gpt-5.4", "gpt-5.5", "claude-opus-5"}) {
-		t.Errorf("ids = %v, want [gpt-5.4 gpt-5.5 claude-opus-5] (merged, deduped)", ids)
+	// 验证返回的模型集合（不依赖顺序，因为 map 遍历顺序随机）
+	want := map[string]bool{"gpt-5.4": true, "gpt-5.5": true, "claude-opus-5": true}
+	if len(ids) != len(want) {
+		t.Errorf("len(ids) = %d, want %d", len(ids), len(want))
+	}
+	for _, id := range ids {
+		if !want[id] {
+			t.Errorf("unexpected model %q in ids", id)
+		}
+	}
+	// 验证去重生效（gpt-5.5 在两个面都有，但只应出现一次）
+	seen := make(map[string]int)
+	for _, id := range ids {
+		seen[id]++
+	}
+	for id, count := range seen {
+		if count > 1 {
+			t.Errorf("model %q appears %d times, want 1 (should be deduped)", id, count)
+		}
 	}
 	if store.calls != 1 {
 		t.Fatalf("store calls = %d, want 1 (single upsert for merged list)", store.calls)
