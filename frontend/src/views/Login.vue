@@ -1,68 +1,95 @@
 <template>
   <div class="login-container">
-    <div class="login-card">
-      <h1>LLM Gateway</h1>
-      <h2>管理员登录</h2>
-
-      <div v-if="disabled" class="feature-disabled">
-        <p>⚠️ 管理员认证功能未启用</p>
-        <p class="hint">请在 config.yaml 中设置 admin_auth.enabled: true</p>
+    <n-card class="login-card" :bordered="false">
+      <div class="brand">
+        <div class="brand-mark">⚡</div>
+        <h1>LLM Gateway</h1>
+        <p class="subtitle">管理员登录</p>
       </div>
 
-      <form v-else @submit.prevent="handleLogin" class="login-form">
-        <div class="form-group">
-          <label for="username">用户名</label>
-          <input
-            id="username"
-            v-model="username"
-            type="text"
+      <n-alert
+        v-if="disabled"
+        type="warning"
+        title="管理员认证功能未启用"
+        :bordered="false"
+      >
+        请在 config.yaml 中设置 <code class="mono">admin_auth.enabled: true</code>
+      </n-alert>
+
+      <n-form
+        v-else
+        ref="formRef"
+        :model="form"
+        :show-label="true"
+        @submit.prevent="handleLogin"
+      >
+        <n-form-item label="用户名" path="username">
+          <n-input
+            v-model:value="form.username"
+            placeholder="请输入用户名"
+            :disabled="loading"
             autocomplete="username"
-            required
-            :disabled="loading"
+            @keyup.enter="handleLogin"
           />
-        </div>
+        </n-form-item>
 
-        <div class="form-group">
-          <label for="password">密码</label>
-          <input
-            id="password"
-            v-model="password"
+        <n-form-item label="密码" path="password">
+          <n-input
+            v-model:value="form.password"
             type="password"
-            autocomplete="current-password"
-            required
+            show-password-on="click"
+            placeholder="请输入密码"
             :disabled="loading"
+            autocomplete="current-password"
+            @keyup.enter="handleLogin"
           />
-        </div>
+        </n-form-item>
 
-        <div v-if="error" class="error-message">
+        <n-alert
+          v-if="error"
+          type="error"
+          :bordered="false"
+          class="login-error"
+        >
           {{ error }}
-        </div>
+        </n-alert>
 
-        <button type="submit" :disabled="loading" class="login-button">
-          {{ loading ? '登录中...' : '登录' }}
-        </button>
-      </form>
-    </div>
+        <n-button
+          type="primary"
+          block
+          size="large"
+          attr-type="submit"
+          :loading="loading"
+          :disabled="loading"
+          @click="handleLogin"
+        >
+          {{ loading ? '登录中…' : '登录' }}
+        </n-button>
+      </n-form>
+    </n-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { NAlert, NButton, NCard, NForm, NFormItem, NInput } from 'naive-ui'
 import { useAuthStore } from '../stores/auth'
 import { authApi } from '../api/client'
 
 const router = useRouter()
 const authStore = useAuthStore()
 
-const username = ref('')
-const password = ref('')
+const form = reactive({ username: '', password: '' })
 const loading = ref(false)
 const error = ref('')
 const disabled = ref(false)
 
+// 错误分支与改造前逐条对应(feature_disabled / 后端 message / 401 / 429 / 兜底)—
+// 这次只改表现层,鉴权行为不动。
 async function handleLogin() {
-  if (!username.value || !password.value) {
+  if (loading.value) return
+  if (!form.username || !form.password) {
     error.value = '请输入用户名和密码'
     return
   }
@@ -72,8 +99,8 @@ async function handleLogin() {
 
   try {
     const resp = await authApi.login({
-      username: username.value,
-      password: password.value,
+      username: form.username,
+      password: form.password,
     })
 
     authStore.setToken(resp.token)
@@ -103,119 +130,60 @@ async function handleLogin() {
 </script>
 
 <style scoped>
+/* 背景由主色衍生(不再是与全站无关的孤立紫色)。
+   两层 radial-gradient 叠在页面底色上 —— 暗色模式下 token 自动换值。 */
 .login-container {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: var(--sp-4);
+  background:
+    radial-gradient(circle at 15% 20%, var(--c-primary-soft) 0%, transparent 45%),
+    radial-gradient(circle at 85% 80%, var(--c-info-soft) 0%, transparent 45%),
+    var(--s-page);
 }
 
 .login-card {
-  background: white;
-  padding: 2.5rem;
-  border-radius: 12px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
   width: 100%;
   max-width: 400px;
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-3);
 }
 
-h1 {
-  margin: 0 0 0.5rem 0;
-  font-size: 1.8rem;
-  color: #333;
+.brand {
   text-align: center;
+  margin-bottom: var(--sp-6);
 }
 
-h2 {
-  margin: 0 0 2rem 0;
-  font-size: 1.2rem;
-  font-weight: 400;
-  color: #666;
-  text-align: center;
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--c-primary-soft);
+  font-size: 24px;
+  line-height: 1;
 }
 
-.feature-disabled {
-  padding: 1.5rem;
-  background: #fff3cd;
-  border: 1px solid #ffc107;
-  border-radius: 8px;
-  text-align: center;
+.brand h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--t-1);
 }
 
-.feature-disabled p {
-  margin: 0.5rem 0;
-  color: #856404;
+.subtitle {
+  margin: var(--sp-1) 0 0;
+  font-size: 14px;
+  color: var(--t-3);
 }
 
-.feature-disabled .hint {
-  font-size: 0.9rem;
-  color: #666;
-}
-
-.login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-}
-
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-label {
-  font-size: 0.9rem;
-  font-weight: 500;
-  color: #555;
-}
-
-input {
-  padding: 0.75rem;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 1rem;
-  transition: border-color 0.2s;
-}
-
-input:focus {
-  outline: none;
-  border-color: #667eea;
-}
-
-input:disabled {
-  background: #f5f5f5;
-  cursor: not-allowed;
-}
-
-.error-message {
-  padding: 0.75rem;
-  background: #fee;
-  border: 1px solid #fcc;
-  border-radius: 6px;
-  color: #c33;
-  font-size: 0.9rem;
-}
-
-.login-button {
-  padding: 0.875rem;
-  background: #667eea;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 1rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.login-button:hover:not(:disabled) {
-  background: #5568d3;
-}
-
-.login-button:disabled {
-  background: #ccc;
-  cursor: not-allowed;
+.login-error {
+  margin-bottom: var(--sp-4);
 }
 </style>

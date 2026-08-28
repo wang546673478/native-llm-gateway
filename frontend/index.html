@@ -5,6 +5,22 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Native LLM Gateway</title>
+    <!-- 防白闪:SSR-style 提前注入 dark class,避免 Vue mount 前亮色→暗色跳变。
+         与 useTheme 共享 STORAGE_KEY,逻辑一致(system→读 matchMedia / light→移 / dark→加)。
+         Vue mount 后 useTheme 接管,watchEffect 会再设一次(幂等)。 -->
+    <script>
+      (function() {
+        try {
+          const mode = localStorage.getItem('llm-gateway-theme') || 'system'
+          const systemDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+          const dark = mode === 'system' ? systemDark : mode === 'dark'
+          if (dark) {
+            document.documentElement.classList.add('dark')
+            document.documentElement.style.colorScheme = 'dark'
+          }
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

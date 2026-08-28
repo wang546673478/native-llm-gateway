@@ -1,5 +1,7 @@
 <template>
-  <n-config-provider :theme="null">
+  <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides">
+    <!-- NGlobalStyle: 让 naive-ui 接管 body 背景/文字色,暗色切换时不留白底 -->
+    <n-global-style />
     <n-message-provider>
       <!-- NDialogProvider: useDialog() 的宿主 —— 缺它则 useDialog() 返回 undefined,
            调用方 setup 阶段抛错、整个页面白屏(ModelManager 的「清理无归属」二次确认用) -->
@@ -25,12 +27,15 @@
         <n-layout>
           <n-layout-header bordered style="padding: 12px 24px">
             <n-space justify="space-between" align="center">
-              <span style="font-size: 18px; font-weight: 600">
+              <span class="page-title">
                 {{ currentTitle }}
               </span>
-              <n-tag :type="healthOk ? 'success' : 'error'" size="small">
-                {{ healthOk ? '● Healthy' : '● Unhealthy' }}
-              </n-tag>
+              <n-space align="center" :size="12">
+                <theme-switch />
+                <n-tag :type="healthOk ? 'success' : 'error'" size="small">
+                  {{ healthOk ? '● Healthy' : '● Unhealthy' }}
+                </n-tag>
+              </n-space>
             </n-space>
           </n-layout-header>
           <n-layout-content style="padding: 24px">
@@ -44,22 +49,68 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  NConfigProvider, NDialogProvider, NLayout, NLayoutSider, NLayoutHeader, NLayoutContent,
-  NMenu, NMessageProvider, NSpace, NTag,
+  NConfigProvider, NDialogProvider, NGlobalStyle, NLayout, NLayoutSider,
+  NLayoutHeader, NLayoutContent, NMenu, NMessageProvider, NSpace, NTag,
+  darkTheme,
 } from 'naive-ui'
-import type { MenuOption } from 'naive-ui'
+import type { GlobalThemeOverrides, MenuOption } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { useHealthStore } from './stores/health'
 import { useAuthStore } from './stores/auth'
 import { authApi } from './api/client'
+import { useTheme } from './composables/useTheme'
+import ThemeSwitch from './components/ThemeSwitch.vue'
 
 const route = useRoute()
 const router = useRouter()
 const healthStore = useHealthStore()
 const authStore = useAuthStore()
+const { isDark } = useTheme()
+
+// naive-ui 内置主题:暗色传 darkTheme,亮色传 null(库的默认亮色)
+const naiveTheme = computed(() => (isDark.value ? darkTheme : null))
+
+// themeOverrides 让 naive-ui 组件的主色与 tokens.css 对齐 —— 否则库按钮/标签
+// 仍用它自己的绿,与手写样式的 var(--c-primary) 分叉。
+// 这不是双真相源:naive-ui 的 API 只接受 JS 值(不吃 CSS 变量),两边引用同一组
+// 语义色常量是库的约束。改主色时两处一起改(值相同),由下方注释锁定关联。
+// 值必须与 styles/tokens.css 的 --c-primary / --c-info / --c-warning / --c-error 一致。
+const LIGHT = {
+  primary: '#18a058', primaryHover: '#36ad6a', primaryPressed: '#0c7a43',
+  info: '#2080f0', warning: '#f0a020', error: '#d03050',
+}
+const DARK = {
+  primary: '#4ade80', primaryHover: '#63e894', primaryPressed: '#35c96b',
+  info: '#60a5fa', warning: '#fbbf24', error: '#f87171',
+}
+
+const themeOverrides = computed<GlobalThemeOverrides>(() => {
+  const c = isDark.value ? DARK : LIGHT
+  return {
+    common: {
+      primaryColor: c.primary,
+      primaryColorHover: c.primaryHover,
+      primaryColorPressed: c.primaryPressed,
+      primaryColorSuppl: c.primaryHover,
+      infoColor: c.info,
+      infoColorHover: c.info,
+      warningColor: c.warning,
+      warningColorHover: c.warning,
+      errorColor: c.error,
+      errorColorHover: c.error,
+      successColor: c.primary,
+      successColorHover: c.primaryHover,
+      borderRadius: '8px',
+      borderRadiusSmall: '6px',
+      fontFamilyMono: 'var(--font-mono)',
+    },
+    Card: { borderRadius: '10px' },
+    DataTable: { thFontWeight: '600' },
+  }
+})
 
 const isLoginPage = computed(() => route.path === '/login')
 const activeKey = computed(() => route.path)
@@ -148,47 +199,54 @@ onMounted(() => {
 </script>
 
 <style>
+/* body 基线已移到 styles/tokens.css(与 CSS 变量同源),这里只留布局件样式 */
+
 .logo {
-  padding: 16px;
+  padding: var(--sp-4);
   font-size: 16px;
   font-weight: 700;
-  color: #18a058;
-  border-bottom: 1px solid #eee;
+  color: var(--c-primary);
+  border-bottom: 1px solid var(--b-1);
+  letter-spacing: -0.01em;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--t-1);
 }
 
 .user-info {
-  padding: 12px 16px;
-  border-top: 1px solid #eee;
-  background: #fafafa;
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--b-1);
+  background: var(--s-sunken);
   flex-shrink: 0;
 }
 
 .username {
   font-size: 14px;
   font-weight: 500;
-  color: #333;
-  margin-bottom: 8px;
+  color: var(--t-1);
+  margin-bottom: var(--sp-2);
 }
 
 .logout-button {
   width: 100%;
   padding: 6px 12px;
-  background: white;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  background: var(--s-card);
+  color: var(--t-2);
+  border: 1px solid var(--b-1);
+  border-radius: var(--r-sm);
   cursor: pointer;
   font-size: 13px;
-  transition: all 0.2s;
+  font-family: inherit;
+  transition: background var(--tr-fast), border-color var(--tr-fast),
+    color var(--tr-fast);
 }
 
 .logout-button:hover {
-  background: #f5f5f5;
-  border-color: #999;
-}
-
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f5f7fa;
+  background: var(--c-primary-soft);
+  border-color: var(--c-primary);
+  color: var(--c-primary);
 }
 </style>

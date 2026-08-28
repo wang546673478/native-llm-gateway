@@ -1,6 +1,8 @@
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !firstLoad">
+    <table-skeleton v-if="firstLoad" />
     <n-data-table
+      v-else
       :columns="columns"
       :data="providers"
       :bordered="false"
@@ -14,11 +16,14 @@ import { h, onMounted, ref } from 'vue'
 import { NDataTable, NSpin, NTag } from 'naive-ui'
 import type { VendorInfo } from '../api/client'
 import { useProvidersStore } from '../stores/providers'
+import { useFirstLoad } from '../composables/useFirstLoad'
+import TableSkeleton from '../components/TableSkeleton.vue'
 
 // P-provider-vendor: 一行 = 一个厂商(vendor),names 列出该厂商的全部注册名(协议面)
 // 数据源 = 共享 providers store(全字段 VendorInfo,含 key_pool/circuit_breaker)
 const providers = ref<VendorInfo[]>([])
 const loading = ref(true)
+const { firstLoad } = useFirstLoad(loading)
 const store = useProvidersStore()
 
 const columns = [

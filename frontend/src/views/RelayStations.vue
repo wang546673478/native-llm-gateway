@@ -1,5 +1,5 @@
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !firstLoad">
     <n-card>
       <n-space justify="space-between" align="center" style="margin-bottom: 16px">
         <n-h3 style="margin: 0">中转站配置 ({{ stations.length }})</n-h3>
@@ -9,7 +9,8 @@
         </n-space>
       </n-space>
 
-      <n-data-table :columns="columns" :data="stations" :bordered="false" />
+      <table-skeleton v-if="firstLoad" :rows="4" />
+      <n-data-table v-else :columns="columns" :data="stations" :bordered="false" />
     </n-card>
 
     <n-modal
@@ -93,9 +94,12 @@ import {
 } from '../api/client'
 import { BILLING_SOURCE } from '../api/constants'
 import { fmtDateTime } from '../utils/time'
+import { useFirstLoad } from '../composables/useFirstLoad'
+import TableSkeleton from '../components/TableSkeleton.vue'
 
 const stations = ref<RelayStation[]>([])
 const loading = ref(false)
+const { firstLoad } = useFirstLoad(loading)
 const saving = ref(false)
 const modalVisible = ref(false)
 const editing = ref(false)

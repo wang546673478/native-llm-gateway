@@ -1,0 +1,168 @@
+/* 设计 token 单一真相源。
+ *
+ * 低耦合:此前 11 个 view 各自硬编码同一套色值(#18a058 绿 / #2080f0 蓝 /
+ * #f0a020 黄 / #d03050 红 / #999 灰 / #fafafa 底 / #e5e7eb 描边),改一个颜色
+ * 要改多处且漏一处 UI 不一致。集中到这里,各 view 只消费变量。
+ *
+ * 暗色不是亮色的翻转:语义色必须单独提亮。#18a058 在 #1e2126 上对比度 ≈ 2.9:1,
+ * 低于 WCAG AA 的 4.5:1;暗色下提到 #4ade80(≈ 8.1:1)才可读。
+ *
+ * 消费方:各 view 的 <style> 用 var(--x);utils/status.ts 的 STATUS_PALETTE
+ * 在运行时读这里的语义色(getComputedStyle),让 render() 函数也跟随主题。
+ * naive-ui 组件走 App.vue 的 themeOverrides(库 API 只接受 JS 值)。
+ */
+
+:root {
+  /* ── 品牌 & 语义色 ─────────────────────────── */
+  --c-primary: #18a058;
+  --c-primary-hover: #36ad6a;
+  --c-primary-pressed: #0c7a43;
+  --c-primary-soft: rgba(24, 160, 88, 0.1);
+  --c-info: #2080f0;
+  --c-info-soft: rgba(32, 128, 240, 0.1);
+  --c-warning: #f0a020;
+  --c-warning-soft: rgba(240, 160, 32, 0.12);
+  --c-error: #d03050;
+  --c-error-soft: rgba(208, 48, 80, 0.1);
+  --c-neutral: #909399;
+
+  /* ── 文本 ─────────────────────────────────── */
+  --t-1: #1f2225; /* 主文本:标题、数值 */
+  --t-2: #4b5158; /* 次要:正文、标签 */
+  --t-3: #8b9096; /* 弱化:说明、占位、'—' */
+  --t-inverse: #ffffff;
+
+  /* ── 表面 ─────────────────────────────────── */
+  --s-page: #f5f7fa; /* 页面底 */
+  --s-card: #ffffff; /* 卡片 / 表格行 */
+  --s-sunken: #fafafa; /* 内嵌区块(比卡片更低一层) */
+  --s-raised: #ffffff; /* 浮起元素(下拉、抽屉) */
+  --s-hover: rgba(0, 0, 0, 0.03);
+  --s-chip: #f5f5f7; /* 药丸标签底(Routing key chip) */
+
+  /* ── 描边 ─────────────────────────────────── */
+  --b-1: #e5e7eb; /* 主描边 */
+  --b-2: #ececec; /* 更浅 */
+  --b-dash: #e0e0e6; /* 虚线分隔 */
+
+  /* ── 形状 ─────────────────────────────────── */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* ── 阴影 ─────────────────────────────────── */
+  --sh-1: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --sh-2: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --sh-3: 0 10px 40px rgba(0, 0, 0, 0.2);
+
+  /* ── 间距 ─────────────────────────────────── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* ── 字体 ─────────────────────────────────── */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  /* 等宽:key / traceID / 模型名 / 端点 URL —— 让 0/O、1/l 不混,列对齐 */
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+
+  /* ── 过渡 ─────────────────────────────────── */
+  --tr-fast: 0.15s ease;
+  --tr-base: 0.25s ease;
+}
+
+html.dark {
+  /* 语义色提亮 —— 保证暗底对比度达 WCAG AA */
+  --c-primary: #4ade80;
+  --c-primary-hover: #63e894;
+  --c-primary-pressed: #35c96b;
+  --c-primary-soft: rgba(74, 222, 128, 0.14);
+  --c-info: #60a5fa;
+  --c-info-soft: rgba(96, 165, 250, 0.14);
+  --c-warning: #fbbf24;
+  --c-warning-soft: rgba(251, 191, 36, 0.16);
+  --c-error: #f87171;
+  --c-error-soft: rgba(248, 113, 113, 0.14);
+  --c-neutral: #9ca3af;
+
+  --t-1: #e8eaed;
+  --t-2: #b4b8bd;
+  --t-3: #7c8288;
+  --t-inverse: #16181c;
+
+  --s-page: #16181c;
+  --s-card: #1e2126;
+  --s-sunken: #22262b;
+  --s-raised: #24282e;
+  --s-hover: rgba(255, 255, 255, 0.05);
+  --s-chip: #2a2f36;
+
+  --b-1: #2e3238;
+  --b-2: #343941;
+  --b-dash: #383d44;
+
+  --sh-1: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --sh-2: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --sh-3: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* ── 全局基线 ───────────────────────────────── */
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--s-page);
+  color: var(--t-1);
+  /* 主题切换时平滑过渡,避免闪白 */
+  transition: background-color var(--tr-base), color var(--tr-base);
+}
+
+/* 等宽工具类 —— key / traceID / 模型名 / URL 统一用它 */
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  letter-spacing: -0.01em;
+}
+
+/* 可点击复制的片段(key / token):等宽 + 淡主色底。
+   放全局而非 view 的 scoped block —— 它用在 naive-ui 列 render() 产出的 VNode 上,
+   那些节点由表格组件的 render 上下文创建,拿不到父组件的 scoped 属性,scoped 样式不会命中。
+   命名刻意避开 .key-chip —— Routing.vue 的 scoped 样式已占用那个名字,
+   同名会让全局规则漏进它的 chip(scoped 只提高特异性,不隔离同名类)。 */
+.copy-chip {
+  padding: 2px 6px;
+  background: var(--c-primary-soft);
+  border-radius: var(--r-sm);
+  user-select: all;
+  cursor: pointer;
+  transition: background var(--tr-fast), color var(--tr-fast);
+}
+.copy-chip:hover {
+  background: var(--c-primary);
+  color: var(--t-inverse);
+}
+
+/* ── 表格行状态色条 ─────────────────────────────
+   约定:view 的 :row-class-name 返回 row-ok / row-warn / row-error / row-muted,
+   色条样式只在这里定义一份(否则 ProviderKeys/Keys/AdminUsers 各抄一遍 :deep)。
+   naive-ui 把 class 打在 <tr> 上,所以必须是全局样式,不能写在 scoped block 里。
+   用 inset box-shadow 而非 border-left:不占布局宽度,列不会错位。 */
+.n-data-table-tr[class*='row-'] > .n-data-table-td:first-child {
+  position: relative;
+}
+.row-ok > .n-data-table-td:first-child {
+  box-shadow: inset 3px 0 0 var(--c-primary);
+}
+.row-warn > .n-data-table-td:first-child {
+  box-shadow: inset 3px 0 0 var(--c-warning);
+}
+.row-error > .n-data-table-td:first-child {
+  box-shadow: inset 3px 0 0 var(--c-error);
+}
+.row-muted > .n-data-table-td:first-child {
+  box-shadow: inset 3px 0 0 var(--c-neutral);
+}

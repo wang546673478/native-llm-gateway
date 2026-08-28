@@ -1605,6 +1605,13 @@ func (e *Engine) attemptOne(
 			zap.String("error_type", string((*lastErr).ErrorType)),
 			zap.Int("status", (*lastErr).StatusCode),
 			zap.String("trace_id", req.TraceID))
+		// P-failover-accesslog: 每次失败尝试都记录到 access_logs,追踪完整 failover 路径。
+		// 克隆当前 entry 快照并填充失败信息,让 access_logs 保留中间尝试的完整链路
+		// (上游中转站有失败记录,Gateway 也应该记录)。defer 里的最终记录保持不变。
+		if entry != nil && e.accessLog != nil {
+			failedEntry := e.cloneEntryForFailover(entry, *lastErr, result)
+			e.accessLog.RecordAsync(failedEntry)
+		}
 	}
 	return false
 }
@@ -1683,6 +1690,29 @@ func (e *Engine) swapToOtherKey(c *gin.Context, req *provider.Request, result *r
 	result.Key = k
 	e.bindKey(req, result)
 	return true
+}
+
+// cloneEntryForFailover 克隆 entry 快照并填充失败信息，用于记录 failover 中间尝试。
+// 每次 attemptOne 失败时调用，让 access_logs 保留完整的 provider 尝试链路。
+func (e *Engine) cloneEntryForFailover(base *accesslog.AccessEntry, err *provider.ProviderError, result *router.RouteResult) *accesslog.AccessEntry {
+	clone := *base // 值拷贝
+	clone.ID = 0   // 让数据库生成新 ID
+	// 填充失败时的 provider 信息
+	clone.ProviderName = provider.Default().VendorFor(result.ProviderName)
+	if result.Key != nil {
+		clone.ProviderKeyID = result.Key.ID
+	}
+	clone.FinalModel = result.ModelID
+	clone.Protocol = string(result.Protocol)
+	// 填充错误信息
+	clone.StatusCode = err.StatusCode
+	clone.ErrorType = string(err.ErrorType)
+	// 计算到当前失败时刻的耗时
+	clone.LatencyMs = int(time.Since(base.CreatedAt) / time.Millisecond)
+	// 失败尝试没有响应体（可能有部分响应但不完整，不记录）
+	clone.RespBodyPath = ""
+	clone.RespBodySize = 0
+	return &clone
 }
 
 // endpointFor 取 provider 的 baseURL(Manager.EndpointFor;未加载/无 manager 时返回 "")

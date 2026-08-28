@@ -77,6 +77,10 @@
         />
       </n-card>
 
+      <n-card v-if="firstLoad">
+        <table-skeleton :rows="8" />
+      </n-card>
+
       <n-empty v-if="!loading && vendorNames.length === 0" description="暂无模型数据" />
     </n-space>
   </n-spin>
@@ -97,6 +101,8 @@ import {
 import type { DataTableColumns } from 'naive-ui'
 import { useDialog, useMessage } from 'naive-ui'
 import { api, type ProviderModelRow } from '../api/client'
+import { useFirstLoad } from '../composables/useFirstLoad'
+import TableSkeleton from '../components/TableSkeleton.vue'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -109,6 +115,7 @@ const faces = ref<Record<string, Record<string, string[]>>>({})
 // activeFace: vendor → 当前选中的面('' = 全部)
 const activeFace = ref<Record<string, string>>({})
 const loading = ref(true)
+const { firstLoad } = useFirstLoad(loading)
 const syncingVendor = ref<string | null>(null)
 const syncingAll = ref(false)
 const pruningVendor = ref<string | null>(null)

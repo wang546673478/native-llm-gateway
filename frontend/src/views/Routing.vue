@@ -1,7 +1,12 @@
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !firstLoad">
+    <!-- 首屏骨架:下面那张卡要等 data 到位才渲染,没有骨架的话首屏是纯空白 -->
+    <n-card v-if="firstLoad" title="兜底路由 *(任意未知模型)" style="margin-bottom: 12px">
+      <table-skeleton :rows="6" />
+    </n-card>
+
     <!-- P-catch-all 自动模式:唯一的"路由规则" — 无路由表,所有 provider 自动参与 -->
-    <n-card v-if="data?.catch_all" title="兜底路由 *(任意未知模型)" style="margin-bottom: 12px">
+    <n-card v-else-if="data?.catch_all" title="兜底路由 *(任意未知模型)" style="margin-bottom: 12px">
       <template v-if="(data.catch_all.Providers ?? []).length === 0">
         <n-space align="center" style="margin-bottom: 8px">
           <n-tag type="success">自动模式</n-tag>
@@ -14,7 +19,7 @@
         <!-- 保存/取消条 -->
         <n-space justify="space-between" align="center" style="margin: 12px 0">
           <n-text depth="2" style="font-size: 15px; font-weight: 600">
-            🗂 调度顺序树<span style="font-weight: 400; color: #888"> — 拖拽 provider / key 调整优先级,点保存落库并即时生效</span>
+            🗂 调度顺序树<span style="font-weight: 400; color: var(--t-3)"> — 拖拽 provider / key 调整优先级,点保存落库并即时生效</span>
           </n-text>
           <n-space>
             <n-tag v-if="hasDirty" type="warning" size="small">{{ dirtyCount }} 处待保存</n-tag>
@@ -30,7 +35,13 @@
           <n-gi v-for="layer in layers" :key="layer.key">
             <div class="layer-card" :style="{ borderTop: `3px solid ${layer.color}` }">
               <div class="layer-head">
-                <n-tag :bordered="false" :color="{ color: layer.color, textColor: '#fff' }" size="small">
+                <!-- textColor 用 --t-inverse 而非固定白:暗色下主色是亮绿/亮蓝,
+                     白字对比度不足(≈1.9:1),反色前景才读得清 -->
+                <n-tag
+                  :bordered="false"
+                  :color="{ color: layer.color, textColor: 'var(--t-inverse)' }"
+                  size="small"
+                >
                   {{ layer.label }}
                 </n-tag>
                 <n-text depth="3" style="font-size: 13px">
@@ -119,9 +130,12 @@ import { NCard, NButton, NDataTable, NEmpty, NGrid, NGi, NSpace, NSpin, NTag, NT
 import { api, type RoutingResp } from '../api/client'
 import { BILLING_SOURCE } from '../api/constants'
 import { useProvidersStore } from '../stores/providers'
+import { useFirstLoad } from '../composables/useFirstLoad'
+import TableSkeleton from '../components/TableSkeleton.vue'
 
 const data = ref<RoutingResp | null>(null)
 const loading = ref(true)
+const { firstLoad } = useFirstLoad(loading)
 const saving = ref(false)
 
 const store = useProvidersStore()
@@ -143,8 +157,10 @@ interface TreeLayer {
 }
 
 const layers = ref<TreeLayer[]>([
-  { key: BILLING_SOURCE.TOKEN_PLAN, label: 'token_plan', color: '#18a058', providers: [] },
-  { key: BILLING_SOURCE.API, label: 'api 付费', color: '#2080f0', providers: [] },
+  // color 存 CSS 变量引用而非色值 —— 两个消费点(borderTop / n-tag color)都落在
+  // 内联样式里,var() 在那里能解析,主题切换自动跟随。
+  { key: BILLING_SOURCE.TOKEN_PLAN, label: 'token_plan', color: 'var(--c-primary)', providers: [] },
+  { key: BILLING_SOURCE.API, label: 'api 付费', color: 'var(--c-info)', providers: [] },
 ])
 const dirty = ref(false)
 const dirtyCount = ref(0)
@@ -263,9 +279,9 @@ onMounted(async () => {
 
 <style scoped>
 .layer-card {
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fafafa;
+  border: 1px solid var(--b-1);
+  border-radius: var(--r-md);
+  background: var(--s-sunken);
   padding-bottom: 12px;
   min-height: 140px;
 }
@@ -274,7 +290,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  border-bottom: 1px dashed #e5e7eb;
+  border-bottom: 1px dashed var(--b-dash);
 }
 .provider-sortable {
   padding: 12px;
@@ -282,20 +298,20 @@ onMounted(async () => {
 .provider-card {
   display: flex;
   gap: 10px;
-  background: #fff;
-  border: 1px solid #ececec;
-  border-radius: 10px;
+  background: var(--s-card);
+  border: 1px solid var(--b-2);
+  border-radius: var(--r-md);
   padding: 12px 14px;
   margin-bottom: 10px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  transition: box-shadow 0.15s;
+  box-shadow: var(--sh-1);
+  transition: box-shadow var(--tr-fast);
 }
 .provider-card:hover {
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--sh-2);
 }
 .drag-handle {
   cursor: grab;
-  color: #bbb;
+  color: var(--t-3);
   user-select: none;
   padding-top: 2px;
   font-size: 18px;
@@ -329,15 +345,15 @@ onMounted(async () => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: #f5f5f7;
-  border-radius: 999px;
+  background: var(--s-chip);
+  border-radius: var(--r-pill);
   padding: 5px 14px;
   font-size: 14px;
   cursor: default;
 }
 .key-handle {
   cursor: grab;
-  color: #bbb;
+  color: var(--t-3);
   font-size: 12px;
   user-select: none;
 }
@@ -346,7 +362,7 @@ onMounted(async () => {
 }
 .drag-ghost {
   opacity: 0.4;
-  border: 1px dashed #aaa;
-  background: #f0f0f0;
+  border: 1px dashed var(--c-primary);
+  background: var(--c-primary-soft);
 }
 </style>

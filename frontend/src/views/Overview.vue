@@ -1,33 +1,50 @@
 <template>
-  <n-spin :show="loading">
-    <n-grid :cols="4" :x-gap="16" :y-gap="16">
+  <div>
+    <!-- 首次加载用骨架屏(不是全页 spin 遮罩):切页面不白闪。
+         后续 15s 轮询静默刷新,不再骨架化已有内容。 -->
+    <n-grid v-if="firstLoad" cols="1 s:2 l:4" responsive="screen" :x-gap="16" :y-gap="16">
+      <n-gi v-for="i in 4" :key="i">
+        <n-skeleton height="112px" :sharp="false" />
+      </n-gi>
+    </n-grid>
+    <n-grid v-else cols="1 s:2 l:4" responsive="screen" :x-gap="16" :y-gap="16">
       <n-gi>
-        <n-card title="总请求数(24h)">
-          <div class="big-num">{{ fmtNum(data?.total?.total_requests) }}</div>
-        </n-card>
+        <stat-card
+          icon="📊"
+          label="总请求数(24h)"
+          tone="primary"
+          :value="fmtNum(data?.total?.total_requests)"
+        />
       </n-gi>
       <n-gi>
-        <n-card title="总 Token 数">
-          <div class="big-num">{{ fmtNum(data?.total?.total_tokens) }}</div>
-        </n-card>
+        <stat-card
+          icon="🎯"
+          label="总 Token 数"
+          tone="info"
+          :value="fmtNum(data?.total?.total_tokens)"
+        />
       </n-gi>
       <n-gi>
-        <n-card title="错误数">
-          <div class="big-num" :class="{ danger: (data?.total?.error_count ?? 0) > 0 }">
-            {{ fmtNum(data?.total?.error_count) }}
-          </div>
-        </n-card>
+        <stat-card
+          icon="⚠"
+          label="错误数"
+          :tone="(data?.total?.error_count ?? 0) > 0 ? 'error' : 'primary'"
+          :value="fmtNum(data?.total?.error_count)"
+        />
       </n-gi>
       <n-gi>
-        <n-card title="总费用">
-          <div class="big-num">¥{{ (data?.total?.total_cost ?? 0).toFixed(4) }}</div>
-        </n-card>
+        <stat-card
+          icon="💰"
+          label="总费用"
+          tone="warning"
+          :value="`¥${(data?.total?.total_cost ?? 0).toFixed(4)}`"
+        />
       </n-gi>
     </n-grid>
 
     <!-- P65: 按 Model 卡片(每张卡显示一个 Model 的用量,不再按 provider 归类) -->
     <n-card title="按 Model 用量 (24h)" style="margin-top: 16px">
-      <n-grid :cols="3" :x-gap="16" :y-gap="16">
+      <n-grid cols="1 s:2 l:3" responsive="screen" :x-gap="16" :y-gap="16">
         <n-gi v-for="row in data?.by_model ?? []" :key="row.model_id">
           <div class="bs-card">
             <div class="bs-label">
@@ -65,7 +82,7 @@
          (整池可用额度粗略值)". 复用 keypools 数据,展示每池已 poll key
          的 Remaining 之和(CNY,toFixed(2)). -->
     <n-card title="整池可用额度 (QuotaKnownSum)" style="margin-top: 16px">
-      <n-grid :cols="3" :x-gap="16" :y-gap="16">
+      <n-grid cols="1 s:2 l:3" responsive="screen" :x-gap="16" :y-gap="16">
         <n-gi v-for="row in data?.keypools ?? []" :key="row.provider_name">
           <div class="bs-card">
             <div class="bs-label">
@@ -101,22 +118,25 @@
         />
       </div>
       <div v-if="fpCanonical" class="fp-canonical">
-        统一 device_id：<code>{{ fpCanonical }}</code>
+        统一 device_id：<code class="mono">{{ fpCanonical }}</code>
       </div>
     </n-card>
-  </n-spin>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import {
-  NCard, NDataTable, NGi, NGrid, NSpin, NSwitch,
+  NCard, NDataTable, NGi, NGrid, NSkeleton, NSwitch,
 } from 'naive-ui'
 import { api, type DashboardResp } from '../api/client'
 import { fmtNum, quotaDisplay } from '../utils/status'
+import StatCard from '../components/StatCard.vue'
 
 const data = ref<DashboardResp | null>(null)
-const loading = ref(true)
+// firstLoad 只在「还没拿到任何数据」时为 true —— 15s 轮询刷新不该把已有内容
+// 换成骨架(会周期性闪烁)。这与旧的 loading 全页遮罩语义不同,是有意的。
+const firstLoad = ref(true)
 let timer: number | undefined
 
 // P-fingerprint: 设备指纹归一化开关状态
@@ -160,13 +180,12 @@ const poolColumns = [
 // billing_source 现在是 key 级别的,可以在 Provider Keys 页面看每把 key 的 tier
 
 async function load() {
-  loading.value = true
   try {
     data.value = await api.dashboard()
   } catch (e) {
     console.error('dashboard load failed', e)
   } finally {
-    loading.value = false
+    firstLoad.value = false
   }
 }
 
@@ -181,57 +200,63 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.big-num {
-  font-size: 28px;
-  font-weight: 600;
-  color: #18a058;
-}
-.danger { color: #d03050; }
+/* 色值全部走 tokens.css 变量 —— 暗色模式自动跟随,改主色只改 token 一处 */
 
 /* P65: 按 Model 卡片(替代之前按 provider 归类) */
 .bs-card {
-  border: 1px solid #e0e0e6;
-  border-radius: 6px;
-  padding: 16px;
-  background: #fafafa;
-  border-left: 4px solid #2080f0;
+  border: 1px solid var(--b-dash);
+  border-radius: var(--r-md);
+  padding: var(--sp-4);
+  background: var(--s-sunken);
+  border-left: 3px solid var(--c-info);
+  transition: box-shadow var(--tr-fast), transform var(--tr-fast);
+}
+.bs-card:hover {
+  box-shadow: var(--sh-2);
+  transform: translateY(-1px);
 }
 .bs-label {
   display: flex;
   flex-direction: column;
-  margin-bottom: 12px;
+  margin-bottom: var(--sp-3);
 }
 .bs-tag {
-  font-size: 16px;
+  font-family: var(--font-mono);
+  font-size: 15px;
   font-weight: 600;
-  color: #2080f0;
+  color: var(--c-info);
+  word-break: break-all;
 }
 .bs-desc {
   font-size: 12px;
-  color: #888;
+  color: var(--t-3);
   margin-top: 2px;
 }
 .bs-stats {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--sp-1);
 }
 .bs-row {
   display: flex;
   justify-content: space-between;
   font-size: 13px;
 }
-.bs-row .bs-key { color: #888; }
-.bs-row .bs-val { font-weight: 500; }
+.bs-row .bs-key { color: var(--t-3); }
+.bs-row .bs-val {
+  font-weight: 500;
+  color: var(--t-1);
+  font-variant-numeric: tabular-nums;
+}
 .bs-row.big {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px dashed #ddd;
+  border-top: 1px dashed var(--b-dash);
   font-size: 14px;
 }
 .bs-row.big .bs-val {
-  font-weight: 600;
-  color: #18a058;
+  font-weight: 650;
+  color: var(--c-primary);
   font-size: 16px;
 }
 
@@ -240,21 +265,22 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--sp-4);
 }
 .fp-desc {
   font-size: 13px;
-  color: #888;
-  line-height: 1.6;
+  color: var(--t-3);
+  line-height: 1.65;
 }
 .fp-canonical {
   margin-top: 10px;
   font-size: 12px;
-  color: #666;
+  color: var(--t-2);
 }
 .fp-canonical code {
-  background: #f0f0f2;
+  background: var(--s-chip);
+  color: var(--t-1);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
 }
 </style>

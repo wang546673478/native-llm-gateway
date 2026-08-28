@@ -7,12 +7,40 @@
 
 // statusPalette 单一调色板(颜色 + 语义),供 status/billing/balance 等渲染共享。
 // 与 naive-ui 标签色一致:success/info/warning/error/undefined。
+//
+// 色值本身**不在这里定义** —— 真相源是 styles/tokens.css 的语义色变量。
+// 这里用 getter 在运行时读 CSS 变量:naive-ui 的 render() 每次重绘都重新取值,
+// 所以暗色切换后颜色自动跟上,各 view 不需要加 watch/key 强制重渲染。
+// 调用方写法(STATUS_PALETTE.green.color)完全不变。
+// cssToken 读一个设计 token 的当前值。导出是因为 canvas 渲染(echarts)不能吃
+// CSS 变量,只能拿到具体色值 —— 图表构造 option 时用它取色,与 CSS 走同一真相源。
+export function cssToken(name: string, fallback: string): string {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return fallback
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  return v || fallback
+}
+
 export const STATUS_PALETTE = {
-  green: { color: '#18a058', tagType: 'success' },
-  blue: { color: '#2080f0', tagType: 'info' },
-  yellow: { color: '#f0a020', tagType: 'warning' },
-  red: { color: '#d03050', tagType: 'error' },
-  gray: { color: '#999', tagType: 'default' },
+  green: {
+    get color() { return cssToken('--c-primary', '#18a058') },
+    tagType: 'success',
+  },
+  blue: {
+    get color() { return cssToken('--c-info', '#2080f0') },
+    tagType: 'info',
+  },
+  yellow: {
+    get color() { return cssToken('--c-warning', '#f0a020') },
+    tagType: 'warning',
+  },
+  red: {
+    get color() { return cssToken('--c-error', '#d03050') },
+    tagType: 'error',
+  },
+  gray: {
+    get color() { return cssToken('--c-neutral', '#909399') },
+    tagType: 'default',
+  },
 } as const
 
 // quotaDisplay 按 quota_kind(percent/currency/空)渲染余额值。

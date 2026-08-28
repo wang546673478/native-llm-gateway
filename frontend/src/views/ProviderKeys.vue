@@ -1,5 +1,5 @@
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !firstLoad">
     <n-card>
       <n-space justify="space-between" align="center" style="margin-bottom: 16px">
         <n-h3 style="margin: 0">Provider API Keys({{ keys.length }})</n-h3>
@@ -9,7 +9,15 @@
         </n-space>
       </n-space>
 
-      <n-data-table :columns="columns" :data="keys" :bordered="false" :pagination="false" />
+      <table-skeleton v-if="firstLoad" :rows="5" />
+      <n-data-table
+        v-else
+        :columns="columns"
+        :data="keys"
+        :bordered="false"
+        :pagination="false"
+        :row-class-name="rowClassName"
+      />
     </n-card>
 
     <n-modal
@@ -82,16 +90,60 @@ import { useProvidersStore } from '../stores/providers'
 import { BILLING_SOURCE, BILLING_SOURCE_DEFAULT, KEY_STATUS, KEY_STATUS_DISABLED_UI, QUOTA_KIND } from '../api/constants'
 import { STATUS_PALETTE } from '../utils/status'
 import { fmtDateTime } from '../utils/time'
+import { useFirstLoad } from '../composables/useFirstLoad'
+import TableSkeleton from '../components/TableSkeleton.vue'
 
 const keys = ref<ProviderKeyView[]>([])
 const providers = ref<VendorInfo[]>([])
 const loading = ref(false)
+const { firstLoad } = useFirstLoad(loading)
 const saving = ref(false)
 const modalVisible = ref(false)
 const editing = ref(false)
 const message = useMessage()
 // P-provider-vendor: store 持 vendors 单一来源;load() 内填充 providers
 const provStore = useProvidersStore()
+
+// keyStatusMeta 单点推导一行 key 的状态呈现 —— 颜色/文案/行色条三者同源。
+// 拆出来的原因:状态列 render 和 :row-class-name 都要判定同一套状态,
+// 各写一份 map 就是"改一处坏一处"(加个状态漏改行色条 → UI 不一致)。
+//
+// P68: 3 个运行时状态 — ACTIVE / COOLING / QUOTA_EXCEEDED
+// P-no-disabled: 没有 DISABLED 终端状态(全部可自动恢复);
+// DISABLED 显示仅保留给手动关闭(enabled=false)的 key
+// P-per-key-circuit: 熔断状态优先显示(熔断 = 该 key 暂时不参与调度,
+// 30s 后半开放行自动恢复;只影响这一把 key,不影响同 provider 其他 key)
+type StatusTone = 'ok' | 'warn' | 'error' | 'muted' | 'info'
+
+const TONE_COLOR: Record<StatusTone, () => string> = {
+  ok: () => STATUS_PALETTE.green.color,
+  info: () => STATUS_PALETTE.blue.color,
+  warn: () => STATUS_PALETTE.yellow.color,
+  error: () => STATUS_PALETTE.red.color,
+  muted: () => STATUS_PALETTE.gray.color,
+}
+
+function keyStatusMeta(row: ProviderKeyView): { tone: StatusTone; color: string; label: string } {
+  const meta = ((): { tone: StatusTone; label: string } => {
+    if (row.circuit_open) return { tone: 'error', label: '⚡ 熔断中' }
+    const status = (row.status || (row.enabled ? KEY_STATUS.ACTIVE : KEY_STATUS_DISABLED_UI)).toUpperCase()
+    switch (status) {
+      case KEY_STATUS.ACTIVE:         return { tone: 'ok',    label: '● 启用' }
+      case KEY_STATUS.COOLING:        return { tone: 'info',  label: '⏱ 冷却中' }
+      case KEY_STATUS.QUOTA_EXCEEDED: return { tone: 'warn',  label: '⚠ 配额耗尽' }
+      case KEY_STATUS_DISABLED_UI:    return { tone: 'muted', label: '○ 已关闭' }
+      default:                        return { tone: 'muted', label: status }
+    }
+  })()
+  return { ...meta, color: TONE_COLOR[meta.tone]() }
+}
+
+// 行色条:tone 直接当 class 后缀(样式在 styles/tokens.css 定义一份)。
+// info 复用 ok 的绿条 —— 冷却是临时态,行首不必再警示一次。
+function rowClassName(row: ProviderKeyView): string {
+  const tone = keyStatusMeta(row).tone
+  return `row-${tone === 'info' ? 'ok' : tone}`
+}
 
 const form = ref({
   // P-provider-vendor: 提交目标 = 选中 vendor 的第一个注册名(pool 共享,任意协议面可写)
@@ -198,22 +250,7 @@ const columns: DataTableColumns<ProviderKeyView> = [
     key: 'status',
     width: 130,
     render: (row) => {
-      // P68: 3 个运行时状态 — ACTIVE / COOLING / QUOTA_EXCEEDED
-      // P-no-disabled: 没有 DISABLED 终端状态(全部可自动恢复);
-      // DISABLED 显示仅保留给手动关闭(enabled=false)的 key
-      // P-per-key-circuit: 熔断状态优先显示(熔断 = 该 key 暂时不参与调度,
-      // 30s 后半开放行自动恢复;只影响这一把 key,不影响同 provider 其他 key)
-      if (row.circuit_open) {
-        return h('span', { style: { color: STATUS_PALETTE.red.color, fontWeight: 500 } }, '⚡ 熔断中')
-      }
-      const status = (row.status || (row.enabled ? KEY_STATUS.ACTIVE : KEY_STATUS_DISABLED_UI)).toUpperCase()
-      const map: Record<string, { color: string; label: string }> = {
-        [KEY_STATUS.ACTIVE]:          { color: STATUS_PALETTE.green.color, label: '● 启用' },
-        [KEY_STATUS.COOLING]:         { color: STATUS_PALETTE.blue.color, label: '⏱ 冷却中' },
-        [KEY_STATUS.QUOTA_EXCEEDED]:  { color: STATUS_PALETTE.yellow.color, label: '⚠ 配额耗尽' },
-        [KEY_STATUS_DISABLED_UI]:     { color: STATUS_PALETTE.gray.color, label: '○ 已关闭' },
-      }
-      const m = map[status] ?? { color: STATUS_PALETTE.gray.color, label: status }
+      const m = keyStatusMeta(row)
       return h('span', { style: { color: m.color, fontWeight: 500 } }, m.label)
     },
   },
@@ -237,7 +274,13 @@ const columns: DataTableColumns<ProviderKeyView> = [
           : `¥${row.remaining.toFixed(2)}`
       return h(
         'span',
-        { style: { color: STATUS_PALETTE[colour as keyof typeof STATUS_PALETTE]?.color ?? '#999', fontWeight: 500 } },
+        {
+          style: {
+            color: STATUS_PALETTE[colour as keyof typeof STATUS_PALETTE]?.color
+              ?? STATUS_PALETTE.gray.color,
+            fontWeight: 500,
+          },
+        },
         text,
       )
     },

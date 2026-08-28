@@ -1,5 +1,5 @@
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !firstLoad">
     <n-card>
       <n-space justify="space-between" align="center" style="margin-bottom: 16px">
         <n-h3 style="margin: 0">Gateway Keys({{ keys.length }})</n-h3>
@@ -9,7 +9,15 @@
         </n-space>
       </n-space>
 
-      <n-data-table :columns="columns" :data="keys" :bordered="false" :pagination="false" />
+      <table-skeleton v-if="firstLoad" :rows="5" />
+      <n-data-table
+        v-else
+        :columns="columns"
+        :data="keys"
+        :bordered="false"
+        :pagination="false"
+        :row-class-name="(row: KeyView) => (row.enabled ? 'row-ok' : 'row-muted')"
+      />
     </n-card>
 
     <!-- 新建/编辑 模态框 -->
@@ -145,6 +153,9 @@ import type { DataTableColumns, SelectOption } from 'naive-ui'
 import { api, type ProviderKeyView } from '../api/client'
 import { useProvidersStore } from '../stores/providers'
 import { copyText } from '../utils/clipboard'
+import { STATUS_PALETTE } from '../utils/status'
+import { useFirstLoad } from '../composables/useFirstLoad'
+import TableSkeleton from '../components/TableSkeleton.vue'
 
 interface ProviderInfo {
   name: string
@@ -182,6 +193,7 @@ const provStore = useProvidersStore()
 // 编辑/展示旧数据(绑定仍存注册名)时归一,保存后后端统一存厂商名
 const regToVendor = ref<Record<string, string>>({})
 const loading = ref(false)
+const { firstLoad } = useFirstLoad(loading)
 const saving = ref(false)
 const modalVisible = ref(false)
 const editing = ref(false)
@@ -319,7 +331,14 @@ function renderModelTag({ option }: any) {
   return h(
     'span',
     {
-      style: 'background: rgba(24, 160, 88, 0.1); padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-right: 4px;',
+      class: 'mono',
+      style: {
+        background: 'var(--c-primary-soft)',
+        padding: '2px 8px',
+        borderRadius: 'var(--r-sm)',
+        fontSize: '12px',
+        marginRight: '4px',
+      },
     },
     `${option.label}${suffix} ×`,
   )
@@ -410,7 +429,7 @@ function openEdit(row: KeyView) {
 // P34: 把绑定的 ID 翻译成可读的 "minimax → key-1 (sk-...)"
 import type { VNode } from 'vue'
 function describeProviderKeys(ids: number[]): VNode | string {
-  if (!ids || ids.length === 0) return h('span', { style: 'color: #999' }, '全部')
+  if (!ids || ids.length === 0) return h('span', { style: { color: STATUS_PALETTE.gray.color } }, '全部')
   // 从 providerKeysMap 找
   const all = Object.values(providerKeysMap.value).flat()
   const items = ids.map(id => all.find(k => k.id === id)).filter(Boolean) as ProviderKeyView[]
@@ -490,7 +509,7 @@ const columns: DataTableColumns<KeyView> = [
     width: 240,
     render: (row) =>
       h('code', {
-        style: 'font-size: 11px; padding: 2px 6px; background: rgba(24,160,88,0.08); border-radius: 4px; user-select: all; cursor: pointer;',
+        class: 'mono copy-chip',
         onClick: () => copyKey(row),
         title: '点击复制',
       }, row.key),
@@ -501,11 +520,14 @@ const columns: DataTableColumns<KeyView> = [
     width: 140,
     render: (row) => {
       if (!row.providers || row.providers.length === 0) {
-        return h('span', { style: 'color: #999' }, '任意')
+        return h('span', { style: { color: STATUS_PALETTE.gray.color } }, '任意')
       }
       // P-provider-vendor: 旧数据存注册名,展示归一为厂商
       return h('span', {}, row.providers.map((p, i) =>
-        h('span', { key: i, style: 'color: #2080f0; margin-right: 4px' }, `🔒 ${regToVendor.value[p] ?? p}`)
+        h('span', {
+          key: i,
+          style: { color: STATUS_PALETTE.blue.color, marginRight: '4px' },
+        }, `🔒 ${regToVendor.value[p] ?? p}`)
       ))
     },
   },
@@ -517,9 +539,12 @@ const columns: DataTableColumns<KeyView> = [
       const desc = describeProviderKeys(row.provider_key_ids ?? [])
       if (typeof desc === 'string') {
         return h('span', {
-          style: row.provider_key_ids?.length
-            ? 'color: #2080f0; font-size: 12px'
-            : 'color: #999; font-size: 12px',
+          style: {
+            color: row.provider_key_ids?.length
+              ? STATUS_PALETTE.blue.color
+              : STATUS_PALETTE.gray.color,
+            fontSize: '12px',
+          },
         }, desc)
       }
       return desc
@@ -544,7 +569,12 @@ const columns: DataTableColumns<KeyView> = [
     width: 70,
     render: (row) =>
       h('span',
-        { style: { color: row.enabled ? '#18a058' : '#999' } },
+        {
+          style: {
+            color: row.enabled ? STATUS_PALETTE.green.color : STATUS_PALETTE.gray.color,
+            fontWeight: 500,
+          },
+        },
         row.enabled ? '● 启用' : '○ 禁用'),
   },
   {

@@ -1,5 +1,12 @@
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !firstLoad">
+    <usage-trend-chart
+      :records="trendRecords"
+      :loading="trendFirstLoad"
+      :sample-limit="TREND_LIMIT"
+      style="margin-bottom: 16px"
+    />
+
     <n-card title="按 Model 聚合(可调时间窗)">
       <n-space style="margin-bottom: 12px">
         <n-text>开始:</n-text>
@@ -14,11 +21,14 @@
           <n-radio-button value="total">总</n-radio-button>
         </n-radio-group>
       </n-space>
-      <n-data-table :columns="columns" :data="rows" :bordered="false" :pagination="false" />
+      <table-skeleton v-if="firstLoad" :rows="5" />
+      <n-data-table v-else :columns="columns" :data="rows" :bordered="false" :pagination="false" />
     </n-card>
 
     <n-card title="最近请求" style="margin-top: 16px">
+      <table-skeleton v-if="firstLoad" :rows="8" />
       <n-data-table
+        v-else
         :columns="recordColumns"
         :data="records"
         :bordered="false"
@@ -37,11 +47,27 @@ import { usePagination } from '../composables/usePagination'
 import { NButton, NCard, NDataTable, NInput, NSpace, NSpin, NText, NTag, NDivider, NRadioGroup, NRadioButton } from 'naive-ui'
 import { api, type AggregateRow, type ModelProviderRow } from '../api/client'
 import { fmtDateTime } from '../utils/time'
-import { fmtNum } from '../utils/status'
+import { fmtNum, STATUS_PALETTE } from '../utils/status'
+import UsageTrendChart from '../components/UsageTrendChart.vue'
+import TableSkeleton from '../components/TableSkeleton.vue'
+import { useFirstLoad } from '../composables/useFirstLoad'
 
 const rows = ref<AggregateRow[]>([])
 const records = ref<any[]>([])
 const loading = ref(true)
+
+// 趋势图独立取样:表格是分页的(默认 20 条),20 条画不出趋势。
+// 后端没有时间序列端点(只有 /usage 明细 + /usage/aggregate 按 model 聚合),
+// 在"不改后端"的前提下只能拉一批明细在前端分桶。
+// 1000 = 后端 Limit 硬上限(usage/repository.go 把 >1000 截到 1000),
+// 写小了白丢样本,写大了后端也只给 1000 —— 所以取到顶。
+const TREND_LIMIT = 1000
+const trendRecords = ref<any[]>([])
+// trendFirstLoad 只控制图表骨架:改时间窗时图表保留旧数据,不闪成骨架。
+// 与下面表格的 firstLoad 分开 —— 两者是独立的请求,趋势取样比表格慢(1000 条),
+// 用同一个标志会让先到的那个把另一个的骨架提前撤掉。
+const trendFirstLoad = ref(true)
+const { firstLoad } = useFirstLoad(loading)
 
 // P65: provider 分布缓存(model_id → providers 列表)
 const providerMap = ref<Record<string, ModelProviderRow[]>>({})
@@ -92,7 +118,26 @@ const { pagination, onPageChange, onPageSizeChange } = usePagination(load)
 async function query() {
   pagination.value.page = 1
   providerMap.value = {} // P65: 时间窗变了 provider 缓存也清
-  await load()
+  // 时间窗变了趋势样本也要重取;翻页不用(见 loadTrend 注释)
+  await Promise.all([load(), loadTrend()])
+}
+
+// loadTrend 与 load 分开:load 被 usePagination 绑在翻页上,
+// 而翻页不该重新拉 1000 条趋势样本(时间窗没变,趋势也没变)。
+// 只在挂载和改时间窗时调用。
+async function loadTrend() {
+  const params: any = { limit: TREND_LIMIT, offset: 0 }
+  if (start.value) params.start = start.value
+  if (end.value) params.end = end.value
+  try {
+    const r = await api.usage(params)
+    trendRecords.value = r.records ?? []
+  } catch (e) {
+    console.error('load trend failed', e)
+    trendRecords.value = []
+  } finally {
+    trendFirstLoad.value = false
+  }
 }
 
 async function fetchProviders(modelId: string) {
@@ -120,10 +165,10 @@ const columns = [
       const list = providerMap.value[row.model_id]
       if (!list) {
         fetchProviders(row.model_id)
-        return h('span', { style: 'color:#888' }, '加载中…')
+        return h('span', { style: { color: STATUS_PALETTE.gray.color } }, '加载中…')
       }
       if (list.length === 0) {
-        return h('span', { style: 'color:#888' }, '—')
+        return h('span', { style: { color: STATUS_PALETTE.gray.color } }, '—')
       }
       return h(
         'div',
@@ -136,7 +181,7 @@ const columns = [
       )
     },
   },
-  { title: 'Model', key: 'model_id' },
+  { title: 'Model', key: 'model_id', render: (row: AggregateRow) => h('span', { class: 'mono' }, row.model_id) },
   { title: '请求', key: 'total_requests' },
   // P-token-split: 与下方明细表同口径的三列。
   //
@@ -183,7 +228,7 @@ const columns = [
 const recordColumns = [
   { title: '时间', key: 'created_at', render: (row: any) => fmtDateTime(row.created_at) },
   { title: 'Provider', key: 'provider_name' },
-  { title: 'Model', key: 'model_id' },
+  { title: 'Model', key: 'model_id', render: (row: any) => h('span', { class: 'mono' }, row.model_id) },
   { title: 'Protocol', key: 'protocol' },
   { title: '状态', key: 'status_code' },
   { title: '延迟(ms)', key: 'latency_ms' },
@@ -202,7 +247,7 @@ const recordColumns = [
   { title: '输出', key: 'output_tokens', render: (row: any) => fmtNum(row.output_tokens) },
   { title: 'TPS', key: 'tps', render: (row: any) => rowTps(row) },
   { title: '首字(ms)', key: 'ttft_ms', render: (row: any) => (row.ttft_ms > 0 ? row.ttft_ms : '—') },
-  { title: 'Trace', key: 'trace_id' },
+  { title: 'Trace', key: 'trace_id', render: (row: any) => h('span', { class: 'mono' }, row.trace_id) },
 ]
 
 async function load() {
@@ -227,5 +272,8 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadTrend()
+})
 </script>

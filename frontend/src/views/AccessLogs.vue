@@ -1,5 +1,5 @@
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !firstLoad">
     <n-card>
       <n-space justify="space-between" align="center" style="margin-bottom: 16px">
         <n-h3 style="margin: 0">
@@ -58,7 +58,9 @@
         <n-button type="primary" @click="resetAndLoad">查询</n-button>
       </n-space>
 
+      <table-skeleton v-if="firstLoad" :rows="8" />
       <n-data-table
+        v-else
         :columns="columns"
         :data="records"
         :remote="true"
@@ -82,7 +84,7 @@
             </n-descriptions-item>
             <n-descriptions-item label="Gateway Key">
               {{ detail.metadata.gateway_key_name || detail.metadata.gateway_key_id || '—' }}
-              <span v-if="detail.metadata.gateway_key_name && detail.metadata.gateway_key_id" style="color: #999">
+              <span v-if="detail.metadata.gateway_key_name && detail.metadata.gateway_key_id" style="color: var(--t-3)">
                 (ID: {{ detail.metadata.gateway_key_id }})
               </span>
             </n-descriptions-item>
@@ -91,7 +93,7 @@
             </n-descriptions-item>
             <n-descriptions-item label="Provider Key">
               {{ detail.metadata.provider_key_name || detail.metadata.provider_key_id || '—' }}
-              <span v-if="detail.metadata.provider_key_name && detail.metadata.provider_key_id" style="color: #999">
+              <span v-if="detail.metadata.provider_key_name && detail.metadata.provider_key_id" style="color: var(--t-3)">
                 (ID: {{ detail.metadata.provider_key_id }})
               </span>
             </n-descriptions-item>
@@ -223,11 +225,15 @@ import { api, type AccessLog, type AccessLogDetailResp } from '../api/client'
 import { useProvidersStore } from '../stores/providers'
 import { copyText } from '../utils/clipboard'
 import { fmtDateTime, fmtTime } from '../utils/time'
+import { STATUS_PALETTE } from '../utils/status'
+import { useFirstLoad } from '../composables/useFirstLoad'
+import TableSkeleton from '../components/TableSkeleton.vue'
 
 const message = useMessage()
 const records = ref<AccessLog[]>([])
 const stats = ref({ total_24h: 0, errors_24h: 0, active_keys: 0 })
 const loading = ref(false)
+const { firstLoad } = useFirstLoad(loading)
 // 分页状态 + handlers 收敛到共享 usePagination
 const { pagination, onPageChange, onPageSizeChange } = usePagination(load)
 
@@ -404,9 +410,11 @@ const columns: DataTableColumns<AccessLog> = [
     key: 'final_model',
     width: 150,
     render: row => {
-      if (row.requested_model === row.final_model) return row.final_model
+      if (row.requested_model === row.final_model) {
+        return h('span', { class: 'mono' }, row.final_model)
+      }
       // 名字被路由改写(假名 → 真实模型)时蓝色标注
-      return h('span', { style: 'color: #2080f0' }, row.final_model)
+      return h('span', { class: 'mono', style: { color: STATUS_PALETTE.blue.color } }, row.final_model)
     },
   },
   { title: 'Provider', key: 'provider_name', width: 120 },
@@ -421,7 +429,11 @@ const columns: DataTableColumns<AccessLog> = [
         : row.provider_key_id || '—',
   },
   { title: '延迟', key: 'latency_ms', width: 70 },
-  { title: 'Trace', key: 'trace_id', render: row => row.trace_id.substring(0, 8) },
+  {
+    title: 'Trace',
+    key: 'trace_id',
+    render: row => h('span', { class: 'mono', title: row.trace_id }, row.trace_id.substring(0, 8)),
+  },
 ]
 
 // buildParams P-training: 当前过滤条件 → 查询参数(列表/导出共用)
@@ -549,11 +561,11 @@ onMounted(() => {
 <style scoped>
 /* P-training: 详情抽屉人类可读渲染 */
 .msg-block {
-  border: 1px solid rgba(128, 128, 128, 0.25);
-  border-radius: 6px;
+  border: 1px solid var(--b-1);
+  border-radius: var(--r-sm);
   padding: 6px 10px;
   margin-bottom: 6px;
-  background: rgba(128, 128, 128, 0.05);
+  background: var(--s-sunken);
 }
 .msg-role {
   font-size: 12px;
@@ -561,16 +573,16 @@ onMounted(() => {
   margin-bottom: 4px;
 }
 .role-user {
-  color: #2080f0;
+  color: var(--c-info);
 }
 .role-assistant {
-  color: #18a058;
+  color: var(--c-primary);
 }
 .role-system {
-  color: #999;
+  color: var(--t-3);
 }
 .role-tool {
-  color: #f0a020;
+  color: var(--c-warning);
 }
 .msg-content {
   font-size: 13px;
@@ -581,14 +593,14 @@ onMounted(() => {
   overflow-y: auto;
 }
 .msg-content.dim {
-  color: #999;
+  color: var(--t-3);
   font-size: 12px;
 }
 .resp-usage {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px dashed rgba(128, 128, 128, 0.3);
+  border-top: 1px dashed var(--b-dash);
   font-size: 12px;
-  color: #999;
+  color: var(--t-3);
 }
 </style>
