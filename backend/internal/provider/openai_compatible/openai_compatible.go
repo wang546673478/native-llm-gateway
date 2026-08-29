@@ -108,12 +108,24 @@ func NewBase(cfg Config) *Base {
 //   - /responses、/v1/responses(Codex)→ {endpoint}{ResponsesPath},body 原样透传
 //     (DeepSeek / MiniMax 官方原生支持 Responses API)
 //   - 其他 → ChatPath(chat/completions)
+// 自动适配 endpoint 是否已包含 /v1: 若 endpoint 以 /v1 结尾且路径以 /v1 开头,
+// 则去掉路径的 /v1 前缀避免重复 (如 endpoint=http://x/v1 + path=/v1/responses → /responses)
 func (b *Base) upstreamPath(req *provider.Request) string {
 	p := strings.ToLower(req.Path)
+	var path string
 	if strings.HasSuffix(p, "/responses") {
-		return b.cfg.ResponsesPath
+		path = b.cfg.ResponsesPath
+	} else {
+		path = b.cfg.ChatPath
 	}
-	return b.cfg.ChatPath
+
+	// 智能去重: 如果 endpoint 以 /v1 结尾且 path 以 /v1 开头, 去掉 path 的 /v1 前缀
+	endpoint := strings.TrimRight(b.cfg.Endpoint, "/")
+	if strings.HasSuffix(endpoint, "/v1") && strings.HasPrefix(path, "/v1/") {
+		return path[3:] // 去掉 "/v1" 前缀, 保留 "/responses" 或 "/chat/completions"
+	}
+
+	return path
 }
 
 // Name / Protocol / Models 由 wrapper 提供

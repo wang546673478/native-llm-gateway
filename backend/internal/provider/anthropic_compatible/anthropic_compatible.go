@@ -103,6 +103,17 @@ func rateLimitRetryDelay(retryAfter time.Duration) time.Duration {
 	return retryAfter
 }
 
+// buildMessagesURL 构造 /v1/messages 端点 URL,自动适配 endpoint 是否已包含 /v1。
+// 若 endpoint 以 /v1 结尾,则拼接 /messages;否则拼接 /v1/messages。
+// 示例: http://x/v1 → http://x/v1/messages, http://x → http://x/v1/messages
+func (b *Base) buildMessagesURL() string {
+	endpoint := strings.TrimRight(b.cfg.Endpoint, "/")
+	if strings.HasSuffix(endpoint, "/v1") {
+		return endpoint + "/messages"
+	}
+	return endpoint + "/v1/messages"
+}
+
 // classifyUpstream 统一分类 Anthropic 兼容上游的失败响应:
 //  1. MiniMax base_resp 错误(藏在 HTTP 200 body)— 1008/2056 → quota,其余 → server_error
 //  2. HTTP >= 400 → ClassifyErrorWithBody
@@ -162,7 +173,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	retried := false
 	for {
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
+			b.buildMessagesURL(),
 			bytes.NewReader(body))
 		if err != nil {
 			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
@@ -266,7 +277,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	retried := false
 	for {
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages",
+			b.buildMessagesURL(),
 			bytes.NewReader(body))
 		if err != nil {
 			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
@@ -525,7 +536,7 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	defer cancel()
 	// Anthropic 兼容 API 通常没有 /models 端点,直接 TCP 检查
 	req, err := http.NewRequestWithContext(hctx, http.MethodGet,
-		strings.TrimRight(b.cfg.Endpoint, "/")+"/v1/messages", nil)
+		b.buildMessagesURL(), nil)
 	if err != nil {
 		return err
 	}

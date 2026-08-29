@@ -170,8 +170,13 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 	var routes []ProviderRoute
 	for name, p := range r.manager.GetAll() {
 		// P19: Provider 绑定过滤 — Gateway Key 限制了 Provider 列表
-		if len(o.AllowedProviders) > 0 && !sliceContains(o.AllowedProviders, name) {
-			continue
+		// 按 vendor 匹配(不是注册面名):用户绑 "minimax" 应匹配 minimax 和 minimax-openai 两面
+		if len(o.AllowedProviders) > 0 {
+			vendor := r.manager.VendorFor(name)
+			// 检查注册面名或 vendor 名是否在列表中(兼容两种配置方式)
+			if !sliceContains(o.AllowedProviders, name) && !sliceContains(o.AllowedProviders, vendor) {
+				continue
+			}
 		}
 
 		// 检查协议匹配:支持多协议 Provider
