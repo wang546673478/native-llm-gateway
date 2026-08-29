@@ -198,6 +198,39 @@ GET /metrics    # Prometheus 格式
 - `GET /healthz` — 进程级,返回 200 = 在跑
 - `GET /readyz` — 进程级 + DB ping;DB 不可用返回 503
 
+### 4.4 健康检查脚本
+
+`scripts/gateway-health-check.sh` — 综合检查网关运行状况:
+
+```bash
+# 基础检查
+./scripts/gateway-health-check.sh
+
+# 显示详细指标
+SHOW_METRICS=true ./scripts/gateway-health-check.sh
+
+# 检查自定义 URL
+GATEWAY_URL=http://custom:port ./scripts/gateway-health-check.sh
+```
+
+**检查项**:
+1. Systemd 服务状态(active/inactive)
+2. 进程状态(PID / 内存 / CPU)
+3. 健康端点(/healthz、/readyz)
+4. 数据库连接 + 数据统计(usage_records / gateway_keys / provider_keys)
+5. Prometheus 指标摘要(总请求数 / 待探测配额)
+6. 磁盘空间(access-body 目录大小 / 磁盘使用率)
+7. 最近错误日志(journalctl 最近 50 行)
+
+**返回码**:
+- `0` — 所有关键检查通过
+- `1` — 至少一项关键检查失败(服务未运行 / 进程不存在 / 健康端点不可达 / DB 连接失败)
+
+**用途**:
+- 部署后验证
+- 定期巡检(cron)
+- 故障排查第一步
+
 ---
 
 ## 5. 故障排查三板斧

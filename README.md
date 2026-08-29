@@ -146,6 +146,9 @@ curl -X POST http://localhost:8080/api/v1/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"my-key","allowed_models":["MiniMax-M3","deepseek-v4-flash"],"rpm":100,"tpm":500000}'
 # 注意:创建响应里包含明文 key,只展示一次
+
+# 5. 健康检查
+./scripts/gateway-health-check.sh    # 验证网关运行状况
 ```
 
 ## Docker 部署
