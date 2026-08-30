@@ -1425,10 +1425,38 @@ afterWhitelist:
 		return outcomeFatal, false, true
 	}
 
-	// 纯 429 限流(2026-08-10):用「同一把 key」重试到 10 次,全 429 才标 COOLING
-	// 并推进下一把 key。之前是直接换 key — 现在先在同一把 key 上重试(限流是瞬态,
-	// 重试同一把大概率 429 消失),10 次还限流才认为是这把 key 被限住,冷却它并切换。
+	// rate_limit 处理(2026-08-30):区分 403 和 429
+	//   - 403 rate_limit: 配额/权限问题(如 MiniMax quota 被 balanceGuardHealthy 降级),
+	//     立即换 key,不同 key 重试 — 避免用同一把 key 反复请求(tokenmarket-kiro 403
+	//     重试 11 次才换 key 的根因)
+	//   - 429 rate_limit: 瞬时限流,用「同一把 key」重试到 10 次(限流是瞬态,重试同一把
+	//     大概率 429 消失),10 次还限流才标 COOLING 并推进下一把 key
 	if pe.ErrorType == provider.ErrorTypeRateLimit {
+		// 403 rate_limit: 配额/权限问题,立即换 key
+		if pe.StatusCode == http.StatusForbidden {
+			// 标记这把 key 为 COOLING(让后续请求避开它)
+			if pool := e.router.Pool(result.ProviderName); pool != nil && result.Key != nil {
+				pool.ReportRateLimit(result.Key, pe.RetryAfter)
+			}
+			// 尝试换 key 重试一次
+			if e.swapToOtherKey(c, req, result) {
+				if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+					return outcomeOK, false, true
+				}
+				pe3 := *lastErr
+				if pe3 == nil {
+					return outcomeContinue, false, true
+				}
+				// 换 key 后仍是额度类 → token_plan 层记证据,允许降档
+				if isQuotaClass(pe3) && result.Tier == string(keypool.BillingSourceTokenPlan) {
+					return outcomeContinue, true, true
+				}
+			}
+			// 换不到其他 key / 换 key 仍失败 → 继续 failover 到下一个候选
+			return outcomeContinue, false, true
+		}
+
+		// 429 rate_limit: 瞬时限流,允许同 key 重试(最多 10 次)
 		if e.retrySameKeyRateLimit(c, ctx, req, result, outProviderName, lastErr, entry) {
 			return outcomeOK, false, true
 		}
