@@ -1,5 +1,5 @@
-// Package google 实现 Google Generative AI 兼容协议(Gemini)
-// 对应规格书 8.4
+// Package google 实现 Google Generative AI 兼容协议基座。
+// 当前没有内置厂商或动态 Relay 使用该包。
 //
 // 特点:
 //   - Auth 通过 URL query ?key={api_key}

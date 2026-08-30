@@ -1,5 +1,4 @@
-// Package proxy 实现 LLM Gateway 的代理引擎
-// 对应规格书 5.7 Proxy Engine + 9.1/9.2 请求流程
+// Package proxy 实现 LLM Gateway 的代理引擎。
 package proxy
 
 import (

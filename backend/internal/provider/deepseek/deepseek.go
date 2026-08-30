@@ -1,29 +1,7 @@
-// Package deepseek 实现 DeepSeek Provider(OpenAI + Anthropic 两种协议)
-//
-// 基于官方文档 https://api-docs.deepseek.com 重写:
-//
-// 关键差异(与标准 OpenAI Chat Completions):
-//  1. 端点路径是 /chat/completions(没有 /v1 前缀!)
-//  2. 支持 thinking 模式:"thinking": {"type": "enabled"}
-//  3. 启用 thinking 后,响应中增加 reasoning_content 字段
-//  4. usage 增加 prompt_cache_hit_tokens / prompt_cache_miss_tokens
-//     和 completion_tokens_details.reasoning_tokens
-//  5. 模型:deepseek-v4-flash / deepseek-v4-pro
-//     (deepseek-chat / deepseek-reasoner 于 2026/07/24 弃用)
-//
-// 实现策略:继承 openai_compatible.Base,通过 Config.ChatPath 覆盖端点,
-// 启用 StreamUsage 让流式响应末尾带 usage。
-// P-provider-vendor: anthropic 协议实现在 anthropic.go(注册名 "deepseek-anthropic")。
-// 官方文档特性(2026-08-04 全量调研,OpenAI 面):
-//   - thinking:默认 enabled;reasoning_effort: low|high|max(medium/xhigh 映射 high)
-//   - 响应 choices[].message.reasoning_content;流式在 delta.reasoning_content;
-//     usage.completion_tokens_details.reasoning_tokens 计思维链 token
-//   - 思考模式下 temperature/top_p 不生效;带 tools 时必须逐轮回传 reasoning_content,否则 400
-//   - KV cache:自动开启无参数;usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
-//     (prompt_tokens = hit + miss;缓存价仅为未命中价 2%~0.8%)
-//   - JSON output:response_format={"type":"json_object"};prompt 须含 "json" 字样
-//   - FIM / Chat Prefix / Responses API:需要 /beta base_url 或独立端点,本包未实现(YAGNI)
-//   - 峰谷定价预告:高峰(北京 9-12 / 14-18 点)2 倍价,生效后需调整定价配置
+// Package deepseek 实现 DeepSeek 的 OpenAI 与 Anthropic 协议面。
+// OpenAI 面使用 /chat/completions 和 /v1/responses；Anthropic 面实现在
+// anthropic.go。两个注册面归入 deepseek vendor 并共享 Key Pool。
+// 模型清单和价格由数据库维护，运行契约见 docs/providers.md。
 package deepseek
 
 import (
@@ -105,5 +83,3 @@ func init() {
 	provider.RegisterGlobalWithProtocolVendor(name, New, provider.ProtocolOpenAI, name)
 	provider.RegisterGlobalWithProtocolVendor(anthropicName, NewAnthropic, provider.ProtocolAnthropic, name)
 }
-
-// toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool

@@ -5,8 +5,7 @@
 // 加新厂商时只需在这里加一行(blank import)
 //
 // 自动注册:加 init() 在这里用 go:generate 扫描更彻底,但引入复杂度;
-// 当前厂商数量手动维护成本低。如果想自动,看 docs/architecture.md 里
-// "go:generate 替代 blank import" 设计
+// 当前厂商数量少，由此文件显式维护。
 //
 // 2026-08-20 下线 gemini / qwen / glm 三家(历史用量:gemini 0、qwen 0、glm 53 次
 // 且已无 key)。gemini 是 provider/google 的唯一消费者,google 协议层暂留待评估。

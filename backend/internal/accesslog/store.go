@@ -11,7 +11,7 @@ import (
 	dbpkg "github.com/wang546673478/native-llm-gateway/internal/database"
 )
 
-// StatusBucket 是 status 过滤的单个原子条件(spec F9 决议)。
+// StatusBucket 是 status 过滤的单个原子条件。
 //
 // 一个 bucket 要么按 status_code 区间(Min/Max 至少一个非零),要么按 error_type
 // 精确匹配(ErrorType 非空)。两种语义互斥 — handler 端构造,store 端 OR 拼装。

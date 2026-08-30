@@ -21,7 +21,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 
-	_ "github.com/wang546673478/native-llm-gateway/internal/provider/builtin" // 触发所有内置 Provider init() 注册(deepseek/gemini/glm/mimo/minimax/qwen)
+	_ "github.com/wang546673478/native-llm-gateway/internal/provider/builtin" // 触发内置 Provider init() 注册(DeepSeek/MiniMax/MiMo)
 
 	"github.com/wang546673478/native-llm-gateway/internal/adminauth"
 	"github.com/wang546673478/native-llm-gateway/internal/config"

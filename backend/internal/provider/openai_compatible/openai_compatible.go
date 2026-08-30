@@ -1,7 +1,5 @@
-// Package openai_compatible 实现 OpenAI Chat Completions 兼容协议的共享逻辑
-// 适用 Provider: DeepSeek / GLM / Qwen / Kimi / 任意 OpenAI 兼容 API
-//
-// 对应规格书 8.2
+// Package openai_compatible 实现 OpenAI Chat Completions、Responses 和 Models
+// 兼容协议的共享逻辑，供内置 Provider 和动态 Relay 使用。
 package openai_compatible
 
 import (

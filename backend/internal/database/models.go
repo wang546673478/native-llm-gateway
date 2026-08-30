@@ -1,5 +1,4 @@
-// Package database 负责数据库连接初始化和 GORM 模型定义
-// 对应规格书第七部分(migration 001-005)的表结构
+// Package database 负责数据库连接初始化和 GORM 模型定义。
 package database
 
 import "time"
@@ -14,7 +13,7 @@ import "time"
 // DEFAULT true 删成 NULL(2026-08-25 scratch 表实测,GORM 对 DEFAULT 约束是
 // 会主动改的,不同于它对列/外键的"只加不删"),之后任何不带 enabled 的 INSERT
 // 都会炸 —— 那是隐式改生产 schema,不是纯代码改动。
-// *bool 保留 tag,AutoMigrate 看到的 spec 不变 → DDL 零风险,同时:
+// *bool 保留 tag，AutoMigrate 看到的字段定义不变，避免意外修改 DDL；同时：
 //   nil   = 没指定,由 DB 的 DEFAULT true 填(保住"省略即启用"的既有语义)
 //   &false= 明确禁用,真的落库成 false
 // 读的时候一律走 IsEnabled(),别裸解引用。
@@ -320,9 +319,8 @@ type AccessLog struct {
 	ReqBodySize  int    `gorm:"column:req_body_size" json:"req_body_size"`
 	RespBodyPath string `gorm:"column:resp_body_path" json:"resp_body_path"`
 	RespBodySize int    `gorm:"column:resp_body_size" json:"resp_body_size"`
-	// 注意:truncated 信息放在文件后缀 `.truncated.json`,不存 DB 列(spec §1.1 锁定 21 字段;
-	// 2026-08-07 +ProviderKeyID 第 22 列 — 排查「请求实际用哪把 key」;名字不落库,
-	// 查询时按 ID 现查 provider_api_keys(改名即时生效,不存快照)
+	// truncated 信息放在 `.truncated.json` 文件后缀中，不单独存 DB 列。
+	// Provider Key 只存 ID，查询时读取 provider_api_keys 的当前名称。
 }
 
 // TableName

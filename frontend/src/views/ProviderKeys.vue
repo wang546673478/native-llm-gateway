@@ -191,9 +191,9 @@ const warnThresholdPct = ref(10)
 // Same provider & billing_source → max Remaining across all polled rows
 // in the tier.  Polled rows are those with last_polled_at set.
 //
-// Spec §6.1: 同 provider 同 tier 桶内 Remaining 的最大值 — 必须同时
-// 按 provider_name + billing_source 过滤,避免跨 provider token_plan
-// keys 共享 tier_max 造成小余额 provider 显示错误的绿色。
+// 取同 provider、同 tier 桶内 Remaining 的最大值。必须同时按
+// provider_name + billing_source 过滤，避免跨 provider 的 token_plan key
+// 共享 tier_max，导致小余额 provider 错误显示为绿色。
 function tierMaxFor(rows: ProviderKeyView[], tier: string, providerName: string): number {
   let max = 0
   for (const r of rows) {

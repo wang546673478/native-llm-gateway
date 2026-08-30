@@ -486,7 +486,7 @@ async function loadKeyOptions() {
   keyOptions.value = response.keys.map(key => ({ label: key.name, value: key.name }))
 }
 
-// 加载 provider / model 选项(spec §0:核心 UI 过滤维度)
+// 加载 provider / model 过滤选项。
 // 复用 /providers/registered 接口,它返回 name + protocol + models,
 // 省掉额外去 /providers 拉 key_pool/circuit 信息的开销。
 async function loadProviderModelOptions() {

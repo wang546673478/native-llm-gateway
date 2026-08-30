@@ -1,284 +1,177 @@
-# Provider 厂商目录
+# Provider 与中转站目录
 
-> 当前内置的所有厂商。每个条目:**注册名(协议面) / billing / 余额恢复模式 / 文档来源 / 已知坑**。
->
-> 新增/更新厂商见 `docs/provider厂商定制包指南.md` Step 0-6。
+本文记录当前二进制实际加载的 Provider。内置厂商来自 Go 包和
+`config.yaml`；中转站来自数据库 `relay_stations`，两者不是同一种接入方式。
 
----
+新增标准兼容中转站见 [动态中转站接入指南](relay-stations.md)。只有需要专属鉴权、
+URL、错误分类、用量解析或余额查询时，才按
+[Provider 厂商定制包指南](provider厂商定制包指南.md)增加 Go 包。
 
-## 总览(2026-08)
+## 核心术语
 
-| 厂商 | 注册名 | 协议 | billing | 余额恢复 | Responses API | 文档 |
-|---|---|---|---|---|---|---|
-| **deepseek** | `deepseek` | openai | api | poll | ✅ | `provider/deepseek/deepseek.go` |
-| | `deepseek-anthropic` | anthropic | api | poll | ✅ | `provider/deepseek/anthropic.go` |
-| **MiniMax** | `minimax` | anthropic | **token_plan** | poll | ✅ | `provider/minimax/minimax.go` |
-| | `minimax-openai` | openai | **token_plan** | poll | ✅ | `provider/minimax/openai.go` |
-| **MiMo**(小米) | `mimo` | openai | api | probe | ✅ | `provider/mimo/mimo.go` |
-| | `mimo-token-plan` | openai | **token_plan** | probe | ✅ | `provider/mimo/mimo.go`(同 vendor) |
-| | `mimo-anthropic` | anthropic | api | probe | ❌ | `provider/mimo/anthropic.go` |
-| | `mimo-token-plan-anthropic` | anthropic | **token_plan** | probe | ❌ | `provider/mimo/anthropic.go`(同 vendor) |
-| **Right Code** | `rightapi-grok` | openai | api | - | ✅ | config only |
-| | `rightapi-gemini` | openai | api | - | ❌ | config only |
-| | `rightapi-claude` | anthropic | api | - | ❌ | config only |
-| | `rightapi-claude-aws` | anthropic | api | - | ❌ | config only |
-| **TokenMarket** | `tokenmarket` | openai | api | - | ❌ | config only(中转站) |
+- **vendor**：厂商级身份，例如 `mimo`。Gateway Key 的 Provider 绑定、上游 Key
+  存储、定价和 Access Log 都按 vendor 归一。
+- **face**：一个具体协议/端点注册名，例如 `mimo-token-plan-anthropic`。路由协议
+  过滤、模型归属和面级配置按 face 工作。
+- 同 vendor 的多个内置 face 共享一个 KeyPool。`provider_api_keys.provider_name`
+  存 vendor；`protocols` 可限制 key 只能用于 `openai` 或 `anthropic`，空值表示不限制。
+- `billing_source` 是 `token_plan`、`api` 或 `free`。路由先按计费层展开候选，再按
+  `route_order` 和默认顺序调度。
 
-> **kimi 已删除**(2026-08)。需要时按 `docs/provider厂商定制包指南.md` 加回。
-> **glm / qwen / gemini 已删除**(2026-08-20,历史用量 glm 53 次、qwen/gemini 0 次)。需要时按 `docs/provider厂商定制包指南.md` 加回。
-> **Right Code / TokenMarket** 为中转站,采用配置接入(无专属厂商包)。
+## 当前内置厂商
 
----
+`backend/internal/provider/builtin/builtin.go` 当前只 blank import 三个包：DeepSeek、
+MiniMax 和 MiMo。Google 协议基础实现仍在代码中，但没有内置厂商注册，也不能作为
+动态中转站协议使用。
 
-## 1. deepseek
+下表中的计费层和 Responses 开关来自仓库示例配置，不是厂商包硬编码；部署配置可
+禁用 face 或改变计费层。
 
-- **官方文档**:<https://api-docs.deepseek.com>
-- **OpenAI 面**: `POST {endpoint}/chat/completions`(注意无 `/v1` 前缀)
-- **Anthropic 面**: `POST {endpoint}/anthropic/v1/messages`
-- **Endpoint**: `https://api.deepseek.com`
+| Vendor | Face | 协议 | 示例计费层 | 请求路径 | Responses |
+|---|---|---|---|---|---|
+| `deepseek` | `deepseek` | OpenAI | `api` | `/chat/completions` | `/v1/responses` |
+| `deepseek` | `deepseek-anthropic` | Anthropic | `api` | `/v1/messages` | 不适用 |
+| `minimax` | `minimax` | Anthropic | `token_plan` | `/v1/messages` | 不适用 |
+| `minimax` | `minimax-openai` | OpenAI | `token_plan` | `/chat/completions` | `/responses` |
+| `mimo` | `mimo` | OpenAI | `api` | `/chat/completions` | `/responses` |
+| `mimo` | `mimo-anthropic` | Anthropic | `api` | `/v1/messages` | 不适用 |
+| `mimo` | `mimo-token-plan` | OpenAI | `token_plan` | `/chat/completions` | `/responses` |
+| `mimo` | `mimo-token-plan-anthropic` | Anthropic | `token_plan` | `/v1/messages` | 不适用 |
 
-### 关键事实
+内置 face 只有在 `providers.<face>.enabled: true` 时才由 Manager 实例化。
+`responses_api` 也只用于内置 face；路由会排除未声明支持 Responses API 的内置
+Provider。
 
-1. **thinking 默认 enabled**;`reasoning_effort` ∈ `low | high | max`(medium/xhigh 映射 high)
-2. **响应** `choices[].message.reasoning_content`;流式 `delta.reasoning_content`
-3. **usage**:
-   - `completion_tokens_details.reasoning_tokens` 计思维链
-   - `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`(自动 KV cache,**缓存价仅 2%~0.8% 未命中价**)
-4. **带 tools + thinking**:必须逐轮回传 `reasoning_content`,否则 400(跨厂商续接时网关自动剥离)
-5. **Responses API**:`/v1/responses` 目前**只支持 `deepseek-v4-flash`(不支持 v4-pro)** — Codex 走 deepseek 时白名单放 v4-flash
-6. **峰谷定价**(预告):高峰(北京 9-12 / 14-18 点)2 倍价
+## DeepSeek
 
-### 已弃用模型
+代码位于 `backend/internal/provider/deepseek/`。
 
-- `deepseek-chat` / `deepseek-reasoner`(2026/07/24 弃用),老用户配置仍可用,建议尽快迁到 v4
+- OpenAI endpoint 通常是 `https://api.deepseek.com`。包显式使用
+  `/chat/completions`，不会套用兼容基座默认的 `/v1/chat/completions`。
+- Anthropic endpoint 由配置提供，仓库示例为
+  `https://api.deepseek.com/anthropic`；兼容基座再拼 `/v1/messages`。
+- OpenAI face 打开 Responses 时使用 `/v1/responses`。
+- 两个 face 注册到同一个 `deepseek` vendor，共享 key 池。Anthropic face 可通过
+  `force_thinking_disabled` 在上行前强制写入 `thinking.type=disabled`。
+- `balancer.go` 使用 `GET {scheme}://{host}/user/balance`，并按
+  `is_available` 和 `balance_infos[].total_balance` 判断余额。两个 face 都注册同一个
+  balancer。
+- OpenAI 用量解析支持标准缓存字段以及 `prompt_cache_hit_tokens`；缓存 token 会从
+  普通输入 token 中扣除，避免重复计费。
 
-### 已知坑
+## MiniMax
 
-- **跨厂商 reasoning 回带**:Codex 从 MiniMax 切 deepseek 会因 MiniMax 的 `encrypted_content` 被 DeepSeek 拒收 → 网关 `stripResponsesReasoning` 自动剥离 + 注入 `effort=none`
+代码位于 `backend/internal/provider/minimax/`。
 
----
+- Anthropic face 的 endpoint 示例为 `https://api.minimaxi.com/anthropic`。
+- OpenAI face 的 endpoint 示例已含 `/v1`：`https://api.minimaxi.com/v1`，因此包显式
+  使用 `/chat/completions`、`/responses` 和 `/models`。
+- 两个 face 注册到 `minimax` vendor，并在示例配置中都属于 `token_plan` 层。
+- OpenAI 和 Anthropic 兼容基座都会识别 HTTP 200 body 中的
+  `base_resp.status_code`。`1008` 和 `2056` 被分类为额度耗尽；其余非零状态视为上游
+  错误。
+- `balancer.go` 查询未公开的
+  `https://www.minimaxi.com/v1/token_plan/remains`，取各模型当前窗口剩余百分比的最小
+  值。该端点不是稳定公开契约，失败时仍需依赖请求错误分类。
 
-## 2. MiniMax(稀宇科技)
+## MiMo
 
-- **官方文档**:<https://platform.minimaxi.com/docs/api-reference/api-overview>
-- **Anthropic 面**(推荐): `POST https://api.minimaxi.com/anthropic/v1/messages`
-- **OpenAI 面**: `POST https://api.minimaxi.com/v1/chat/completions`
-- **Endpoint**: `https://api.minimaxi.com`(Anthropic 兼容,自动加 `/anthropic`)
+代码位于 `backend/internal/provider/mimo/`。
 
-### 当前模型(2026-07)
+- 按量 OpenAI endpoint：`https://api.xiaomimimo.com/v1`。
+- 套餐 OpenAI endpoint：`https://token-plan-cn.xiaomimimo.com/v1`。
+- 对应 Anthropic endpoint 分别以 `/anthropic` 结尾，由基座继续拼
+  `/v1/messages`。
+- `sk-` 按量 key 和 `tp-` 套餐 key 属于同一个 `mimo` 池，但必须通过每把 key 的
+  `billing_source` 隔离。OpenAI face 的模型同步和健康检查会按本 face 的计费层取
+  key。
+- 四个 face 共用一个 balancer。它按 `key.BillingSource` 选择控制台的套餐用量或
+  余额端点，并使用账号 Cookie 而不是 API key 鉴权。Cookie 可由配置启动注入，也可
+  通过管理 API 更新并持久化。
+- 这些控制台端点不是公开稳定 API。Cookie 缺失、过期或查询失败时，余额轮询不会把
+  查询失败直接当作确认耗尽；请求错误分类仍是兜底。
 
-- `MiniMax-M3` — 1M tokens,旗舰
-- `MiniMax-M2.7` / `MiniMax-M2.7-highspeed` — 204,800
-- `MiniMax-M2.5` / `MiniMax-M2.5-highspeed` — 204,800
-- `MiniMax-M2.1` / `MiniMax-M2.1-highspeed` — 204,800(早期稳定版)
-- `MiniMax-M2` — 204,800
+当前 Anthropic 兼容基座没有 `BillingSource` 配置项。MiMo 的两个 Anthropic face
+共享池时，`ListModels`/健康检查只能按协议取 key，不能进一步按 `api` 与
+`token_plan` 隔离；正常代理请求仍使用路由层已经选好的 `req.Key`。
 
-### M3 专属参数(`extra_body` 传)
+MiMo wrapper 的 `Name()` 当前还固定返回基础注册面：Token Plan OpenAI 返回 `mimo`，
+Token Plan Anthropic 返回 `mimo-anthropic`。Manager 本身仍按配置中的 face 名保存实例，
+但显式 alias 的模型白名单选择会通过 `Provider.Name()` 查询模型，可能读到基础 face 的
+清单；需要严格按 face 隔离时优先使用自动 catch-all，并在修复 wrapper 身份后补回归测试。
 
-```json
-{
-  "thinking": {"type": "adaptive" | "disabled"},   // M2.x 不可关闭
-  "reasoning_split": true,                          // 把思考分到 reasoning_details
-  "service_tier": "standard" | "priority"           // priority 1.5x 价格,优先准入
-}
-```
+## 模型、归属与定价
 
-### 关键事实
+模型不再写在 `config.yaml`：
 
-1. **token_plan billing**:走套餐(`MiniMax` 默认 `billing_source: token_plan`),额度耗尽自动降档到 api 层(`minimax-openai` 同 vendor)
-2. **错误藏在 HTTP 200 body**(踩坑 #1):`{"base_resp":{"status_code":1008|2056}}` 1008=余额不足,2056=超套餐
-3. **Anthropic 面把套餐耗尽报成 HTTP 429**(踩坑 #14):与 openai 面的 200+base_resp 不同,关键词表必须含 "token plan / 用量上限 / 超套餐"
-4. **余额接口**:官方 `token_plan/remains` 端点(未文档化,在 `www.minimaxi.com` 而非 chat host)
-5. **Responses API**:`/v1/responses` 支持(注册名 `minimax`,虽然默认 anthropic 面)
+- `provider_models`：`(vendor, model_id)` 级模型和三档人民币每百万 token 价格：
+  input、cache read、output。
+- `provider_model_faces`：`(face, model_id)` 级归属和面内顺序。
+- 同步一个 vendor 时，Manager 遍历其所有 face 调 `ListModels`。成功的 face 会整体
+  替换自己的归属；失败的 face 保留旧归属。所有成功结果合并后 upsert 到 vendor
+  模型表，已有手工价格不被覆盖。
+- face 没有任何归属行时，运行时回退到 vendor 全量模型；这使没有模型列表端点的
+  Anthropic face 可以共享同厂商 OpenAI face 的清单。
+- 上游下架的模型不会自动从 `provider_models` 删除。模型管理页的“清理无归属”才会
+  删除没有任何 face 引用的旧行。
 
-### 当前 2 把 key 状态(实测 2026-08-08)
+同步端点为 `POST /api/v1/providers/sync-models`，body 是
+`{"vendor":"deepseek"}`；也可使用模型管理页或
+`POST /api/v1/providers/sync-all-models`。同步或修改价格后，管理 handler 会重新把
+模型数据加载进 Manager。
 
-- `id=7 key-1`:ACTIVE,remaining=77%(健康)
-- `id=8 weige`:QUOTA_EXCEEDED,remaining=1%(被 IsPolledAndExhausted 跳过)
+## 注册与 KeyPool
 
-### 已知坑
-
-- 早期字段名猜错 → 余额端点要直连上游实测一次,别信文档示例
-
----
-
-## 3. MiMo(小米)
-
-- **官方文档**:<https://mimo.mi.com/docs/zh-CN/quick-start/summary/welcome>
-- **两套端点/两套 key**:
-  - **按量**: `https://api.xiaomimimo.com/v1`(`sk-xxx`,`billing=api`)
-  - **Token Plan**: `https://token-plan-cn.xiaomimimo.com/v1`(`tp-xxx`,`billing=token_plan`)
-
-### 当前模型
-
-- `mimo-v2.5-pro` — 1M 上下文 / 128K 输出(旗舰)
-- `mimo-v2.5` — 1M / 128K(便宜)
-
-> mimo-v2-pro / mimo-v2-omni / mimo-v2-flash 等 v2 系列已于 **2026-06-30 弃用**,勿配置。
-
-### 关键事实
-
-1. **无官方余额 API**(踩坑 #19):只有控制台页面 → 用未文档化端点 `GET platform.xiaomimimo.com/api/v1/tokenPlan/usage`(套餐)+ `/api/v1/balance`(按量),鉴权是**账号登录 cookie** 而非 API key
-2. **cookie 约 1 天过期**:过期 401 → 轮询退化保守(不标耗尽),错误码兜底不变
-3. **cookie 存放**:config `quota_cookie` 或管理 API `POST /api/v1/providers/mimo/quota-cookie`(热注入),不放 key 上(账号级凭据)
-4. **percent 字段是「已用比例」不是「剩余」**:实测 `used=0/limit=11B` 时 `percent=0.00`(用了 0%),判 HasQuota 必须用 `(limit-used)/limit`
-5. **混层共享池**:同 vendor `mimo`(api) + `mimo-token-plan`(token_plan) 共享一个 pool,balancer 内必须按 `k.BillingSource` 分支端点(token_plan key → usage 端点,api key → balance 端点),不能在注册名上分
-6. **思考模式**:
-   - Chat 面:非标 `thinking={"type":"enabled|disabled"}`(extra_body)
-   - Responses 面:标准 `reasoning={"effort":"none|low|medium|high"}`,none=关
-7. **错误码**(实测):402 = 按量余额不足;429 = 限流 或 套餐额度耗尽(双义,body 区分信号官方未文档化);421 = 内容过滤;403 = 区域/风控;400 = 含「thinking 模式下 reasoning_content 未回传」
-8. **套餐条款(用户已知悉)**:Token Plan 配额仅允许在编程工具中使用,禁止以 API 调用形式用于自动化脚本和自定义应用后端;夜间消耗 0.8x
-
-### 定价(国内 ¥/M tokens)
-
-- `mimo-v2.5-pro`:cache 命中 ¥0.025 / 未命中 ¥3.00 / 输出 ¥6.00
-- `mimo-v2.5`:cache 命中 ¥0.02 / 未命中 ¥1.00 / 输出 ¥2.00
-
-### 已知坑
-
-- 套餐没开用却被查询为 0 — `percent` 字段语义反了,必须用 items.plan_total_token 重新算
-
----
-
-## 4. 厂商注册方式(代码)
-
-每个厂商包靠 `init()` 自注册到 `provider.Default()` Registry:
+内置厂商包在 `init()` 中调用：
 
 ```go
-// provider/minimax/minimax.go
-func init() {
-    provider.RegisterGlobalWithProtocolVendor("minimax", New, provider.ProtocolAnthropic, "minimax")
-    provider.RegisterGlobalWithProtocolVendor("minimax-openai", NewOpenAI, provider.ProtocolOpenAI, "minimax")
-}
+provider.RegisterGlobalWithProtocolVendor(face, factory, protocol, vendor)
 ```
 
-**`RegisterGlobalWithProtocolVendor(注册名, 工厂, 协议, 厂商)` 第 4 个参数 vendor 决定**:
-- `VendorFor(注册名)` 归一(key 绑定 / 白名单 / access log 都按厂商)
-- 同 vendor 共享 key 池(`server.buildKeyPools` 按 vendor 复用)
+仅有 `init()` 不够；包还必须在 `backend/internal/provider/builtin/builtin.go` 被 blank
+import，才会进入二进制。Registry 中的 vendor 映射决定：
 
-**还要在 `provider/builtin/builtin.go` 加 blank import**(不要往 `cmd/gateway/main.go` 加):
+- 多 face 是否共享池；
+- Provider Key 创建时归一到哪个 `provider_name`；
+- Gateway Key 的 Provider 绑定如何匹配；
+- Access Log 如何把 face 归一为 vendor。
 
-```go
-_ "github.com/wang546673478/native-llm-gateway/internal/provider/minimax"  // 触发 init() 注册
-```
+Provider 发送请求时必须优先使用路由层传入的 `req.Key`。只有健康检查和模型同步这类
+无路由上下文调用，才应自行从池中 acquire；否则上游实际使用的 key 和被冷却/熔断的
+key 可能不一致。
 
-> 漏加 → Go 不编译该包 → `init()` 不跑 → `/api/v1/providers` 死活不出现它(踩坑 #10 的常见原因)
-> (2026-08-20 起只剩 3 个厂商的 blank import;gemini/qwen/glm 已随包删除)
+## 余额恢复和熔断
 
----
+- vendor 的任一 face 注册 balancer 后，共享池使用 poll 恢复模式。没有 balancer 的
+  vendor（包括动态中转站）使用 probe 语义：`quota_exceeded` 只计数、不持久标记
+  `QUOTA_EXCEEDED`，下一次请求会重新试探。
+- 该 probe 保护不覆盖 `ReportRateLimit` 的升级旁路：`token_plan` key 连续第 3 次
+  `rate_limit` 会直接进入 `QUOTA_EXCEEDED`，且当前不会触发 probe 调度回调。无 balancer
+  的此类 key 可能需要重启、重建 Pool 或外部状态恢复；动态中转站自动创建的 key 固定为
+  `api`，正常路径不会触发这一例外。
+- `token_plan`、`api`、`free` 是跨 Provider 的固定层级，不等同于 key 状态。
+- 熔断器按 key 隔离，内置厂商从该 vendor 的 Provider 配置读取熔断参数。
+- 动态中转站不在 `config.providers` 中，因此目前拿不到厂商级熔断配置；它仍有 key
+  冷却和错误驱动的 failover，但没有这套 per-key breaker。
 
-## 5. 共享 key 池 vs 独立池
+## 动态中转站
 
-| 厂商 | 池类型 | 原因 |
-|---|---|---|
-| deepseek | 共享(`deepseek` + `deepseek-anthropic`) | 同 vendor 协议面 |
-| MiniMax | 共享(`minimax` + `minimax-openai`) | 同 vendor 协议面 |
-| MiMo | 共享(`mimo` + `mimo-anthropic` + 各自 token_plan) | 同 vendor 协议面 + tier 互斥 |
+中转站不是内置厂商目录的一部分。启动时
+`provider/relay.LoadFromDatabase` 查询启用的 `relay_stations`，注册 face、同步 key，
+再由 Server 建池。创建、更新和删除管理记录后会自动热重载。
 
-> 共享池意味着:同一把 key 既能给 anthropic 协议面用,也能给 openai 协议面用 — key 的 `Protocols` 字段标记可用协议(空 = 全部)。
+当前中转站只实现 OpenAI 与 Anthropic 兼容协议。Responses 对 OpenAI 中转站采取
+乐观透传：路由不读取已废弃的能力列；不支持 `/v1/responses` 的站由上游 400/404 和
+候选 failover 处理。完整限制见 [动态中转站接入指南](relay-stations.md)。
 
----
+## 代码入口
 
-## 6. 余额恢复模式决策表
-
-| 模式 | 何时用 | 行为 |
-|---|---|---|
-| **poll** | 厂商有官方余额 API(deepseek / MiniMax) | 标 QUOTA_EXCEEDED,quotacheck 轮询恢复;连续 2 轮读到 0 才确认耗尽(防瞬态 0 误杀,踩坑 #9 的姊妹) |
-| **probe** | 厂商无官方余额 API(mimo) | 不永久标记,每次请求重探;充值即恢复(代价:每次请求先打上游,毫秒级) |
-
-判定逻辑在 `server.buildKeyPools`(`server.go:251` `vendorHasBalancer`):
-
-```go
-if !vendorHasBalancer(vendor) {
-    poolCfg.QuotaRecovery = keypool.QuotaRecoveryProbe
-}
-```
-
----
-
-## 7. 厂商接入清单(新增时)
-
-新增厂商的 6 步见 `docs/provider厂商定制包指南.md`。关键节点:
-
-1. **Step 0 调研**:必须直连上游打一次耗尽场景,记录真实 HTTP status + body(踩坑 #1 #14 教训)
-2. **Step 3 注册**:`RegisterGlobalWithProtocolVendor` 第 4 参数 vendor 别填错
-3. **Step 4 balancer**:有官方余额端点就写(每个注册名都要注册!)
-4. **config 块**:`billing_source` 与 vendor 内其他块保持一致
-5. **`provider/builtin/builtin.go`**:blank import 漏一行就完蛋
-6. **测试**:`registry_test.go` 断言两个注册名 + Protocol/Vendor
-
----
-
-## 8. TokenMarket 中转站
-
-> ✅ **接入时间**: 2026-08-22  
-> 🎯 **接入方式**: 配置接入(无厂商包代码)  
-> 📚 **完整文档**: `docs/provider-tokenmarket.md`
-
-### 简介
-
-**TokenMarket** (https://tokenmarket.cheap) 是基于 **New-API** 开源项目搭建的 LLM API 聚合中转站。
-
-### 核心特点
-
-- ✅ **OpenAI 完全兼容** — 标准 `/v1/chat/completions` / `/v1/models` 格式
-- ✅ **国内直连** — 无需科学上网
-- ✅ **多厂商聚合** — GPT-4o、Claude、DeepSeek、国产模型一站式
-- ✅ **按量计费** — 不同模型倍率 0.05-1.5x 官方价格
-- ❌ **无 Responses API** — Codex 的 `/v1/responses` 请求不会路由到 TokenMarket
-
-### 技术实现
-
-TokenMarket 完全复用 `openai_compatible` 基础实现,无需编写专属厂商包:
-
-```yaml
-# config.yaml
-tokenmarket:
-  enabled: true
-  billing_source: "api"
-  endpoint: "https://tokenmarket.cheap/v1"
-  protocol: "openai"          # 复用 openai_compatible
-  timeout: 60s
-  responses_api: false        # 不支持 Responses API
-```
-
-### 使用步骤
-
-1. **获取 API Key**: 访问 https://tokenmarket.cheap 注册并充值
-2. **添加 Key**: 前端「Provider Keys」页面添加 `sk-xxxxx`
-3. **同步模型**: `curl -X POST http://localhost:8080/api/v1/providers/tokenmarket/sync-models`
-4. **测试**: `./scripts/test-tokenmarket.sh`
-
-### 路由集成
-
-TokenMarket 已自动加入路由链:
-- **协议过滤**: `/v1/chat/completions` 走 OpenAI 面(包括 tokenmarket)
-- **Sticky 调度**: 优先用最高优先级可用 key
-- **熔断保护**: 5xx/timeout 触发 per-key 熔断,自动切换
-
-### 监控
-
-- **Access Logs**: 筛选 `provider=tokenmarket`
-- **Overview**: 查看 tokenmarket 的 key 状态(健康/冷却/熔断)
-- **Usage**: 统计 token 消耗
-
-### 已知限制
-
-| 限制 | 说明 |
-|------|------|
-| ❌ Responses API | 不支持 `/v1/responses` |
-| ⚠️ 余额查询 | 无官方 balancer,需在 TokenMarket 平台管理 |
-| ⚠️ 中转站风险 | 可能跑路/变更政策,建议多备份 |
-| ⚠️ 首字延迟 | 中转站特性,平均 10-30 秒 |
-
-### 成本对比
-
-| 模型 | 官方价格 | TokenMarket 倍率 | 实际价格 |
-|------|----------|------------------|----------|
-| gpt-4o | $5/1M | 0.8-1.2x | $4-6/1M |
-| claude-3.5-sonnet | $3/1M | 0.9-1.5x | $2.7-4.5/1M |
-| deepseek-chat | $0.14/1M | 0.05-0.3x | $0.007-0.042/1M |
-
-### 完整文档
-
-详见 `docs/provider-tokenmarket.md` 和 `docs/TOKENMARKET-INTEGRATION-SUMMARY.md`。
+- Registry：`backend/internal/provider/registry.go`
+- Manager：`backend/internal/provider/manager.go`
+- 内置装载点：`backend/internal/provider/builtin/builtin.go`
+- OpenAI 基座：`backend/internal/provider/openai_compatible/`
+- Anthropic 基座：`backend/internal/provider/anthropic_compatible/`
+- Google 基座（当前无内置厂商）：`backend/internal/provider/google/`
+- 动态中转站：`backend/internal/provider/relay/`
+- KeyPool：`backend/internal/keypool/`
+- 模型存储：`backend/internal/database/provider_model_store.go`

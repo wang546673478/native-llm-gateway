@@ -1,5 +1,4 @@
-// Package keypool — Pool:管理单个 Provider 下的所有 Key
-// 对应规格书 5.4 Key Pool
+// Package keypool 管理同一 vendor 的上游 Key Pool。
 package keypool
 
 import (

@@ -1,7 +1,5 @@
-// Package anthropic_compatible 实现 Anthropic Messages API 兼容协议的共享逻辑
-// 对应规格书 8.3
-//
-// 适用 Provider: MiniMax / 任意 Anthropic 兼容 API
+// Package anthropic_compatible 实现 Anthropic Messages 和模型发现的共享逻辑，
+// 供内置 Provider 和动态 Relay 使用。
 package anthropic_compatible
 
 import (

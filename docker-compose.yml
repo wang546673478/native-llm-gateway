@@ -18,7 +18,8 @@ services:
     volumes:
       # 只读挂载真实配置(密钥不进镜像);改配置后 docker compose up -d 重建生效
       - ./config.yaml:/app/config.yaml:ro
-      # 数据卷:gateway.db / key-state.json / access body / 日志
+      # 数据卷:access body / 日志。PostgreSQL 模式的 key-state.json 当前写在 /app,
+      # 不在此挂载中,容器重建后只会丢失瞬时调度状态。
       - ./gateway-data:/app/data
     depends_on:
       postgres:

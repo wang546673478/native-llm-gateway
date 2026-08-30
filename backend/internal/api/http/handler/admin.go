@@ -968,7 +968,7 @@ func last24hFilter() accesslog.QueryFilter {
 
 // validStatusTokens 是 ?status= 允许的合法 token 白名单(F9 enum)。
 //
-// 必须与 spec §1.2 错误桶枚举保持一致,且只允许这些值;
+// 必须与 Access Log 查询层的错误桶枚举保持一致，且只允许这些值；
 // 任何不在表内的输入视为"未知",由 caller 决定如何回应(本 handler
 // 选择 400 BadRequest,见 listAccessLogs)。
 var validStatusTokens = map[string]bool{
@@ -993,7 +993,7 @@ var validStatusTokens = map[string]bool{
 
 // statusBucketFor 把合法的 status token 翻译成对应的 accesslog.StatusBucket。
 //
-// 映射规则(spec F9):
+// 映射规则：
 //   - "ok"   → status_code < 400
 //   - "4xx"  → status_code ∈ [400, 500)
 //   - "5xx"  → status_code >= 500

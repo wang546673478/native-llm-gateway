@@ -1,212 +1,303 @@
 # Provider 厂商定制包指南
 
-> 新增或更新一个厂商(如加回 kimi)的完整实操手册。
-> 配套 skill:`.claude/skills/provider-vendor`(让 Claude Code 按本指南执行)。
+本文用于新增或修改**内置厂商 Go 包**。如果上游只是标准 OpenAI 或 Anthropic
+兼容代理，优先使用 [动态中转站](relay-stations.md)，不要增加代码包。
 
-## 概念模型(必须理解)
+配套执行清单位于 `.claude/skills/provider-vendor/SKILL.md`。
 
-- **厂商(vendor)= 一个实体**(如 deepseek),UI 层只显示厂商名
-- **注册名(registration name)= 协议面路由名**:`deepseek`(openai 面)、`deepseek-anthropic`(anthropic 面),同一厂商的多个注册名**共享同一个 key 池**
-- **key 厂商级一份**:`provider_api_keys.provider_name` 存厂商名,`protocols` 列标记可用协议面(空 = 全部)
-- **catch_all 自动模式**:只要注册了 + config 启用了,自动进链,无路由表
+## 何时需要定制包
 
-## 文件清单(以 deepseek 为模板)
+满足任一条件时才增加内置包：
 
-```
-backend/internal/provider/deepseek/
-├── deepseek.go          # openai 面:继承 openai_compatible.Base
-├── anthropic.go         # anthropic 面:继承 anthropic_compatible.Base
-├── balancer.go          # 余额查询(quotacheck.RegisterBalancer)
-├── registry_test.go     # 双协议面注册回归测试(必写,防误删注册名)
-└── balancer_test.go     # 余额解析测试
-```
+- 标准兼容基座无法表达请求 URL 或鉴权方式；
+- 需要改写请求体、响应体或专属 header；
+- 业务错误藏在 HTTP 200 body 或 SSE 事件中，通用分类器不能正确识别；
+- 上游 usage 字段不是 OpenAI/Anthropic 标准形状；
+- 有专属余额/套餐查询，需要注册 `quotacheck.Balancer`；
+- 同一厂商有多个端点或协议面，需要共享 vendor 级 key 池。
 
-## 分步指南
+仅仅更换 base URL、添加 key 或使用标准模型列表，不是写定制包的理由。
 
-### Step 0:调研官方文档(先做,防返工)
+## 运行时概念
 
-**官方文档是唯一权威来源** — 用户只提供官方文档 URL,不依赖搜索镜像/二手信息。
+- **vendor** 是厂商级身份，例如 `mimo`。
+- **face** 是注册名和路由面，例如 `mimo`、`mimo-anthropic`、
+  `mimo-token-plan`。
+- `RegisterGlobalWithProtocolVendor(face, factory, protocol, vendor)` 建立 face 到
+  vendor 的映射。同 vendor 的 face 共用 KeyPool。
+- 上游 key 存在 `provider_api_keys`，`provider_name` 使用 vendor；每把 key 自带
+  `billing_source` 和可选 `protocols`。
+- face 的 endpoint、protocol、timeout、`billing_source` 和 Responses 能力来自
+  `config.yaml`。模型与定价不在配置文件中。
+- 模型定价按 `(vendor, model_id)` 存在 `provider_models`；模型归属按
+  `(face, model_id)` 存在 `provider_model_faces`。
 
-**0.1 确认厂商**:请求未点明厂商时(如「加一个新厂商」)先问清是哪家;已点明(如「加 kimi」)跳过。
+## 第一步：调查上游契约
 
-**0.2 要官方文档 URL**:
-- 用户给的必须是 URL;不是 URL(如「去搜 XX 官网」)→ 要求重新提供
-- URL 拉取失败(404 / 非官方域名)→ 请用户换一个
+优先以厂商官方文档和可复现的直连请求为依据，至少记录：
 
-**0.3 遍历官方文档站**(只在用户给的站内):
-- 入口:优先拉 `/llms.txt` 全量索引(抓不到就抓首页)
-- WebSearch 限定站内定位章节
-- **必须 `grep -i "anthropic\|claude"` 索引** —— anthropic 兼容面常藏在「Claude API 兼容」章节(真实教训:GLM 的 Claude API 兼容页在索引第 117 行,漏查导致第一版只有 openai 面)
-- llms.txt + 首页都失败或站内定位不到 → 回 0.2 请用户换 URL,不要自行出站找替代来源
-
-**0.4 提取 6 类信息**(对话内速查表,每项标消费方):
-
-| # | 提取项 | 消费方 |
-|---|--------|--------|
-| ① 协议面 | openai/anthropic base URL、Responses 支持与路径(端点是否已含 `/v1`)、鉴权方式 | ChatPath/ResponsesPath、config 块、`responses_api` |
-| ② 模型与能力 | 真实模型 ID、上下文窗口(512k 悬崖)、思考模式(默认开/关、reasoning_effort、thinking 参数名)、工具调用(带 tools 的回传要求)、流式格式、JSON output 触发条件 | 包代码 + DB `provider_models`(靠上游同步拉取,排序保上游顺序) |
-| ③ 定价 | input/output 单价(**单位换算**:元/M → 元/百万 token;美元单价还要按汇率换算)、缓存 read/creation 有无与数值、缓存计费语义(`prompt_tokens` 含不含 cached)、峰谷价 | DB `provider_models` 三档 `cost_per_million_input/cache_read/output`(模型管理页手工填) |
-| ④ 余额 | 官方余额 API 端点与响应字段;没有 → 替代方案(如未文档化 token_plan);额度错误藏 200 body? | `balancer.go`、`RegisterBalancer` |
-| ⑤ 定制特性 | 响应包裹格式(base_resp)、reasoning 字段名与回传规则、缓存机制差异、厂商专属参数(service_tier 等)、429 语义(套餐耗尽 vs 真限流) | 包 header 注释 |
-| ⑥ 入口 | `/llms.txt` 索引、模型表/定价表/协议章节各自 URL | 遍历路线 |
-
-**0.5 差异标注**:官方文档与现有 config/文档冲突(如 MiniMax 旧域名)时,标出差异再动,不静默覆盖。
-
-**完成度标准**(全部满足 = 调研完,进入 Step 1):
-
-| 项 | 标准 |
+| 项目 | 必须确认的内容 |
 |---|---|
-| 协议 | 每个面 base URL + 路径确认,能写出 ChatPath/ResponsesPath |
-| 模型 | ≥1 个真实可用模型 ID(靠上游同步拉取后写进 DB `provider_models`) |
-| 价格 | input/output 单价确认;文档没给 → 显式标「无定价 → cost 缺省 0」,不是跳过 |
-| 特性 | 能写出完整 header 注释清单 |
-| 余额 | 有官方 API / 无(用替代)/ 文档未提及 —— 三选一显式结论 |
-| 未知项 | 标「文档未提及」≠「没有」,写代码时按最保守处理 |
+| 协议 | OpenAI Chat、OpenAI Responses、Anthropic Messages、Google 中哪些可用 |
+| URL | base URL 是否已含 `/v1`；chat、responses、models 的完整路径 |
+| 鉴权 | Bearer、`x-api-key`、`api-key`、query key 或其他方式 |
+| 模型 | 真实模型 ID、模型列表端点及返回格式 |
+| 请求 | thinking、tools、stream、JSON mode 等非标准参数或回传约束 |
+| 响应 | usage、缓存 token、reasoning、流式事件和错误包裹格式 |
+| 错误 | 400/401/403/402/429/5xx 的真实 status、body 和 `Retry-After` |
+| 额度 | 是否有稳定余额端点、鉴权方式、单位和恢复条件 |
+| 定价 | input/cache read/output 的币种和每百万 token 单位 |
 
-### Step 1:写 openai 面(`xxx.go`)
+必须分别实测正常、流式、鉴权失败、限流和额度耗尽。不能把“文档未提及”写成
+“不支持”，也不能只根据 HTTP status 推断业务错误。
+
+## 第二步：选择基础实现
+
+### OpenAI 兼容面
+
+标准实现位于 `backend/internal/provider/openai_compatible/`。最小 wrapper 可以使用嵌入：
 
 ```go
-// Package deepseek — 厂商包:openai 面 + anthropic 面共享 key 池
-package deepseek
+package acme
 
 import (
-	"fmt"
+    "fmt"
 
-	"github.com/wang546673478/native-llm-gateway/internal/keypool"
-	"github.com/wang546673478/native-llm-gateway/internal/provider"
-	"github.com/wang546673478/native-llm-gateway/internal/provider/openai_compatible"
+    "github.com/wang546673478/native-llm-gateway/internal/provider"
+    "github.com/wang546673478/native-llm-gateway/internal/provider/openai_compatible"
 )
 
-const (
-	name       = "deepseek"
-	chatPath   = "/chat/completions" // 无 /v1 前缀时用这个;否则默认 /v1/chat/completions
-	responsesPath = "/v1/responses"  // 原生支持 Responses API 才配;endpoint 已含 /v1 则写 "/responses"
-)
+const openAIName = "acme"
 
-type Provider struct {
-	base *openai_compatible.Base
-	cfg  provider.ProviderConfig
+type OpenAIProvider struct {
+    *openai_compatible.Base
 }
 
-func New(cfg provider.ProviderConfig) (provider.Provider, error) {
-	if cfg.Protocol != provider.ProtocolOpenAI {
-		return nil, fmt.Errorf("%s requires protocol=openai, got %q", name, cfg.Protocol)
-	}
-	if cfg.Endpoint == "" {
-		return nil, fmt.Errorf("%s endpoint is required", name)
-	}
-	return &Provider{
-		base: openai_compatible.NewBase(openai_compatible.Config{
-			Name:          name,
-			Endpoint:      cfg.Endpoint,
-			Timeout:       cfg.Timeout,
-			ChatPath:      chatPath,
-			ResponsesPath: responsesPath, // 不支持 Responses API 的厂商不要设(用默认也发不过去,链上会被 responses_api 过滤)
-			StreamUsage:   true,          // 流式末尾带 usage,网关才能记账
-			Pool:          toPool(cfg.Pool),
-		}),
-		cfg: cfg,
-	}, nil
+func NewOpenAI(cfg provider.ProviderConfig) (provider.Provider, error) {
+    if cfg.Protocol != provider.ProtocolOpenAI {
+        return nil, fmt.Errorf("%s requires protocol=openai, got %q", openAIName, cfg.Protocol)
+    }
+    if cfg.Endpoint == "" {
+        return nil, fmt.Errorf("%s endpoint is required", openAIName)
+    }
+    return &OpenAIProvider{Base: openai_compatible.NewBase(openai_compatible.Config{
+        Name:          openAIName,
+        Endpoint:      cfg.Endpoint,
+        Timeout:       cfg.Timeout,
+        Pool:          cfg.Pool,
+        BillingSource: cfg.BillingSource,
+        ChatPath:      "/chat/completions", // endpoint 已含 /v1 时使用
+        ResponsesPath: "/responses",        // endpoint 已含 /v1 时使用
+        ModelsPath:    "/models",           // endpoint 已含 /v1 时使用
+        StreamUsage:   true,
+    })}, nil
 }
+
+func (p *OpenAIProvider) Name() string                { return openAIName }
+func (p *OpenAIProvider) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
 ```
 
-### Step 2:写 anthropic 面(可选,`anthropic.go`)
+`Base` 已提供 `SendRequest`、`SendStreamRequest`、`HealthCheck`、`ListModels`、
+`SetPool` 和 `Close`。wrapper 只需补 `Name` 和 `Protocol`。
+
+URL 规则必须用完整上游路径反推，不能凭感觉加 `/v1`：
+
+| Endpoint 形状 | `ChatPath` | `ResponsesPath` | `ModelsPath` |
+|---|---|---|---|
+| `https://host`，标准 OpenAI | 留空（默认 `/v1/chat/completions`） | 留空（默认 `/v1/responses`） | 留空（默认 `/v1/models`） |
+| `https://host/v1` | `/chat/completions` | `/responses` | `/models` |
+| `https://host`，DeepSeek 风格 | `/chat/completions` | 按官方完整路径 | 按官方完整路径 |
+
+请求和 `ListModels` 对 endpoint 恰好以 `/v1` 结尾的场景有去重保护，但健康检查直接拼
+`ModelsPath`。因此内置包仍应显式写正确路径，并用 `httptest.Server` 锁定最终 URL。
+
+`BillingSource` 不能遗漏。它让模型同步和健康检查从共享池中选择与该 endpoint 匹配的
+计费层 key；代理请求本身始终优先使用路由层传入的 `req.Key`。
+
+### Anthropic 兼容面
+
+标准实现位于 `backend/internal/provider/anthropic_compatible/`：
 
 ```go
-const anthropicName = "deepseek-anthropic"
+const anthropicName = "acme-anthropic"
+
+type AnthropicProvider struct {
+    *anthropic_compatible.Base
+}
 
 func NewAnthropic(cfg provider.ProviderConfig) (provider.Provider, error) {
-	// 校验 protocol=anthropic + endpoint
-	return &AnthropicProvider{
-		base: anthropic_compatible.NewBase(anthropic_compatible.Config{
-			Name:     anthropicName,
-			Endpoint: cfg.Endpoint, // 通常 = openai 面的 endpoint + /anthropic
-			Timeout:  cfg.Timeout,
-			Pool:     toPool(cfg.Pool),
-		}),
-		cfg: cfg,
-	}, nil
+    if cfg.Protocol != provider.ProtocolAnthropic {
+        return nil, fmt.Errorf("%s requires protocol=anthropic, got %q", anthropicName, cfg.Protocol)
+    }
+    if cfg.Endpoint == "" {
+        return nil, fmt.Errorf("%s endpoint is required", anthropicName)
+    }
+    return &AnthropicProvider{Base: anthropic_compatible.NewBase(
+        anthropic_compatible.Config{
+            Name:     anthropicName,
+            Endpoint: cfg.Endpoint,
+            Timeout:  cfg.Timeout,
+            Pool:     cfg.Pool,
+        },
+    )}, nil
+}
+
+func (p *AnthropicProvider) Name() string { return anthropicName }
+func (p *AnthropicProvider) Protocol() provider.Protocol {
+    return provider.ProtocolAnthropic
 }
 ```
 
-### Step 3:注册(核心不变量)
+Anthropic 基座把 endpoint 末尾的 `/` 去掉：末尾是 `/v1` 时拼 `/messages`，否则拼
+`/v1/messages`。它使用 `x-api-key` 和固定 `anthropic-version: 2023-06-01`。
+
+模型同步先尝试 `{endpoint}/api/models` 的 New API 形状，再尝试标准
+`{endpoint}/v1/models`（endpoint 以 `/v1` 结尾时去重）。当前 Anthropic Config 没有
+`BillingSource`；同 vendor 存在多个 Anthropic endpoint 且 key 与计费层绑定时，
+`ListModels` 和健康检查无法按 tier 选 key，必须补齐基座能力或为该厂商实现专用逻辑。
+
+### Google 面
+
+`backend/internal/provider/google/` 保留了协议基座，但当前没有内置 Google 厂商，也没有
+动态 relay 实现。新增 Google 厂商必须写 wrapper、注册、配置和全链测试；不能把 relay
+页面出现 Google 选项当成已支持。
+
+## 第三步：实现厂商差异
+
+兼容基座是共享代码。只属于一家厂商的差异应优先放在该厂商 wrapper 或专用 Provider
+中，避免让所有兼容上游都承担特殊规则。
+
+- OpenAI 非标准 usage 可通过 `openai_compatible.Config.UsageParser` 注入。
+- 请求体需要改写时，在 wrapper 的 `SendRequest`/`SendStreamRequest` 调用 Base 前处理
+  副本；不要修改其他候选复用的原始状态。
+- 非标准鉴权或 URL 无法由 Base 表达时，实现完整 `provider.Provider`，不要伪装成标准
+  兼容面。
+- 错误分类应返回 `provider.ProviderError`，保留 status、raw body、`RetryAfter` 和准确的
+  `ErrorType`。
+- 实际向 KeyPool 上报过错误时设置 `KeyPoolReported: true`，防止 Proxy 重复计数。
+- 必须使用 `req.Key` 发请求。仅当它为 nil（健康检查等非路由调用）时才自行 acquire。
+- HTTP 429 使用 `provider.ParseRetryAfter` 并上报 rate limit；401/403、额度耗尽、
+  invalid request 和 5xx 不应混为一种错误。
+- 流式响应要覆盖“开流前失败”和“SSE 内错误事件”两种形状。开流后才出现的错误无法
+  向客户端改写已发送的 HTTP status。
+
+如果新增的是一种可跨厂商复用的错误形状，才考虑扩展共享解析器，并为所有协议基座
+增加回归测试。
+
+## 第四步：注册 face 和装载包
 
 ```go
 func init() {
-	provider.RegisterGlobalWithProtocolVendor(name, New, provider.ProtocolOpenAI, name)                    // vendor = 厂商名
-	provider.RegisterGlobalWithProtocolVendor(anthropicName, NewAnthropic, provider.ProtocolAnthropic, name) // 同一 vendor
+    provider.RegisterGlobalWithProtocolVendor(
+        openAIName, NewOpenAI, provider.ProtocolOpenAI, "acme",
+    )
+    provider.RegisterGlobalWithProtocolVendor(
+        anthropicName, NewAnthropic, provider.ProtocolAnthropic, "acme",
+    )
 }
 ```
 
-> `RegisterGlobalWithProtocolVendor(注册名, 工厂, 协议, 厂商)` — vendor 参数决定:
-> - `VendorFor(注册名)` 归一(key 绑定/白名单/access log 都按厂商)
-> - 同 vendor 共享 key 池(server.buildKeyPools 按 vendor 复用)
-
-**关键:还要在 `internal/provider/builtin/builtin.go` 加 blank import** — Go 只编译被 import 的包,
-厂商包靠 `init()` 自注册;不加这行,新厂商不会进二进制,`/api/v1/providers` 里
-死活不出现它。在现有 blank import 后面加一行:
+然后在 `backend/internal/provider/builtin/builtin.go` 增加：
 
 ```go
-_ "github.com/wang546673478/native-llm-gateway/internal/provider/kimi" // 触发 init() 注册(示例;glm/qwen/gemini 已于 2026-08-20 删除)
+_ "github.com/wang546673478/native-llm-gateway/internal/provider/acme"
 ```
 
-### Step 4:余额查询(可选,`balancer.go`)
+遗漏 blank import 时，Go 不会编译该包，`init()` 不执行，管理 API 也看不到厂商。
+face 名必须全局唯一；vendor 必须在同一厂商的所有 face 中保持一致。
+
+## 第五步：余额查询
+
+只有上游存在可验证的额度端点时才实现 `quotacheck.Balancer`：
 
 ```go
 func init() {
-	quotacheck.RegisterBalancer("deepseek", b)          // 每个注册名都要注册!
-	quotacheck.RegisterBalancer("deepseek-anthropic", b)
+    b := newBalancer()
+    quotacheck.RegisterBalancer(openAIName, b)
+    quotacheck.RegisterBalancer(anthropicName, b)
 }
 ```
 
-Balancer 接口:`FetchBalance(ctx context.Context, baseURL string, k *keypool.Key) (Balance, error)`,返回 `Balance{Raw float64, HasQuota bool, Source string, Kind "percent"|"currency"}`。
-- **token_plan 厂商必须有**(percent 或金额),否则额度耗尽永不标记、永不降级
-- 有余额查询的厂商一律写 balancer。现存三厂商(deepseek / minimax / mimo)**全部有 balancer**:
-  - deepseek / minimax 有官方余额端点(API key 鉴权)
-  - mimo 无官方 API,走**控制台未文档化端点 cookie 鉴权**(见下一条)—— 也是 balancer,不是「不写」
-  - 「无 balancer → probe 模式(每次请求重新探测,不永久标耗尽)」只作为未来加「真无余额端点」厂商的兜底路径,当前没有厂商走它(glm/qwen/gemini 已删除)
-- balancer 会被请求路径的主动查额度复用(quotacheck.CheckQuota):网络类错误后由网关统一调用,厂商包无需另写查询入口
-- 实测过 MiniMax 的 `token_plan/remains` 是**未文档化端点**(quota host 与 chat host 不同,`www.minimaxi.com`),且早期猜的字段名都不对;稳定兜底仍是错误码驱动(HTTP 200 + base_resp 1008/2056 → 见踩坑 #1)——balancer 拿不到数就靠错误码降级,两条路都写着
-- **控制台 cookie 鉴权模式**(MiMo 先例,见踩坑 #19):厂商无官方余额 API 但控制台有未文档化端点(社区逆向),鉴权是账号登录 cookie(约 1 天过期)而非 API key。实现要点:① cookie 放 config `quota_cookie` + 管理 API `POST /api/v1/providers/mimo/quota-cookie` 热更新(验证 → DB 持久化 → 注入),不放 key 上;② poll 按 vendor pool 去重,balancer 内按 `k.BillingSource` 分支端点(token_plan key → 套餐端点,api key → 余额端点),不能在注册名上分;③ cookie 过期 401 → 轮询退化保守(不标耗尽),错误码兜底不变
-- (glm 已随包删除,其 monitor 端点案例仅作历史参考)
+共享池可能通过任意 face 查找 balancer，因此有余额能力时要为该 vendor 的每个 face
+注册。`FetchBalance` 返回 `Raw`、`HasQuota`、`Source` 和 `Kind`（`percent` 或
+`currency`），并区分“确认无额度”和“查询失败”。
 
-### Step 5:config.yaml 加块
+- 有 balancer 的 vendor 使用 poll 恢复模式。
+- 没有 balancer 的 vendor 使用 probe 模式，不要为了满足接口而伪造余额。
+- 未公开控制台端点和短期 Cookie 是脆弱依赖，必须记录降级行为并测试 401/403/5xx。
+- 同一 vendor 混合 `token_plan` 与 `api` key 时，应根据 `k.BillingSource` 选择额度
+  端点，而不是根据随机选中的 face 名判断。
+
+## 第六步：配置 face
 
 ```yaml
-kimi:
-  enabled: true
-  billing_source: "api"          # token_plan / api / free — 决定 tier 层级
-  endpoint: "https://api.kimi.com"   # 已含 /v1 就不该在 ModelsPath 再拼(踩坑:mimo 双 /v1)
-  protocol: "openai"             # 该块的协议面
-  timeout: 60s
-  responses_api: false           # 原生支持 /v1/responses 才 true(deepseek/minimax 已标)
+providers:
+  acme:
+    enabled: true
+    endpoint: "https://api.example.com/v1"
+    protocol: "openai"
+    billing_source: "api"
+    timeout: 60s
+    responses_api: true
+    circuit_breaker:
+      failure_threshold: 5
+      failure_window: 60s
+      open_timeout: 30s
+      half_open_requests: 1
 ```
 
-> ⚠️ **没有 `models:` 段、没有 `default_model`、没有 `cost_per_1k_*` 了**(2026-08-20 起)——
-> 模型清单与定价的唯一真相源是 DB 表 `provider_models`,靠「上游同步」拉取、靠「模型管理页」手工定价。
-> config 里只负责「启不启用、走哪个端点、计费层级」这类面级配置。
+每个 face 都要独立配置。`billing_source` 可以因 endpoint 而不同，MiMo 的按量与套餐面
+就是现有先例；相同 endpoint/账户则应保持一致。`responses_api` 只给原生支持
+Responses 的 OpenAI face 打开。
 
-> anthropic 面要单独一个块(`kimi-anthropic` 或 `kimi` + `kimi-openai`,协议对应)。**同一厂商的所有块 `billing_source` 保持一致**(共享 pool 按 tier 桶)。
+不要添加 `keys`、`models`、`default_model` 或旧的 `cost_per_1k_*`：
 
-### Step 6:测试与验证
+- key 通过 Provider Keys 页面或管理 API 写数据库；
+- 模型通过上游同步写 `provider_models`/`provider_model_faces`；
+- 三档价格在模型管理页按人民币每百万 token 手工维护。
 
-1. `registry_test.go`:断言两个注册名 + 各自的 Protocol/Vendor(复制 deepseek/registry_test.go 改名字)
-2. `go build ./... && go test ./...`
-3. `./gateway-reload.sh` 无感重载(make build + `sudo systemctl restart` + health check,**需要 sudo**;无 sudo 时手动 `make build` + `kill -TERM <pid>` 靠 Restart=always 拉起)→ `/api/v1/providers` 出现新厂商(按 vendor 聚合)
-4. 页面加 key(选厂商 → 协议)
-5. **同步模型**(必须,否则新厂商路由会 no_route):模型管理页点该厂商「同步」,或「全部同步」`POST /api/v1/providers/sync-all-models`——从上游 `/models` 端点拉模型 id 写进 `provider_models`;模型没进 DB 时,gateway key 白名单命不中 → 无候选 → 503 no_route
-6. **拖拽排序**(可选):Routing 页「调度顺序树」里把新厂商拖到你想要的优先级,点「保存排序」→ 写入 `route_order` 表 + 热生效。不拖的话新厂商走默认序「最早 key 加入时间」,且**有改写的厂商恒排在无改写的新厂商之前**(即新厂商通常垫底),但仍参与路由
-7. E2E:发任意模型名 → 走链命中新厂商;access log 显示厂商名 + 实际使用模型
+## 第七步：测试和验证
 
-## 常见坑(详细见 docs/踩坑与排错.md)
+至少增加以下测试：
 
-| 坑 | 要点 |
-|---|---|
-| 上游错误藏在 HTTP 200 body | 用 `ParseMiniMaxBaseResp` 同款机制解析,别只认状态码 |
-| 错误分类别禁用 key | **无终端禁用状态**:auth → COOLING 5 分钟自动重试;400 invalid_request 只计数;5xx/timeout/connection → per-key 熔断(只熔断该 key)。别把「禁用」逻辑加回去 |
-| 429 冷却标错 key | `req.Key` 已由路由层 acquire,Provider 层必须复用它发请求,不能内部二次 acquire(双 acquire 会把 429 冷却标到没发过请求的 healthy key 上) |
-| Responses API 支持矩阵 | 支持的厂商标 `responses_api: true` + `ResponsesPath`;`/responses` 请求链上只走支持的 |
-| 跨厂商推理块 | 客户端回带上家 reasoning → 网关自动剥离 + effort=none,厂商包无需处理 |
-| 注册名都要注册 balancer | 漏一个 → 该协议面额度永不标记 |
-| vendor 参数别填错 | 填错 → key 池不共享 / 绑定归一失效 / access log 厂商名错乱 |
-| 注册了但新厂商不生效 | 忘了 `internal/provider/builtin/builtin.go` 的 blank import —— Go 只编译被 import 的包,`init()` 不跑,不进二进制 |
+- `registry_test.go`：每个 face 的 Protocol 和 Vendor；
+- 构造测试：拒绝空 endpoint 和错误 protocol；
+- URL 测试：endpoint 含/不含 `/v1`、尾斜杠、chat、responses、models；
+- 非流式和流式 usage，特别是 cache token 不重复计费；
+- 每一种专属错误形状，包括 HTTP 200 body 和 SSE 内错误；
+- 多 key 下确认实际请求 key 与被上报的 key 相同；
+- balancer 的正常、零额度、鉴权失败、解析失败和 5xx；
+- 多 face/mixed tier 时模型同步使用正确 endpoint 和 key。
+
+本地门禁：
+
+```bash
+cd backend
+go test -count=1 ./internal/provider/acme ./internal/provider/...
+go test -count=1 ./...
+go vet ./...
+```
+
+部署新二进制后再完成运行验证：
+
+1. `GET /api/v1/providers` 能看到 vendor 和全部 face。
+2. 添加至少一把带正确 `billing_source`/`protocols` 的上游 key。
+3. 在模型管理页同步该 vendor，确认 face 归属和模型列表。
+4. 填写三档价格；未填价格的用量成本为 0。
+5. 在 Routing 页保存所需顺序。未写 `route_order` 的新厂商按默认 key 创建时间排序，
+   且排在已有显式改写之后。
+6. 分别对每种协议做流式、非流式和 failover E2E，并用 Access Log 核对 vendor、
+   protocol、provider key、最终模型和错误分类。
+
+## 提交前清单
+
+- [ ] 已证明动态中转站不足以表达该上游。
+- [ ] 官方协议、URL、鉴权、模型、usage、错误和额度契约均有来源或直连证据。
+- [ ] 每个 face 的 factory、Protocol、Vendor 和 `builtin` blank import 完整。
+- [ ] Provider 复用 `req.Key`，没有发送后再次 acquire。
+- [ ] endpoint 与三个 OpenAI path 或 Anthropic messages path 的组合有测试。
+- [ ] mixed tier face 将 `BillingSource` 透传到支持它的基座。
+- [ ] 有 balancer 时为所有 face 注册；无可靠端点时明确走 probe。
+- [ ] config 只包含面级运行配置，没有旧模型、价格或 key 字段。
+- [ ] 模型同步、价格、路由顺序和 E2E 已验证。
+- [ ] Provider 包测试、后端全量测试和 `go vet` 全部通过。

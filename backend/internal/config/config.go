@@ -1,5 +1,5 @@
-// Package config 负责加载和验证 Gateway 配置
-// 对应规格书 4.1 config.yaml 完整规格
+// Package config 负责加载和验证 Gateway 配置。
+// 字段语义和生效边界见 docs/config-reference.md。
 package config
 
 import (
@@ -25,7 +25,7 @@ type Config struct {
 	Logging   LoggingConfig       `mapstructure:"logging"`
 	Metrics   MetricsConfig       `mapstructure:"metrics"`
 	Usage     UsageConfig         `mapstructure:"usage"`
-	// Fingerprint 设备指纹归一化配置(见 docs/fingerprint-sanitize-plan.md)。
+	// Fingerprint 设备指纹归一化配置。
 	Fingerprint FingerprintConfig `mapstructure:"fingerprint"`
 	// AdminAuth 管理员认证配置
 	AdminAuth AdminAuthConfig `mapstructure:"admin_auth"`
@@ -43,11 +43,11 @@ type ServerConfig struct {
 	// 为空 = 不启用(保持纯 API 网关行为);相对路径按进程 cwd 解析。
 	// 未命中文件时 SPA fallback 到 index.html(vue-router history 模式)。
 	StaticDir string `mapstructure:"static_dir"`
-	// AccessLog 接入日志模块配置(§3.4 spec)
+	// AccessLog 接入日志模块配置。
 	AccessLog AccessLogConfig `mapstructure:"access_log"`
 }
 
-// AccessLogConfig 接入日志模块配置(§3.4 spec)
+// AccessLogConfig 接入日志模块配置。
 type AccessLogConfig struct {
 	Enabled       bool          `mapstructure:"enabled"`
 	BodyDir       string        `mapstructure:"body_dir"`

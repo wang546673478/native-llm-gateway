@@ -1,5 +1,4 @@
-// Package router 实现按模型名/别名到 Provider + Key 的路由解析
-// 对应规格书 5.5 Router
+// Package router 实现从模型名或别名到 Provider 和 Key 的路由解析。
 package router
 
 import (
@@ -17,7 +16,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
-// 为兼容 spec 命名,把 policy 包里的类型在 router 重新导出
+// 重新导出 policy 类型，保持 router 包现有的公开 API。
 type (
 	ProviderRoute = policy.ProviderRoute
 	AliasConfig   = policy.AliasConfig

@@ -1,5 +1,4 @@
-// Package provider 定义所有 LLM Provider 必须实现的接口与共享类型
-// 对应规格书 5.1 Provider 接口
+// Package provider 定义所有 LLM Provider 必须实现的接口与共享类型。
 package provider
 
 import (
@@ -332,8 +331,7 @@ func ComputeCost(c ModelCost, u *Usage) float64 {
 
 // Provider 所有 LLM Provider 必须实现的接口
 //
-// 设计原则(规格书 1.2 原则 1):Provider 只负责协议细节,
-// Gateway 核心不感知也不修改 body / response 格式
+// Provider 负责协议细节，Gateway 核心通过统一请求、响应和错误类型协作。
 type Provider interface {
 	Name() string
 	Protocol() Protocol
@@ -419,14 +417,9 @@ func (e *ProviderError) Error() string {
 	return fmt.Sprintf("%s: %s (status=%d)", e.ErrorType, e.Message, e.StatusCode)
 }
 
-// IsRetryable 判断错误是否触发 failover
-// 规格书:invalid_request / auth 不重试
-// P49 调整:auth 错误**可重试**
-//
-//	理由:chain failover 场景下,provider A 的 key 错误 → failover 到 provider B 的 key
-//	pool 已经把 A 的坏 key 标记为 DISABLED(ReportError),
-//	下次 iter.Next() 会跳过 A 选 B,B 有独立 key 可以成功
-//	invalid_request 和 model_not_found 仍然不重试(请求/模型本身有问题,换 provider 也没用)
+// IsRetryable 判断错误是否触发 failover。
+// auth 错误可切换到其他 Key/Provider；失败 Key 进入可恢复冷却。
+// invalid_request 和 model_not_found 属于请求/模型问题，不触发 failover。
 func (e *ProviderError) IsRetryable() bool {
 	switch e.ErrorType {
 	case ErrorTypeInvalidRequest, ErrorTypeModelNotFound, ErrorTypeClientDisconnected:

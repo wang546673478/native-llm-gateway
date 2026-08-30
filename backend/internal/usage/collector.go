@@ -1,5 +1,4 @@
-// Package usage 实现异步用量收集 + 批量落库
-// 对应规格书 5.8 Usage Collector
+// Package usage 实现异步用量收集和批量落库。
 package usage
 
 import (

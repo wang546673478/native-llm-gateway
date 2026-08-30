@@ -123,7 +123,7 @@ func (b *BodyFileWriter) Close() error { return nil }
 
 // IsTruncated 判断相对路径对应的 body 文件是否是 truncated 写入。
 //
-// BodyFileWriter.Write 在写入超过 8 MiB 的 body 时会在文件名后追加
+// BodyFileWriter.Write 在写入超过 16 MiB 的 body 时会在文件名后追加
 // ".truncated.json" 后缀(F1/F12 决议 — truncation marker 仅在文件名里,
 // 不进 DB 列,也不在 AccessEntry struct 里)。这是 canonical 的 truncation
 // 表示 — 调用方拿到 relPath 后用本函数判断是否被截断。

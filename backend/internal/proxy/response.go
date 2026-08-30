@@ -47,7 +47,7 @@ func isHopByHop(name string) bool {
 	return false
 }
 
-// writeJSONError 统一写错误响应(OpenAI 格式,与规格书 9.1 一致)
+// writeJSONError 统一写 OpenAI 形状的错误响应。
 func writeJSONError(c *gin.Context, status int, errType, message string) {
 	// P: error 响应里带 trace_id 字段,让客户端能直接拿来在 access_log 里反查
 	// (X-Request-Id header 同时设了,JSON body 也带一份,方便不读 header 的客户端)

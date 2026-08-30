@@ -1,5 +1,4 @@
-// Package provider — Manager
-// 对应规格书 5.2 Provider Manager
+// Package provider 包含 Provider Manager、Registry、接口和共享类型。
 package provider
 
 import (

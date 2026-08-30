@@ -1,305 +1,291 @@
-# 部署 / 运维 / 脚本
+# 部署与运维
 
----
+本文描述仓库当前可用的启动、监控、备份和回滚路径。配置字段及热重载边界见
+[`config-reference.md`](config-reference.md)，故障定位见
+[`踩坑与排错.md`](踩坑与排错.md)。
 
-## 1. 三种部署方式
+## 运行前检查
 
-### 1.1 Docker(推荐)
+最低依赖：
 
-镜像 `wuhuhhhh/native-llm-gateway`(Docker Hub),**每次 push main 后 GitHub Actions 自动构建推送**(`latest` + commit sha 双 tag,可回滚)。
+- 后端构建：Go 1.23+
+- 前端构建：Node.js 20+ 和 npm
+- 本地低负载：SQLite
+- 生产：PostgreSQL 16+
+- 容器部署：Docker Engine 与 Compose v2
 
-#### 1.1.1 快速部署(gateway + PostgreSQL)
+准备配置：
 
-```yaml
-# docker-compose.yml(仓库根目录)
-services:
-  gateway:
-    image: wuhuhhhh/native-llm-gateway:latest
-    container_name: llm-gateway
-    ports: ["8080:8080"]
-    volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./gateway-data:/app/data
-    depends_on:
-      postgres: { condition: service_healthy }
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
+```bash
+# 本机
+cp config.example.yaml config.yaml
 
-  postgres:
-    image: postgres:16-alpine
-    container_name: llm-gateway-postgres
-    environment:
-      POSTGRES_USER: gateway
-      POSTGRES_PASSWORD: CHANGE_ME
-      POSTGRES_DB: gateway
-    volumes: [./pg-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
+# Docker
+cp config.docker.example.yaml config.yaml
 ```
+
+上线前至少完成以下项目：
+
+1. 保持 `auth.enabled: true`，替换或删除模板里的 bootstrap Gateway Key。
+2. 保持 `admin_auth.enabled: true`，显式填写 `session_ttl`、
+   `max_login_attempts`、`login_ban_duration`。
+3. PostgreSQL DSN 和 Compose 的 `POSTGRES_PASSWORD` 使用同一个非默认强密码。
+4. 只启用实际使用的内置协议面；Provider key 在管理页面添加，不写入 YAML。
+5. 确定是否开启 access log。body 文件可能含完整提示词、响应及客户端附带的敏感信息。
+6. 限制数据库、`config.yaml`、备份目录和 access body 目录的文件权限。
+
+首次启用管理员认证且数据库没有 root 用户时，服务会创建
+`admin / Gateway@2026`，并把默认密码写入启动日志。首次登录后立即修改。
+
+## 本地运行
+
+构建并以前台进程运行：
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run build
+make build
+./bin/gateway --config ./config.yaml
+```
+
+默认地址：
+
+| 入口 | 地址 |
+|---|---|
+| 管理页面 | `http://127.0.0.1:8080/` |
+| 存活检查 | `GET /healthz` |
+| 就绪检查 | `GET /readyz` |
+| Prometheus | `GET /metrics` |
+
+`/healthz` 只表示 HTTP 进程可响应；`/readyz` 会在 1 秒超时内 ping 数据库，负载均衡器
+应以 `/readyz` 作为接流条件。
+
+前端开发服务器：
+
+```bash
+npm --prefix frontend run dev -- --host 0.0.0.0 --port 5180
+```
+
+Vite 当前把 `/api` 代理到 `http://localhost:8080`。后端端口变化时同步修改
+`frontend/vite.config.ts`。
+
+### Makefile 边界
+
+`make test`、`make vet`、`make build`、`make frontend` 可直接使用。当前进程管理目标存在
+混合语义：`make start` 用 `nohup` 启动本地进程，而 `make stop` 和 `make status` 委托名为
+`llm-gateway` 的 systemd 服务。没有安装该服务时，不要用这组命令管理同一个开发进程；
+以前台运行和 Ctrl-C 结束最明确。
+
+## Docker Compose
+
+仓库的 `docker-compose.yml` 启动单体 gateway 镜像和 PostgreSQL：
 
 ```bash
 cp config.docker.example.yaml config.yaml
-# ① 改 database.dsn 的 CHANGE_ME 密码
-# ② 改 auth.keys 的默认 dev-key
+# 同时修改 config.yaml 与 docker-compose.yml 中的数据库密码
+# 替换 bootstrap Gateway Key
 docker compose up -d
+docker compose ps
+docker compose logs -f gateway
 ```
 
-#### 1.1.2 最小部署(单容器 + SQLite)
+持久化目录：
 
-```bash
-docker run -d --name llm-gateway \
-  -p 8080:8080 \
-  -v $PWD/config.yaml:/app/config.yaml:ro \
-  -v $PWD/gateway-data:/app/data \
-  wuhuhhhh/native-llm-gateway:latest
-```
-
-### 1.2 本机 systemd(systemd 托管,2026-08-07 起)
-
-适合单机长期运行,配置文件 + systemd unit 模板见 `scripts/llm-gateway.service`(若有)。
-
-```bash
-sudo systemctl status llm-gateway
-sudo systemctl restart llm-gateway
-```
-
-**`gateway-ctl.sh`**:被 Makefile 调用的 helper,2026-08-07 起 systemd 托管,stop/status 委托 `systemctl`,不再直接 kill(裸 kill 会被 Restart=always 拉起)。
-
-### 1.3 本机裸跑(开发)
-
-```bash
-make build                          # 编译到 bin/gateway
-make start                          # 后台启动(写 PID 到 /tmp/gateway.pid)
-make status                         # 进程 + 端口 + /healthz
-make logs                           # tail -f /tmp/gateway.log
-make stop                           # 优雅停止
-make restart                        # stop + start
-make test                           # 跑所有单元测试
-make all                            # build + test + vet
-```
-
----
-
-## 2. 关键脚本
-
-### 2.1 `gateway-reload.sh`(无感重载)
-
-```bash
-./gateway-reload.sh
-```
-
-**3 步**:
-1. 编译新二进制到 `bin/gateway.new`
-2. `mv` 替换为 `bin/gateway`
-3. `sudo systemctl restart llm-gateway`(systemd 完成 SIGTERM 优雅排空 + 新进程接管)
-
-**适用场景**:
-- 加了厂商包
-- 改了 provider 代码
-- 改了 proxy / router / pool 等运行时逻辑
-
-**已知代价**:
-- 重载会重置内存状态(熔断器 / 配额标记)
-- 从 `key-state.json` 快照恢复 QE/COOLING/余额
-- 排空窗口(`shutdown_timeout`,默认 30s)内未结束的长流会被掐断
-
-### 2.2 `gateway-log-rotate.sh`(日志轮转)
-
-按天轮转 + 清理 7 天前归档。被两处调用:
-- systemd `llm-gateway.service` 的 `ExecStartPre`(每次启动前)
-- `gateway-reload.sh`(重载前)
-
-幂等:同一天重复执行无操作。
-
-### 2.3 `pg-init.sh`(PG 初始化)
-
-```bash
-sudo bash scripts/pg-init.sh
-```
-
-- 随机 16 字节 hex 密码
-- 写入 `/home/hhhh/llm-gateway-data/pg-password.txt`(0600)
-- 建 `gateway` 角色 + `gateway` 库 + `gateway_test` 库
-- 幂等:重复运行重置密码、保留已建库
-
-### 2.4 `Makefile`
-
-```bash
-make help          # 默认目标,显示用法
-make build         # 编译到 bin/gateway
-make start|stop|restart|status|logs
-make test          # 跑所有单元测试
-make test-verbose  # 详细输出
-make vet           # go vet
-make all           # build + test + vet
-make frontend      # 构建前端生产版本
-make frontend-dev  # vite dev server :5180
-make clean         # 清构建产物 + 临时数据
-```
-
-可覆盖变量:
-- `CONFIG=...`(默认 `$(pwd)/config.yaml`)
-- `PORT=...`(默认 8080)
-- `LOG=...`、`PIDFILE=...`、`DB_PATH=...`
-
----
-
-## 3. 数据持久化
-
-### 3.1 目录约定
-
-| 路径 | 内容 |
+| 主机路径 | 容器用途 |
 |---|---|
-| `gateway-data/` | DB / key-state.json / access body |
-| `logs/` | gateway.log(按天轮转,7 天清理) |
-| `pg-data/` | PG only,PG 数据目录 |
+| `./config.yaml` | 只读挂载为 `/app/config.yaml` |
+| `./gateway-data` | access body；当前不包含 PostgreSQL 模式的 `key-state.json` |
+| `./pg-data` | PostgreSQL 数据目录 |
 
-### 3.2 key-state.json 位置
+镜像内包含构建后的前端，由 Go 服务从 `/app/web/dist` 托管。Compose 健康检查访问
+`/healthz`；业务就绪监控仍建议额外检查 `/readyz`。
 
-- **SQLite**:`$(dirname $dsn)/key-state.json`(= `/tmp/gateway-data/` 同目录)
-- **PostgreSQL**:`./key-state.json`(cwd;systemd 下即仓库根,持久)
-
-### 3.3 备份
-
-- PG 模式:每日 3:07 `pg_dump` 备份(保留 SQLite 归档 7 天后清理)
-- SQLite 模式:不自动备份,建议 `cp /tmp/gateway-data/gateway.db{,.bak}`
-
----
-
-## 4. 监控告警
-
-### 4.1 Prometheus 抓取
-
-```
-GET /metrics    # Prometheus 格式
-```
-
-### 4.2 关键指标
-
-| 指标 | 告警阈值 |
-|---|---|
-| `gateway_requests_total{error_type="..."}` | 错误率 > 5% |
-| `gateway_quota_key_status_transitions_total{from,to}` | 大量 ACTIVE → QUOTA_EXCEEDED |
-| `gateway_quota_pending_probes` | 持续 > 100(队列堵塞) |
-| 进程内存 | > 1GB(可能是 access log buffer 积压) |
-| 进程 UP | 进程 down |
-
-### 4.3 /healthz 和 /readyz
-
-- `GET /healthz` — 进程级,返回 200 = 在跑
-- `GET /readyz` — 进程级 + DB ping;DB 不可用返回 503
-
-### 4.4 健康检查脚本
-
-`scripts/gateway-health-check.sh` — 综合检查网关运行状况:
+更新镜像：
 
 ```bash
-# 基础检查
+docker compose pull gateway
+docker compose up -d gateway
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+`main` 分支中影响应用或镜像的文件变更会触发 `.github/workflows/docker.yml`。流水线执行
+后端构建、带临时 PostgreSQL 的测试和前端构建，再发布 Docker Hub 的 `latest` 与 commit
+SHA tag。纯文档变更不会触发该 workflow。
+
+## systemd
+
+仓库当前没有可直接安装的 unit 文件，但部署脚本约定服务名是 `llm-gateway`，二进制是
+仓库内 `bin/gateway`，且 unit 应配置自动重启。一个最小 unit 应具备：
+
+```ini
+[Unit]
+Description=Native LLM Gateway
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/native-llm-gateway
+ExecStart=/opt/native-llm-gateway/bin/gateway --config /opt/native-llm-gateway/config.yaml
+Restart=always
+RestartSec=3
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
+```
+
+按实际部署目录调整路径和运行用户。安装后：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now llm-gateway
+systemctl status llm-gateway
+journalctl -u llm-gateway -f
+```
+
+服务收到 SIGINT/SIGTERM 后，先停止 quota worker，再等待 HTTP 请求排空，随后停止并 flush
+usage/access-log，最后保存 key 状态。超过 `server.shutdown_timeout` 的长流可能被中止。
+
+## 配置与运行时更新
+
+进程通过文件 watcher 监听启动时指定的 YAML。当前 watcher 可热更新路由规则、Gateway
+Key 快照、部分 provider 元数据和 quota worker 参数。数据库、HTTP 监听、静态目录、
+access log、usage collector、provider endpoint/timeout、fingerprint 配置值和管理员认证参数
+仍需重启。完整矩阵见配置参考。
+
+管理页面/API 的下列写操作有独立热更新路径：
+
+- Gateway Key CRUD
+- Provider Key CRUD
+- provider/key 调度顺序保存
+- 模型同步与价格保存
+- MiMo quota cookie 更新
+- 中转站创建、编辑、删除和 reload
+- fingerprint `enabled` 开关（不写回 YAML）
+
+文件 watcher 的热更新是部分更新，不能替代一次受控重启。容器挂载文件被编辑器原子替换时，
+文件系统事件也可能因平台不同而不稳定；容器部署修改配置后执行 `docker compose up -d
+gateway` 更可靠。
+
+## 发布与回滚脚本
+
+### `scripts/gateway-deploy.sh`
+
+该脚本只适用于已安装 `llm-gateway` systemd 服务的本机部署：
+
+```bash
+./scripts/gateway-deploy.sh
+```
+
+它会依次执行后端全量测试、备份当前二进制、编译 `bin/gateway.new`、替换二进制、终止
+当前 MainPID 让 `Restart=always` 拉起新进程，并等待 `/healthz`。新进程 30 秒内未就绪时
+自动调用 rollback。可设置：
+
+- `GATEWAY_PORT`：覆盖从 `config.yaml` 读取的端口。
+- `SKIP_TEST=1`：跳过脚本内测试；只应在同一产物已完成验证时使用。
+
+脚本不构建前端、不迁移外部 schema、不备份数据库，也不检查 `/readyz`。涉及这些内容时在
+部署前单独完成。
+
+### `scripts/gateway-backup.sh` 与 `gateway-rollback.sh`
+
+backup 只复制 `bin/gateway`，不是数据备份。rollback 默认恢复 `bin/backups/` 最新文件，
+并依赖 systemd 自动重启：
+
+```bash
+./scripts/gateway-rollback.sh --list
+./scripts/gateway-rollback.sh
+./scripts/gateway-rollback.sh bin/backups/gateway.YYYYMMDD-HHMMSS
+```
+
+backup 脚本按修改时间保留最近 5 份 `gateway.<timestamp>`，rollback 产生的
+`gateway.pre-rollback.*` 不在自动轮换集合内。二进制备份仍不能替代数据库和配置备份。
+
+### 其他脚本
+
+| 脚本 | 当前用途与限制 |
+|---|---|
+| `gateway-health-check.sh` | systemd 主机诊断；默认配置路径写死为仓库开发路径，可用 `CONFIG_FILE`、`GATEWAY_URL` 覆盖 |
+| `gateway-log-rotate.sh` | 轮转仓库 `logs/gateway.log` 并删除 7 天前归档；仓库没有自动调用它的 unit/cron |
+| `gateway-ctl.sh` | 只管理 systemd 的 `llm-gateway`，不管理 `make start` 的 nohup 进程 |
+| `pg-init.sh` | 本机创建 `gateway`/`gateway_test` 库并重置角色密码；默认写入机器专用路径，可用 `GATEWAY_DATA_DIR` 覆盖 |
+| `sync-provider-models.sh` | 直接修改 PostgreSQL face 数据的维护工具；优先使用管理页面同步，执行前备份并显式设置 `DB_PASSWORD` |
+| `orphan-*.sql` | 历史数据清理脚本，含固定的活面假设；不能直接用于未来生产清理，必须先审阅和备份 |
+
+## 备份与恢复
+
+仓库没有自动数据库备份计划。应由部署环境配置定时任务并验证恢复。
+
+PostgreSQL 示例：
+
+```bash
+umask 077
+pg_dump --format=custom "$DATABASE_URL" > gateway-$(date +%Y%m%d-%H%M%S).dump
+pg_restore --clean --if-exists --dbname "$RESTORE_DATABASE_URL" gateway-YYYYMMDD-HHMMSS.dump
+```
+
+SQLite 在停机或确认 WAL 一致性的条件下备份，优先使用 SQLite backup 命令：
+
+```bash
+sqlite3 data/gateway.db '.backup gateway-backup.db'
+```
+
+数据库和备份含明文 Provider/Gateway key、relay key 与 session token，必须加密存储并限制
+访问。恢复演练至少验证：管理员登录、Provider key、Gateway Key 绑定、模型/价格、路由顺序
+和一条真实代理请求。
+
+`key-state.json` 只保存瞬时 key 状态，不是业务数据备份：
+
+- SQLite：位于数据库 DSN 同目录。
+- PostgreSQL：位于进程工作目录。当前 Docker 工作目录是 `/app`，而 Compose 只挂载
+  `/app/data`，所以 `/app/key-state.json` 不会随容器重建保留；这只影响瞬时调度状态。
+
+## 监控
+
+`/metrics` 当前始终注册在主 HTTP 端口，`metrics.enabled/path/port` 不控制它。主要指标：
+
+| 指标 | 关注点 |
+|---|---|
+| `gateway_requests_total` | 按 provider/status/error_type 的请求与错误率 |
+| `gateway_tokens_total` | 输入/输出 token 趋势 |
+| `gateway_request_duration_seconds` | 延迟分布 |
+| `gateway_quota_probe_total` | quota 恢复探测结果 |
+| `gateway_quota_poll_total` | 余额轮询结果 |
+| `gateway_quota_key_status_transitions_total` | key 状态变化 |
+| `gateway_quota_pending_probes` | 等待恢复探测的 key 数 |
+
+基础巡检：
+
+```bash
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
+curl -fsS http://127.0.0.1:8080/metrics | head
+GATEWAY_URL=http://127.0.0.1:8080 \
+CONFIG_FILE=/path/to/config.yaml \
 ./scripts/gateway-health-check.sh
-
-# 显示详细指标
-SHOW_METRICS=true ./scripts/gateway-health-check.sh
-
-# 检查自定义 URL
-GATEWAY_URL=http://custom:port ./scripts/gateway-health-check.sh
 ```
 
-**检查项**:
-1. Systemd 服务状态(active/inactive)
-2. 进程状态(PID / 内存 / CPU)
-3. 健康端点(/healthz、/readyz)
-4. 数据库连接 + 数据统计(usage_records / gateway_keys / provider_keys)
-5. Prometheus 指标摘要(总请求数 / 待探测配额)
-6. 磁盘空间(access-body 目录大小 / 磁盘使用率)
-7. 最近错误日志(journalctl 最近 50 行)
+建议对就绪失败、5xx/timeout/connection 错误率、持续增长的 pending probes、磁盘空间和
+PostgreSQL 连接耗尽告警。不要只看最终 200：流式上游可在 HTTP 200 内发送结构化失败事件，
+应结合 access log 的 `error_type` 和应用日志判断。
 
-**返回码**:
-- `0` — 所有关键检查通过
-- `1` — 至少一项关键检查失败(服务未运行 / 进程不存在 / 健康端点不可达 / DB 连接失败)
+## 日志与数据保留
 
-**用途**:
-- 部署后验证
-- 定期巡检(cron)
-- 故障排查第一步
+- zap 日志实际写 stdout/stderr；`logging.output/file_path` 当前不生效。systemd 用
+  journald，Docker 用容器日志驱动管理轮转。
+- access-log metadata 在 `access_logs` 表；body 是 `body_dir` 下的独立 JSON 文件。
+- access retention 默认/模板为 24 小时，只管理 access log；`usage.retention_days` 当前
+  不会自动清理 `usage_records`。
+- body 文件与数据库记录需要一起备份或一起清理，否则会出现孤儿文件/记录。
 
----
+## 安全事件处理
 
-## 5. 故障排查三板斧
+发现仓库、日志、SQL 导出或聊天记录出现真实凭证时：
 
-### 5.1 access logs 定层
+1. 立即在上游和数据库侧吊销/轮换，不要只删除文件。
+2. 轮换 PostgreSQL 密码、Provider/Gateway key、relay key、MiMo cookie 和管理员 session。
+3. 从当前工作树删除明文并检查 Git 历史、CI artifact、镜像 layer 与备份。
+4. 用新凭证验证 `/readyz`、管理员登录和最小代理请求。
 
-```
-GET /api/v1/access-logs?limit=N
-```
-
-状态码 / error_type / provider / 延迟一眼定位:
-- 401/403 → 客户端鉴权
-- 503 → 路由无候选
-- 5xx + provider_name → 上游错误
-
-### 5.2 gateway 日志定因
-
-```
-grep "trace_id=xxx" logs/gateway.log
-```
-
-白名单跳过 / failover / 熔断转移 / poll 错误都有行。
-
-### 5.3 直连上游对照
-
-从 DB 取真实 key(`provider_api_keys.key_hash` 存原值)直接 curl 上游端点,排除网关层干扰。
-
-**「网关 200 空流」和「上游就没回内容」必须分开定位**。
-
----
-
-## 6. 升级路径
-
-### 6.1 升级前检查
-
-```bash
-git pull
-git log --oneline -10   # 看最近改了什么
-make test               # 跑测试
-./gateway-reload.sh     # 重载
-```
-
-### 6.2 schema 变更
-
-GORM AutoMigrate 自动处理**新增字段**(改 `database/models.go` struct + gorm tag)。
-
-**删字段 / 删关联必须手工执行**(AutoMigrate 只加不删,踩坑 #23):
-
-```sql
--- 先确认空表(有行则先备份),再删
-ALTER TABLE <表> DROP COLUMN <列>;
-ALTER TABLE <表> DROP CONSTRAINT <约束名>;
-```
-
-删除后立刻重启验证 —— AutoMigrate 失败是致命错误会中止启动,漂移一定会以
-「起不来」的形式暴露。`migrations/00X.up.sql` 机制已废弃(2026-08-20 决定:
-保持 AutoMigrate 现状,靠 CLAUDE.md 提交前自检清单补「减法无人负责」的缺口)。
-
----
-
-## 7. 常见故障
-
-| 故障 | 定位 | 修复 |
-|---|---|---|
-| 500 错误,网页报失败 | 进程没在跑(`make status`) | `make start` 或 systemd 启动 |
-| 401 客户端 | Gateway Key 没创建 / 被删 / hash 不匹配 | `GET /api/v1/keys` 检查 |
-| 403 model_not_allowed | 白名单不含客户端发的模型 | 改 key 的 allowed_models |
-| 503 no_route | catch_all 配置空了 / 所有 provider 禁用 | `GET /api/v1/routing` 检查 |
-| 整链掉到 deepseek | 配额耗尽 / 熔断 | `GET /api/v1/providers` 看 key 状态 |
-| 启动后 key 状态全 ACTIVE | `key-state.json` 未恢复 | 检查 `keyStateSnapshotPath` 路径 |
-| 流式 token 不显示 | 详情页只解析非流式 body | 改去 Usage 页 |
-| 网页全空白 | 后端返回 null + 模板 .length → TypeError | 后端 append([]Ts{}) / 前端 ?? [] |
+Git 历史重写会影响所有协作者，只有在明确协调后执行。

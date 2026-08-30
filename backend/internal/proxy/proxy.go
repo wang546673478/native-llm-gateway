@@ -27,7 +27,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/router"
 )
 
-// maxConcurrentStreams 全局并发流式响应上限(spec §3.3 / F4)
+// maxConcurrentStreams 是为 Access Log 累积流式响应 body 的全局并发上限。
 // 超过此值的新流式请求只记 metadata,不缓存 response body。
 const maxConcurrentStreams = 1000
 
@@ -51,9 +51,8 @@ type Engine struct {
 	// 120s 掐断(Claude Code 报 Connection closed mid-response);doStream 每个
 	// chunk 后用 SetWriteDeadline 续期,把绝对上限变成「空闲超时」。
 	writeTimeout time.Duration
-	// streamIdleTimeout 流式空闲超时:连续 N 秒没收到新 chunk → 认为上游断流。
-	// 不等 provider.timeout(60s),更快检测断流 → 客户端可以快速重试。
-	// 默认 10s:平衡检测灵敏度(太短误判)和用户等待时间(太长体验差)。
+	// streamIdleTimeout 是预留的流式空闲超时配置。当前 doStream 实际按请求体
+	// 大小调用 calculateIdleTimeout,尚未读取该字段。
 	streamIdleTimeout time.Duration
 	// streamBuf 持有当前正在累积的流式响应 buffer,key 是 traceID。
 	// Task 7: 配合 streamCnt 实现 F4 全局 1000 上限。
@@ -103,9 +102,8 @@ type Config struct {
 	// WriteTimeout 流式写 deadline 续期预算(取 server.write_timeout)。
 	// 非流式响应仍是绝对上限;流式场景按 chunk 续期成空闲超时。<=0 时默认 2min。
 	WriteTimeout time.Duration
-	// StreamIdleTimeout 流式空闲超时:连续 N 秒没收到新 chunk → 认为上游断流。
-	// 不等 provider.timeout(60s),更快检测断流 → 客户端可以快速重试。
-	// 默认 10s:平衡检测灵敏度(太短误判)和用户等待时间(太长体验差)。
+	// StreamIdleTimeout 是预留的流式空闲超时配置。<=0 时会归一为 10s,
+	// 但当前 doStream 使用 calculateIdleTimeout 的固定分段值,尚未消费该字段。
 	StreamIdleTimeout time.Duration
 	// GkContext 可选的 GatewayKey 提取抽象;nil 时用默认实现(defaultGatewayKeyContext)。
 	// 供测试 mock / 特殊上下文注入,生产留空即可。
@@ -211,7 +209,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 			TraceID:      traceID,
 			CreatedAt:    time.Now().UTC(),
 			Method:       c.Request.Method,
-			Path:         c.Request.URL.Path, // 不含 query string(spec F1)
+			Path:         c.Request.URL.Path, // Access Log 只记录 path，不含 query string。
 			ClientIP:     c.ClientIP(),
 			UserAgent:    c.Request.UserAgent(),
 			GatewayKeyID: e.gkCtx.ID(c),
@@ -242,7 +240,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		if entry.ErrorType == "" {
 			entry.ErrorType = classifyError(entry.StatusCode, lastProviderName == "", lastErr, gatewayValidation)
 		}
-		// 无论成功还是失败,只要命中过 provider 就记录 — 成功路径同样需要可观测性(spec §1.2 F2/F5)
+		// 无论成功还是失败，只要命中过 provider 就记录。
 		// P-provider-vendor: 按厂商归一 — 路由侧是注册名(deepseek-anthropic /
 		// minimax-openai 协议面),日志/UI/导出统一显示厂商名,协议面看 protocol 列
 		if lastProviderName != "" {
@@ -462,7 +460,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	e.runCandidateLoop(c, ctx, req, iter, nil, &lastProviderName, &lastErr, entry)
 }
 
-// classifyError 把 HTTP status + 上游错误翻译成 error_type 枚举(spec §1.2)
+// classifyError 把 HTTP status 和上游错误翻译成 error_type 枚举。
 // Pure function — 不依赖 Engine 实例,方便单元测试。
 //   - statusCode 来自 c.Writer.Status()
 //   - providerEmpty 表示没成功路由到任何 provider (== no_route 场景)
@@ -863,7 +861,7 @@ func (e *Engine) calculateIdleTimeout(bodySize int) time.Duration {
 }
 
 // writeNonStreamResponse 把 Provider Response 原样写回客户端,并同步写
-// access log 响应 body 文件(Task 7 / spec §3.3)。
+// access log 响应 body 文件。
 //
 // entry 可为 nil(调用方未启用 accesslog)。enabled body 文件写入失败只记 warn,
 // 不影响响应主路径。

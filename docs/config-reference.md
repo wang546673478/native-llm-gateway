@@ -1,308 +1,296 @@
-# 配置 / 数据库 / 迁移
+# 配置与数据
 
----
+本文以 `backend/internal/config/config.go`、`backend/internal/server/server.go` 和
+`backend/internal/database/models.go` 为准。可运行模板见根目录
+`config.example.yaml`（本机/SQLite）与 `config.docker.example.yaml`（容器/PostgreSQL）。
 
-## 1. config.yaml 完整结构
+## 配置来源
 
-```yaml
-server:        # HTTP 服务
-database:      # SQLite / PostgreSQL
-redis:         # 预留(暂未用)
-auth:          # 客户端鉴权
-providers:     # 厂商配置
-routing:       # 路由规则
-keypool:       # key 池调度
-timeouts:      # provider_default(provider 未显式设 timeout 时的兜底;HTTP server 超时见 server.read/write/idle_timeout —— timeouts.server_read/write/idle/request_total 已删,零消费)
-retry:         # 失败重试
-logging:       # 日志
-metrics:       # Prometheus
-usage:         # 用量批量写入
+进程只读取启动参数指定的 YAML：
+
+```bash
+./bin/gateway --config ./config.yaml
 ```
 
----
+`config.yaml` 被 `.gitignore` 排除，可包含 DSN 和控制台 cookie。上游 API key 和通过
+管理页面创建的 Gateway Key 以数据库为权威；YAML 中 `auth.keys` 只在启动时补种不存在的
+Gateway Key，不覆盖数据库已有同名记录。
 
-## 2. server
+## 最小配置
 
 ```yaml
 server:
-  host: 0.0.0.0
+  host: "0.0.0.0"
   port: 8080
-  read_timeout: 60s
-  write_timeout: 120s
+  read_timeout: 30s
+  write_timeout: 600s
   idle_timeout: 120s
   shutdown_timeout: 30s
-  static_dir: ""              # 前端构建产物目录(留空则不托管)
-  access_log:
-    enabled: true
-    body_dir: data/access-body
-    buffer_size: 1000
-    batch_size: 100
-    flush_interval: 5s
-    retention: 720h            # 30 天
-```
+  static_dir: frontend/dist
 
----
-
-## 3. database
-
-### 3.1 SQLite(单机/演示)
-
-```yaml
 database:
-  driver: "sqlite"
-  dsn: "/tmp/gateway-data/gateway.db"
-```
+  driver: sqlite
+  dsn: data/gateway.db
 
-### 3.2 PostgreSQL(生产)
-
-```yaml
-database:
-  driver: "postgres"
-  dsn: "postgres://gateway:password@localhost:5432/gateway?sslmode=disable"
-```
-
-### 3.3 何时用哪个
-
-| 场景 | 推荐 |
-|---|---|
-| 单机 / 演示 / 流量小 | SQLite(零部署) |
-| 生产 / 高并发 / 大流量 | PostgreSQL(并发写零锁) |
-
-> access logs 每请求一条 + 8 索引,SQLite 单写者在请求量大时写锁排队(页面卡顿);PostgreSQL 并发写,`database.driver` 一键切换,代码层无差异(CI 每次提交跑 PG 集成测试)
-
----
-
-## 4. auth
-
-```yaml
 auth:
-  enabled: true               # f1bf2d6 起默认 true
+  enabled: true
   keys:
-    - name: "default"
-      key: "gw-xxx-xxx"      # 启动时 seed 到 DB
+    - name: bootstrap
+      key: gw-change-me
       allowed_models: ["*"]
-      rate_limit:
-        rpm: 100
-        tpm: 500000
-```
+      rate_limit: { rpm: 100, tpm: 500000 }
 
-**关键**:
-- `enabled: true` → 代理端点**必须**带认证 key,否则 401
-- `keys` 是**种子**(首次启动 seed 到 DB),之后通过管理 API 改
-- 创建响应里**包含明文 key,只展示一次**
-
----
-
-## 5. providers
-
-每个厂商一个块:
-
-```yaml
 providers:
-  minimax:
+  deepseek:
     enabled: true
-    billing_source: "token_plan"   # token_plan / api / free
-    endpoint: "https://api.minimaxi.com/anthropic"
-    protocol: "anthropic"
+    endpoint: https://api.deepseek.com
+    protocol: openai
+    billing_source: api
     timeout: 60s
-    responses_api: true           # 原生支持 /v1/responses
-    force_thinking_disabled: false
-    circuit_breaker:
-      failure_threshold: 5        # 0 = 不启用
-      failure_window: 60s
-      open_timeout: 60s
-      half_open_requests: 2
+    responses_api: true
+
+routing:
+  catch_all: {}
+  default_strategy: priority
+
+keypool:
+  key_rotation: sticky
+  cooling_duration: 60s
+  quota_enabled: true
+
+timeouts:
+  provider_default: 60s
+
+retry:
+  max_attempts: 0
+
+usage:
+  flush_interval: 10s
+  batch_size: 100
+
+admin_auth:
+  enabled: true
+  session_ttl: 168h
+  max_login_attempts: 5
+  login_ban_duration: 15m
 ```
 
-> **没有 `models` 段、也没有 `default_model` 字段了**(2026-08-20 起):模型清单与
-> 定价的唯一真相源是 DB 表 `provider_models`(vendor 粒度)。模型 id 在前端「模型管理页」
-> 点「上游同步」从厂商 `/models` 端点拉取(sort_order 记上游顺序,默认模型 = sort_order
-> 最小者 = 上游首个,minimax 即 `MiniMax-M3`);价格在模型管理页手工填。
-> 相关端点:`GET /api/v1/providers/models` / `POST /api/v1/providers/sync-models`(单厂商)/
-> `POST /api/v1/providers/sync-all-models`(全部厂商,动态算 vendor,单个失败不中断)/
-> `PUT /api/v1/providers/models`。
->
-> `billing_source` 决定 tier 层级(`token_plan` 套餐耗尽自动降档到 `api`);同一厂商的所有块保持一致(共享 pool 按 tier 桶)。
+## 当前生效字段
 
----
+### `server`
 
-## 6. routing
+| 字段 | 语义 |
+|---|---|
+| `host`, `port` | HTTP 监听地址；修改后需重启 |
+| `read_timeout` | `http.Server.ReadTimeout` |
+| `write_timeout` | 非流式响应的绝对写上限；流式写入会按 chunk 续期 |
+| `idle_timeout` | HTTP keep-alive 空闲超时 |
+| `shutdown_timeout` | SIGINT/SIGTERM 后等待请求排空的时间 |
+| `static_dir` | 前端 `dist` 目录；为空时不托管 UI，未命中文件走 SPA fallback |
+| `access_log.*` | 接入日志异步队列、body 目录和保留期；修改后需重启 |
 
-### 6.1 catch_all 自动模式(推荐)
+`access_log` 的运行时零值兜底为：`body_dir=./data/access`、`buffer_size=10000`、
+`batch_size=100`、`flush_interval=1s`、`retention=24h`。每个 body 文件最多 16 MiB；
+超过时写截断文件。JSONL 是导出格式，不是磁盘 body 的存储格式。
+
+### `database`
+
+| 字段 | 语义 |
+|---|---|
+| `driver` | 只接受 `sqlite` 或 `postgres` |
+| `dsn` | SQLite 文件路径或 PostgreSQL DSN，必填 |
+| `max_open_conns`, `max_idle_conns` | `database/sql` 连接池大小 |
+| `conn_max_lifetime` | 连接最大复用时间 |
+
+示例：
+
+```yaml
+database:
+  driver: postgres
+  dsn: "host=postgres user=gateway password=CHANGE_ME dbname=gateway port=5432 sslmode=disable"
+  max_open_conns: 25
+  max_idle_conns: 10
+  conn_max_lifetime: 300s
+```
+
+### `auth`
+
+这是代理端点的 Gateway Key 鉴权，不是管理后台登录。
+
+- `enabled=true` 时代理接受 `Authorization: Bearer <key>` 或 `x-api-key: <key>`。
+- `keys` 是启动种子；页面/API 创建的记录保存在 `gateway_keys`。
+- `allowed_models` 支持 `"*"`，也参与自动路由的真实模型选择。
+- Gateway Key 还能在数据库中绑定 vendor、具体 `provider_api_keys.id` 和
+  `default_model`；这些字段通过管理页面维护，不在 YAML 种子结构中声明。
+- `rpm` 当前强制执行；`tpm` 会记录实际消耗，但请求入口暂未调用 TPM 拒绝检查。
+
+### `providers.<name>`
+
+| 字段 | 语义 |
+|---|---|
+| `enabled` | 是否在启动时实例化该注册面 |
+| `endpoint` | 上游 base URL；协议实现负责去重末尾 `/v1` 和资源路径 |
+| `protocol` | `openai`、`anthropic` 或 `google` |
+| `timeout` | 该注册面的单次上游请求超时；0 时用 `timeouts.provider_default` |
+| `billing_source` | 注册面默认计费层：`token_plan`、`api`、`free`；单 key 值可覆盖 |
+| `responses_api` | 内置注册面是否允许 OpenAI Responses 请求 |
+| `force_thinking_disabled` | 当前供 DeepSeek Anthropic 面处理 thinking 兼容性 |
+| `quota_cookie` | MiMo 控制台额度查询 cookie；敏感，只放本地配置 |
+| `circuit_breaker.*` | per-key 熔断阈值、窗口、开放时间和半开探针数 |
+
+Provider key 不应写在 `providers.<name>.keys`。该兼容字段仍能解析，但运行时池只从
+`provider_api_keys` 读取。模型和每百万 token 定价只从 `provider_models` 读取。
+
+同一 vendor 可以有多个协议面，例如 `deepseek` 与 `deepseek-anthropic`。注册表的
+vendor 映射决定它们是否共享 key 池；不要仅凭名称后缀猜测。
+
+### `routing`
+
+推荐自动模式：
 
 ```yaml
 routing:
-  default_strategy: "priority"
-  catch_all: {}                  # 自动模式:所有 enabled provider 参与
+  catch_all: {}
+  default_strategy: priority
 ```
 
-### 6.2 显式列表
-
-```yaml
-routing:
-  aliases: {}                    # 显式 alias(仍生效,不是"已退役";catch_all 是默认路径,alias 命中优先)
-  chains: {}                     # chain_ref(可选)
-  catch_all:
-    providers:
-      - name: "minimax"
-        model: "MiniMax-M3"
-        priority: 100
-      - name: "mimo"
-        model: "mimo-v2.5-pro"
-        priority: 108
-```
-
-### 6.3 显式 alias(可选)
+`catch_all: {}` 与“不写 `catch_all`”不同：前者启用自动发现，后者遇到未知模型时不
+兜底。自动模式按请求路径过滤协议面，并从数据库模型清单和 Gateway Key 白名单选择
+真实模型。也支持 alias 短格式、显式候选和共享 chain：
 
 ```yaml
 routing:
   aliases:
-    "my-claude":
-      strategy: "priority"
-      providers:
-        - name: "minimax"
-          model: "MiniMax-M3"
+    coding: deepseek-v4-flash
+    expensive:
+      chain_ref: primary
+  chains:
+    primary:
+      - { name: minimax, model: MiniMax-M3, priority: 1 }
+      - { name: deepseek-anthropic, model: deepseek-v4-flash, priority: 2 }
+  default_strategy: priority
+  catch_all: {}
 ```
 
-> key 的 `allowed_models` 配 `"my-claude"` → 客户端发任意名字路由到 `MiniMax-M3`
+策略实现包括 `priority`、`weight`、`cost`、`health`；未知值退回 `priority`。无论使用
+哪种策略，候选最终仍按 `token_plan -> api -> free` 分层。管理页保存的 Level 2
+provider 顺序和 Level 3 key 顺序写入 `route_order`，会覆盖各层默认创建顺序。
 
----
+### `keypool`
 
-## 7. keypool
-
-```yaml
-keypool:
-  cooling_duration: 60s
-  health_check_interval: 30s
-  key_rotation: "round_robin"     # round_robin / least_used / random
-  quota_enabled: true
-  quota_probe_initial_delay: 10s
-  quota_probe_max_backoff: 5m
-  quota_probe_jitter_pct: 20
-  quota_poll_interval: 30s
-  quota_poll_jitter_pct: 20
-  quota_http_timeout: 10s
-  quota_user_agent: "NativeLLMGateway/1.0"
-  quota_warn_threshold_pct: 20
-```
-
----
-
-## 8. retry
-
-```yaml
-retry:
-  max_attempts: 0                # 每层最多试几个候选(0 = 动态,有几个试几个;正整数 = 显式封顶)
-```
-
-**注意**: `max_attempts` 现在只被 proxy 引擎消费,用于限制候选循环。router 层不再持有这个配置。
-
----
-
-## 9. logging
-
-```yaml
-logging:
-  level: "info"                  # debug / info / warn / error
-  format: "console"              # console / json
-```
-
----
-
-## 10. usage
-
-```yaml
-usage:
-  batch_size: 100                # 累积多少条 flush
-  flush_interval: 10s            # 周期 flush
-```
-
----
-
-## 11. 数据库 schema
-
-### 11.1 表清单
-
-| 表 | 迁移文件 | 用途 |
-|---|---|---|
-| `providers` | 001 | 厂商主表 |
-| `provider_models` | 001 | 厂商-模型映射 + 定价 |
-| `provider_api_keys` | 002 | 厂商 API Key 池(加密存) |
-| `usage_records` | 003 | 用量明细 |
-| `model_aliases` | 004 | 模型别名 |
-| `routing_configs` | 004 | 路由配置 |
-| `gateway_keys` | 005 | 客户端 API Key |
-| `access_logs` | (AutoMigrate) | 接入日志(P67) |
-
-### 11.2 关键关系
-
-```
-providers (Name) — 表仍在但全程无人读写,保留仅为历史
-  ├── provider_models (按 vendor 维度,无 FK 关联本表 — 2026-08-20 移除跨命名空间外键)
-  ├── provider_api_keys (ProviderName FK)
-  └── usage_records (ProviderName FK)
-gateway_keys (ID)
-  └── usage_records (GatewayKeyID FK)
-model_aliases (ProviderName FK)
-routing_configs (无 FK)
-access_logs (ProviderKeyID / GatewayKeyID 都是字符串,无 FK)
-```
-
-### 11.3 ID 格式
-
-- 所有内部 ID 都是 `uint` 自增
-- `ProviderAPIKey.ID` 用**数字字符串**进入 `keypool.Key.ID`(不是 `<provider>-key-<N>`)
-- `parseKeyIDUint` 函数同时兼容两种格式(向前兼容)
-
----
-
-## 12. 迁移
-
-### 12.1 数据库迁移
-
-- `cmd/gateway/main.go` 启动时调 `database.Migrate(db)`
-- 唯一 schema 权威是 GORM AutoMigrate(database.Migrate 遍历 10 个模型 struct);
-  已删后端 dormant 的 migrations/*.sql(此前与 struct 漂移且无代码执行)
-- 新增字段用 GORM 的 `AutoMigrate`(改 struct + `gorm:"column:..."` tag)
-- **AutoMigrate 只加列不删列**:删结构体字段/关联时,必须同时手工
-  `ALTER TABLE ... DROP COLUMN / DROP CONSTRAINT`,否则生产库留下 NOT NULL 死列,
-  轻则 INSERT 全炸、重则启动崩溃循环(踩坑 #23,2026-08-20 网关全挂实录)
-
-### 12.2 key-state.json 快照
-
-优雅关停时写,启动时恢复。**SQLite 在 DSN 目录,PG 在 cwd**(系统服务下即仓库根)。
-
-路径解析(`server.go:529` `keyStateSnapshotPath`):
-
-```go
-if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-    return filepath.Join(".", "key-state.json")
-}
-return filepath.Join(filepath.Dir(dsn), "key-state.json")
-```
-
----
-
-## 13. 热重载
-
-### 13.1 哪些字段改了会触发 Reload
-
-| 字段 | 触发 |
+| 字段 | 语义 |
 |---|---|
-| `providers.*.endpoint` | `manager` 重新加载 |
-| `providers.*.protocol` | 同上 |
-| `providers.*.models` | 已删除 — 模型/定价只来自 DB `provider_models`,热重载走 `LoadModelsFromStore`(2026-08-20) |
-| `routing.aliases` | `router` 重新加载 |
-| `routing.catch_all` | 同上 |
-| `keypool.*` | `pool` 重新构建(部分) |
-| `auth.keys` | `auth` 重新加载 |
+| `key_rotation` | 默认/空值为 `sticky`；也支持 `round_robin`、`least_used`、`random` |
+| `cooling_duration` | 429 未提供有效 `Retry-After` 时的冷却时间，默认 60s |
+| `quota_enabled` | 启停额度 poll/probe worker |
+| `quota_probe_initial_delay` | 无余额接口时的首次恢复探测延迟，零值兜底 5m |
+| `quota_probe_max_backoff` | 恢复探测指数退避上限，零值兜底 30m |
+| `quota_probe_jitter_pct` | probe 抖动百分比 |
+| `quota_poll_interval` | 有 balancer 时的轮询间隔，零值兜底 60s |
+| `quota_poll_jitter_pct` | poll 抖动百分比 |
+| `quota_http_timeout` | 额度查询 HTTP 超时，零值兜底 10s |
+| `quota_user_agent` | 额度查询 User-Agent |
+| `quota_warn_threshold_pct` | 管理页额度预警阈值，零值兜底 10 |
 
-### 13.2 哪些字段改了**不**生效
+`sticky` 始终选择当前最高优先级的可用 key。高位 key 冷却、额度耗尽或熔断时才使用
+下一把；高位 key 恢复后自动回位。上游 401/普通 403 使用固定 5 分钟冷却，不受
+`cooling_duration` 控制。
 
-- `server.port` — 改完需要重启
-- `database.driver` / `database.dsn` — 同上
-- `server.static_dir` — 同上
+### `timeouts`、`retry`、`logging`、`usage`
 
-### 13.3 触发机制
+- `timeouts.provider_default`：provider 未单独设置 timeout 时的兜底。
+- `retry.max_attempts`：每个计费层最多尝试的候选数；`0` 表示尝试该层全部候选。
+  同 key 的 429 重试和换 key 不按独立候选计数。
+- `logging.level`、`logging.format`：分别控制 zap 等级和 `console|json` 输出格式；
+  `--log-json` 强制 JSON。
+- `usage.flush_interval`、`usage.batch_size`：异步用量批写；零值兜底 10s/100。
 
-`config.Watch(ctx, cfgPath, fn(srv.Reload))` 用 fsnotify 监听,文件变更调 `srv.Reload(newCfg)`。
+### `fingerprint`
+
+```yaml
+fingerprint:
+  enabled: true
+  canonical_device_id: "0123...64-hex-chars"
+```
+
+`enabled` 未写时默认开启。它只归一化请求体中的 `metadata.user_id.device_id` 和
+`# Environment` 内的 platform/shell/os version，不修改消息、工具或工作目录。
+`enabled` 可由管理 API 热切换；`canonical_device_id` 仅启动时读取，为空时每次进程
+启动随机生成一个内存值。
+
+### `admin_auth`
+
+```yaml
+admin_auth:
+  enabled: true
+  session_ttl: 168h
+  max_login_attempts: 5
+  login_ban_duration: 15m
+```
+
+启用后，除登录外的管理 API 需要 session。当前 Server 会直接把三个数值传给认证
+管理器，没有统一的零值兜底，因此启用时必须显式填写。首次没有 root 用户时会创建
+`admin / Gateway@2026`，应立即修改密码。
+
+## 仅解析、当前未消费的字段
+
+下列字段保留在结构或模板中，但当前运行路径没有读取，修改它们不会改变行为：
+
+- 整个 `redis` 块。
+- `keypool.health_check_interval`。
+- `retry.enabled`、`retry.no_failover_on`、`retry.failover_on`；错误矩阵由代码实现。
+- `logging.output`、`logging.file_path`；日志写 stdout/stderr，由进程管理器重定向。
+- `metrics.enabled`、`metrics.path`、`metrics.port`；当前 `/metrics` 始终注册在主端口。
+- `usage.retention_days`；只有 access log 实现了自动 retention。
+- `admin_auth.session_cleanup_age`；过期 session 清理函数目前未由 Server 启动。
+- `circuit_breaker.countable_errors`、`excluded_errors` 当前虽传入熔断器，但实际判定仍
+  使用固定集合 `server_error|timeout|connection`，并排除 `rate_limit`。
+
+这些字段不应被当作运维控制面。删除兼容字段前需要考虑已有私有配置能否继续解析。
+
+## 热重载边界
+
+配置 watcher 监听文件写入并重新解析。当前热生效：
+
+- `routing.aliases/chains/catch_all/default_strategy`
+- 数据库中的 Gateway Key 重载
+- provider 的计费来源、Responses 能力及数据库模型/价格快照
+- quota worker 参数和启停
+- 后续 Provider Key CRUD、route order CRUD、中转站 CRUD 各有自己的热更新路径
+
+需要重启：database、HTTP server、静态目录、access log、usage collector、provider
+实例/endpoint/timeout，以及管理员认证开关和参数。配置 watcher 不更新 Fingerprint；
+`fingerprint.enabled` 可通过管理 API 临时热切换，改 `canonical_device_id` 必须重启。
+
+## 数据库表
+
+启动时 GORM `AutoMigrate` 当前模型：
+
+| 表 | 用途 |
+|---|---|
+| `providers` | 历史/数据库 Provider 元数据 |
+| `provider_models` | vendor 级模型与每百万 token 三档价格 |
+| `provider_model_faces` | 注册面到模型的归属与上游顺序 |
+| `relay_stations` | 动态中转站配置和 key JSON |
+| `model_aliases` | 数据库 alias 结构（当前路由主要读 YAML） |
+| `provider_api_keys` | 上游 key、协议限制、计费层和启用状态 |
+| `usage_records` | 请求 token、成本、TTFT、延迟和结果 |
+| `routing_configs` | 历史路由配置结构 |
+| `gateway_keys` | 客户端 Gateway Key、绑定、白名单、限流 |
+| `access_logs` | 请求 metadata；body 存文件 |
+| `mimo_quota_cookie` | MiMo 控制台 cookie 单行记录 |
+| `route_order` | provider/key 顺序改写 |
+| `admin_users` | 管理员账号和锁定状态 |
+| `admin_sessions` | 管理员 session |
+
+`key_hash` 字段名不代表加密：`provider_api_keys.key_hash` 和 `gateway_keys.key_hash` 当前
+都保存可用原值。数据库备份、SQL 导出和文件权限必须按密钥材料处理。
+
+AutoMigrate 适合新增表/列，不负责可靠删除旧列或约束。做 schema 减法前先备份，分别在
+SQLite/PostgreSQL 验证 DDL，再启动应用确认迁移通过。
+
+## 运行时快照
+
+优雅关停会把 key 的 `COOLING`、`QUOTA_EXCEEDED`、余额和计数写到
+`key-state.json`。SQLite 使用 DSN 所在目录；PostgreSQL 使用当前工作目录。它不是主
+数据库备份，只用于跨重启恢复瞬时调度状态。

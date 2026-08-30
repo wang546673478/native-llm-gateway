@@ -1,5 +1,4 @@
-// Package policy 实现四种路由选择策略
-// 对应规格书:priority / weight / cost / health
+// Package policy 实现 priority、weight、cost 和 health 路由选择策略。
 package policy
 
 import (

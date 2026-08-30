@@ -1,27 +1,7 @@
-// Package minimax 实现 MiniMax(MiniMax 稀宇科技)Provider(Anthropic + OpenAI 两种协议)
-//
-// 官方文档:https://platform.minimaxi.com/docs/api-reference/api-overview
-//
-// MiniMax 提供两种 API 端点:
-//  1. Anthropic 兼容(推荐):POST https://api.minimaxi.com/anthropic/v1/messages
-//  2. OpenAI 兼容:POST https://api.minimaxi.com/v1/chat/completions
-//
-// 鉴权:Authorization: Bearer <API_KEY>
-// Anthropic 兼容时还需要 anthropic-version header(anthropic_compatible.Base 已加)
-//
-// 当前可用模型(2026-07):
-//   - MiniMax-M3           (1M tokens,旗舰)
-//   - MiniMax-M2.7 / M2.7-highspeed
-//   - MiniMax-M2.5 / M2.5-highspeed
-//   - MiniMax-M2.1 / M2.1-highspeed
-//   - MiniMax-M2
-//
-// M3 专属参数(通过 extra_body 传):
-//   - thinking: {"type": "adaptive"|"disabled"}  (M2.x 不可关闭)
-//   - reasoning_split: true 把思考内容分到 reasoning_details 字段
-//   - service_tier: "standard"|"priority"       (priority 1.5x 价格,优先准入)
-//
-// 这里采用 Anthropic 兼容协议(官方推荐);若需 OpenAI 兼容可新建 minimax-openai 包。
+// Package minimax 实现 MiniMax 的 Anthropic 与 OpenAI 协议面。
+// minimax.go 提供 Anthropic 注册面，openai.go 提供 minimax-openai；两者归入
+// minimax vendor 并共享 Key Pool。包同时处理 MiniMax base_resp 错误形状和余额查询。
+// 模型清单和价格由数据库维护，运行契约见 docs/providers.md。
 package minimax
 
 import (
@@ -86,8 +66,6 @@ func init() {
 	provider.RegisterGlobalWithProtocolVendor(name, New, provider.ProtocolAnthropic, name)
 	provider.RegisterGlobalWithProtocolVendor(openaiName, NewOpenAI, provider.ProtocolOpenAI, name)
 }
-
-// toPool 把 cfg.Pool (interface{}) 安全转成 *keypool.Pool
 
 // P-provider-vendor: openai 协议实现在 openai.go(注册名 "minimax-openai")。
 // 官方文档特性(2026-08-04 全量调研,Anthropic 面):

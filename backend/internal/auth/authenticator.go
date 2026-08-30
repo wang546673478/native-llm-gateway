@@ -1,5 +1,4 @@
-// Package auth 实现客户端 Gateway API Key 认证
-// 对应规格书 5.9
+// Package auth 实现客户端 Gateway API Key 认证。
 package auth
 
 import (

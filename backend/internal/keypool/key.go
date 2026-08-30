@@ -1,5 +1,4 @@
-// Package keypool 实现 Provider API Key 的池化管理
-// 对应规格书 5.4 Key Pool
+// Package keypool 实现 Provider API Key 的池化管理。
 package keypool
 
 import (
@@ -20,8 +19,8 @@ const (
 	KeyStatusQuotaExceeded KeyStatus = "QUOTA_EXCEEDED"
 )
 
-// Key 是 Provider 的单个 API Key
-// Key 字段在运行时是明文,落库时由 Encryptor 加密
+// Key 是 Provider 的单个 API Key。
+// Key 字段在运行时是明文；provider_api_keys.key_hash 当前同样保存明文。
 // P48: 加 BillingSource — Pool.Acquire 按 token_plan > api > free 优先级返回 key
 type Key struct {
 	ID            string

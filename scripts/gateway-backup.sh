@@ -43,16 +43,15 @@ fi
 
 echo "gateway-backup: 已备份 → $DEST ($(du -h "$DEST" | cut -f1))"
 
-# 清理旧备份,只留最新 MAX_KEEP 份
-mapfile -t olds < <(ls -1 "$BACKUP_DIR"/gateway.* 2>/dev/null | sort | head -n "-$(( -MAX_KEEP ))" 2>/dev/null || true)
-# 上面的 head -n 负数技巧不可移植,改用明确逻辑:
-count=0
-for f in $(ls -1 "$BACKUP_DIR"/gateway.* 2>/dev/null | sort); do
-    count=$((count + 1))
-    if [ "$count" -gt "$MAX_KEEP" ]; then
-        rm -f "$f"
-        echo "gateway-backup: 清理旧备份 → $f"
-    fi
+# 按修改时间从新到旧排序，只删除第 MAX_KEEP 份之后的时间戳备份。
+# pre-rollback 文件不属于本脚本的轮换集合。
+mapfile -t backups < <(
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name 'gateway.[0-9]*' -printf '%T@ %p\n' \
+        | sort -nr | cut -d' ' -f2-
+)
+for ((i = MAX_KEEP; i < ${#backups[@]}; i++)); do
+    rm -f -- "${backups[$i]}"
+    echo "gateway-backup: 清理旧备份 → ${backups[$i]}"
 done
 
 echo "gateway-backup: 完成(保留最近 $MAX_KEEP 份)。"

@@ -1,5 +1,4 @@
-// Package circuit 实现 Circuit Breaker(熔断器)
-// 对应规格书 5.6
+// Package circuit 实现 Circuit Breaker(熔断器)。
 //
 // 状态机:
 //

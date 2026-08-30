@@ -4,7 +4,8 @@
 #
 # 部署要点(详见 README「Docker 部署」):
 #   - config.yaml 含真实凭据,不进镜像 — 部署时挂载覆盖 /app/config.yaml
-#   - 数据(DB / key-state.json / access body)在 /app/data,挂 volume
+#   - SQLite DB/key-state.json 与 access body 在 /app/data，可挂 volume
+#   - PostgreSQL 模式的 key-state.json 当前写到工作目录 /app，不在 Compose 数据挂载内
 #   - 数据库 driver 由挂载的 config 决定:sqlite 或 postgres
 
 # ---- 阶段 1:构建前端 ----

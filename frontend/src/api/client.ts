@@ -66,8 +66,8 @@ export interface ProvidersResponse {
   count: number
 }
 
-// /providers/registered — 比 /providers 轻量,只含 name/protocol/loaded/models
-// AccessLogs.vue 用它做 Provider/Model 下拉(spec §0)
+// /providers/registered — 比 /providers 轻量,只含 name/protocol/loaded/models。
+// AccessLogs.vue 用它构建 Provider/Model 筛选项。
 export interface RegisteredProvider {
   name: string
   protocol: string
@@ -270,8 +270,7 @@ export interface DashboardResp {
     active_keys: number
     cooling_keys: number
     disabled_keys: number
-    // P-quota-balance: 上游 quota polling 聚合 — spec §6.2 dashboard
-    // "Pool 列表里每行显示 QuotaKnownSum"
+    // 上游 quota polling 的池级聚合，供 Dashboard 展示 QuotaKnownSum。
     quota_polled_keys: number
     quota_known_sum: number
     // P-quota-display: 池级 dominant kind — 全部 percent → "percent",否则 "currency"

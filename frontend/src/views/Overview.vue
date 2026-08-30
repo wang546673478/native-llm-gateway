@@ -78,9 +78,8 @@
       />
     </n-card>
 
-    <!-- P-quota-balance: spec §6.2 — "Pool 列表里每行显示 QuotaKnownSum
-         (整池可用额度粗略值)". 复用 keypools 数据,展示每池已 poll key
-         的 Remaining 之和(CNY,toFixed(2)). -->
+    <!-- 复用 keypools 数据，展示每池已 poll key 的 Remaining 之和
+         （整池可用额度粗略值，CNY，保留两位小数）。 -->
     <n-card title="整池可用额度 (QuotaKnownSum)" style="margin-top: 16px">
       <n-grid cols="1 s:2 l:3" responsive="screen" :x-gap="16" :y-gap="16">
         <n-gi v-for="row in data?.keypools ?? []" :key="row.provider_name">

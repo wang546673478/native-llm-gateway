@@ -1,5 +1,4 @@
-// Package server 负责 Gateway 服务的启动、编排和优雅关停
-// 对应规格书 5.x 服务生命周期
+// Package server 负责 Gateway 服务的启动、编排和优雅关停。
 package server
 
 import (
@@ -194,8 +193,8 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		// 流式写 deadline 续期预算 — 与 http.Server.WriteTimeout 同源,
 		// 流式场景下按 chunk 续期成空闲超时(非流式仍是绝对上限)
 		WriteTimeout: cfg.Server.WriteTimeout,
-		// P-stream-idle-timeout: 流式空闲超时(连续 N 秒没收到 chunk → 认为断流)
-		// 默认 10s,快速失败让客户端重试(不等 provider.timeout 60s)
+		// 预留配置:当前 doStream 按请求体大小使用 10/15/20/30/45s 固定分段,
+		// 尚未消费该字段。
 		StreamIdleTimeout: 10 * time.Second,
 	})
 	// P30:把 DB Pool 注入到每个 Provider(Manager.LoadFromConfig 时 Pool 还是 nil)

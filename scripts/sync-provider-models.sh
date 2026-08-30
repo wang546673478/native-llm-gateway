@@ -5,8 +5,8 @@
 # 用法:
 #   ./sync-provider-models.sh <source-face> <target-face>
 #
-# 示例:
-#   ./sync-provider-models.sh tokenmarket tokenmarket-codex
+# 示例（使用实际 face 名替换占位符）:
+#   ./sync-provider-models.sh <source-face> <target-face>
 
 set -e
 
@@ -15,7 +15,7 @@ DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-5432}"
 DB_USER="${DB_USER:-gateway}"
 DB_NAME="${DB_NAME:-gateway}"
-DB_PASSWORD="${DB_PASSWORD:-794011a41c7137cb2745c2d720f1cd43}"
+DB_PASSWORD="${DB_PASSWORD:-}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -24,14 +24,19 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+if [ -z "$DB_PASSWORD" ]; then
+    echo "错误: 必须通过环境变量 DB_PASSWORD 提供数据库密码" >&2
+    exit 1
+fi
+
 # 检查参数
 if [ $# -ne 2 ]; then
     echo -e "${RED}错误: 需要提供源 face 和目标 face${NC}"
     echo ""
     echo "用法: $0 <source-face> <target-face>"
     echo ""
-    echo "示例:"
-    echo "  $0 tokenmarket tokenmarket-codex"
+    echo "示例（使用实际 face 名替换占位符）:"
+    echo "  $0 <source-face> <target-face>"
     echo ""
     exit 1
 fi

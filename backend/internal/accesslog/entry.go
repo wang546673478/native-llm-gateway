@@ -36,5 +36,5 @@ type AccessEntry struct {
 	ReqBodySize     int    `json:"req_body_size"`
 	RespBodyPath    string `json:"resp_body_path"`
 	RespBodySize    int    `json:"resp_body_size"`
-	// Truncated 状态由 文件名后缀 .truncated.json 标记,不在业务 struct 里(spec F1 决议)
+	// Truncated 状态由文件名后缀 .truncated.json 标记，不在业务 struct 中重复存储。
 }

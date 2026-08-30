@@ -1,22 +1,16 @@
-# Native LLM Gateway — config 示例
-# 完整规格见 Native LLM Gateway — 完整实现规格书 v2.md 第 4.1 节
-# 现状(2026-08):kimi 已移除(需要时按 docs/provider厂商定制包指南.md 加回);
-# 路由 = catch_all 自动模式(alias/chains 已退役);provider key 全部由 DB 管理
+# Native LLM Gateway 本地开发模板（SQLite）
+# 完整字段、生效边界和热重载说明见 docs/config-reference.md。
+# 上游 Provider key、模型、定价、中转站和调度顺序由数据库/管理页面维护。
 
 server:
   host: "0.0.0.0"
   port: 8080
   read_timeout: 30s
-  # 非流式响应的绝对写上限;流式响应按 chunk 续期(proxy.doStream 的
-  # SetWriteDeadline),实际语义变成「上游静默多久才算断流」— 活跃流不被掐断
   write_timeout: 600s
   idle_timeout: 120s
   shutdown_timeout: 30s
-  # P-web-static: 前端构建产物目录(Go 直接托管,无 nginx;未命中 SPA fallback index.html)。
-  # 为空 = 不启用(纯 API 网关);容器部署固定为 /app/web/dist
+  # 先运行 `npm --prefix frontend run build`；留空可作为纯 API 网关。
   static_dir: frontend/dist
-  # P67: 接入日志(P67 接入日志模块)
-  # 默认 enabled=false(保持现有行为);要做 observing 时开启
   access_log:
     enabled: false
     body_dir: ./data/access
@@ -26,312 +20,110 @@ server:
     retention: 24h
 
 database:
-  driver: "sqlite"          # sqlite | postgres
-  dsn: "data/gateway.db"
+  driver: sqlite
+  dsn: data/gateway.db
   max_open_conns: 25
   max_idle_conns: 10
   conn_max_lifetime: 300s
 
-redis:
-  enabled: false            # 单实例 P0 阶段不需要,集群/P1+ 启用
-  addr: "localhost:6379"
-  password: ""
-  db: 0
-  pool_size: 10
-
-# 客户端认证
-# ⚠️ 代理端点认证开关:必须开启,否则任何能访问端口的人都能免费调用(白嫖上游额度)
+# 代理端点的 Gateway Key 鉴权。生产环境必须保持开启。
+# 这里的记录只负责首次启动补种；后续以数据库 gateway_keys 为准。
 auth:
   enabled: true
   keys:
-    # 默认 dev key — 首次部署务必改掉或删除(页面创建正式 key 后即可删)
-    - name: "dev-key"
-      key: "gw-key-dev-please-change-me"
+    - name: bootstrap
+      key: "gw-change-this-before-use"
       allowed_models: ["*"]
       rate_limit:
         rpm: 100
         tpm: 500000
 
-# Provider 配置
-# 每个 Provider 默认 endpoint 和模型列表参考各 vendor 官方文档(2026-07)
-# Provider 的 API key 不在这里配置(全部由 DB 管理,见下)
-
-# Provider API Key 全部由 DB(provider_api_keys 表)管理
-# 通过前端 Provider Keys 页面 / REST API 添加/删除
-# 这里不再保留 keys: 字段(避免误导和重复)
+# 内置厂商协议面。Provider key 不写在 YAML，通过 Provider Keys 页面添加。
+# 同一厂商的多个协议面共享 key 池；单 key 可在数据库中覆盖 billing_source。
 providers:
-  # --- DeepSeek (OpenAI 兼容,端点 /chat/completions 不带 /v1) ---
-  # 文档:https://api-docs.deepseek.com/zh-cn/
-  # 价格文档:https://api-docs.deepseek.com/zh-cn/quick_start/pricing
-  # 上下文:1M tokens,最大输出 384K tokens
-  # 注意:deepseek-chat / deepseek-reasoner 将于 2026-07-24 23:59(北京时间)弃用,
-  # 分别映射到 v4-flash 的非 thinking / thinking 模式
   deepseek:
     enabled: true
-    billing_source: "api"
     endpoint: "https://api.deepseek.com"
-    protocol: "openai"
+    protocol: openai
+    billing_source: api
     timeout: 60s
-    # 原生支持 OpenAI Responses API(Codex 透传)
     responses_api: true
-    # P41 DeepSeek 支持的 API 特性(都通过 body 透传,Gateway 不需特殊处理):
-    #   - Thinking 模式:extra_body={"thinking":{"type":"enabled"}}(v4-pro)
-    #   - Tool use / function calling:OpenAI 标准 tools 数组
-    #   - JSON mode:response_format={"type":"json_object"}
-    #   - Prefix caching:默认开启,响应 prompt_cache_hit_tokens / prompt_cache_miss_tokens
-    #   - Streaming:stream=true,SSE 格式
-    circuit_breaker:
+    circuit_breaker: &default_circuit
       failure_threshold: 5
       failure_window: 60s
       open_timeout: 30s
       half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
 
-  # --- DeepSeek Anthropic 兼容(给 Anthropic SDK 用户) ---
-  # 文档:https://api-docs.deepseek.com/zh-cn/ (Anthropic 协议部分)
   deepseek-anthropic:
     enabled: true
-    # P-deepseek-thinking: DeepSeek /anthropic 的 thinking 校验会拒绝 compact 后的历史
-    # (Claude Code 剥离 thinking 块 → 400 "content[].thinking ... must be passed back"),
-    # 强制 thinking=disabled 绕开 — flash 本来就是非 thinking 模型,无能力损失
-    force_thinking_disabled: true
-    billing_source: "api"
     endpoint: "https://api.deepseek.com/anthropic"
-    protocol: "anthropic"
+    protocol: anthropic
+    billing_source: api
     timeout: 90s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
+    force_thinking_disabled: true
+    circuit_breaker: *default_circuit
 
   minimax:
     enabled: true
-    billing_source: "token_plan"   # 包月套餐,优先路由,quota 用完自动降级到 api 层
     endpoint: "https://api.minimaxi.com/anthropic"
-    protocol: "anthropic"
-    timeout: 30s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
+    protocol: anthropic
+    billing_source: token_plan
+    timeout: 60s
+    circuit_breaker: *default_circuit
 
-  minimax-openai:                   # 同一供应商,不同协议端点,共享 key
+  minimax-openai:
     enabled: true
-    billing_source: "token_plan"
     endpoint: "https://api.minimaxi.com/v1"
-    protocol: "openai"
-    timeout: 30s
+    protocol: openai
+    billing_source: token_plan
+    timeout: 60s
     responses_api: true
-    keys: []  # 与 minimax 共享同一组 Provider Key
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
+    circuit_breaker: *default_circuit
 
-  # --- 小米 MIMO (OpenAI + Anthropic 兼容 × 按量付费/套餐 两套端点) ---
-  # 文档:https://mimo.mi.com/docs/zh-CN/quick-start/summary/welcome
-  # 按量付费:https://api.xiaomimimo.com/v1(key sk-xxx);套餐:https://token-plan-cn.xiaomimimo.com/v1(key tp-xxx)
-  # 两套 key 不通用,加 key 时按 billing 类型区分(sk- 选 api,tp- 选 token_plan)
-  # 鉴权:Authorization: Bearer 或 api-key: header;思考模式:chat 面 thinking.type、
-  # responses 面 reasoning.effort;思考模式不支持 temperature/top_p(强制 1.0/0.95)
-  # 429 = 限流 或 套餐额度耗尽(双义);402 = 按量余额不足
-  # 余额/套餐查询:控制台未文档化端点(cookie 鉴权,约 1 天过期)— balancer 已接入,
-  # cookie 配在下方 quota_cookie(账号级,敏感凭据,只放本地 config.yaml,不放本示例)
-  # 套餐条款(已确认接入):配额仅限编程工具场景,禁止 API 调用后端
-  # 价格(¥/M,÷1000 进 cost_per_1k):pro 命中0.025/未命中3.00/输出6.00;v2.5 0.02/1.00/2.00
-  # v2 系列(mimo-v2-pro/v2-omni/v2-flash)已于 2026-06-30 弃用,勿配置
   mimo:
     enabled: true
-    billing_source: "api"
     endpoint: "https://api.xiaomimimo.com/v1"
-    protocol: "openai"
-    timeout: 60s
-    responses_api: true            # 原生支持 /responses(endpoint 已含 /v1)
-    # quota_cookie: 控制台登录 cookie(账号级,约 1 天过期)— 敏感凭据,只放本地
-    #   config.yaml;抓取方法:浏览器登录 https://platform.xiaomimimo.com/console/plan-manage
-    #   → F12 → 复制任意请求的完整 Cookie header 值(含 api-platform_serviceToken=...)
-    #   过期后轮询自动退化(错误码驱动,保守安全),重新抓取填上重启即可
-    # quota_cookie: ""
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # 同一供应商,Anthropic 兼容端点,共享 key 池(Claude Code 走这里)
-  mimo-anthropic:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://api.xiaomimimo.com/anthropic"
-    protocol: "anthropic"
-    timeout: 60s
-    # force_thinking_disabled: true  # 若 Claude Code compact 后 400(thinking 块未回传)再开,与 DeepSeek 同款
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # Token Plan 套餐端点(优先路由,额度耗尽 429 自动降级到 api 层)
-  mimo-token-plan:
-    enabled: true
-    billing_source: "token_plan"
-    endpoint: "https://token-plan-cn.xiaomimimo.com/v1"
-    protocol: "openai"
+    protocol: openai
+    billing_source: api
     timeout: 60s
     responses_api: true
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
+    # MiMo 额度 cookie 是敏感信息，建议在管理页面热更新，不要写入模板。
+    circuit_breaker: *default_circuit
+
+  mimo-anthropic:
+    enabled: true
+    endpoint: "https://api.xiaomimimo.com/anthropic"
+    protocol: anthropic
+    billing_source: api
+    timeout: 60s
+    circuit_breaker: *default_circuit
+
+  mimo-token-plan:
+    enabled: true
+    endpoint: "https://token-plan-cn.xiaomimimo.com/v1"
+    protocol: openai
+    billing_source: token_plan
+    timeout: 60s
+    responses_api: true
+    circuit_breaker: *default_circuit
 
   mimo-token-plan-anthropic:
     enabled: true
-    billing_source: "token_plan"
     endpoint: "https://token-plan-cn.xiaomimimo.com/anthropic"
-    protocol: "anthropic"
+    protocol: anthropic
+    billing_source: token_plan
     timeout: 60s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # --- Right Code (API 中转站, https://rightapi.ai/) ---
-  # 每个后缀端点 = 一个协议面(注册名 rightapi-<后缀>),共享 vendor=rightapi + 同一把 key。
-  # 各渠道是不同上游、模型互不相通,归属由 DB provider_model_faces 按面隔离
-  # (踩坑 #25:按 vendor 合并会让 codex 面拿到 claude 模型 → 404)。
-  # billing_source 都是 api:余额按量扣费,不足返回 429 → 错误码驱动降档;无余额 API 走 probe。
-  # 未接入 /claude-sale(官渠特惠):实测 503「this group only allows Claude Code clients」,
-  # 是 key 在平台上的账号组开关,网关伪造 header/指纹绕不过;用官渠 /claude 拿同一批模型。
-  rightapi-codex:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://rightapi.ai/codex/v1"
-    protocol: "openai"
-    timeout: 60s
-    responses_api: true            # 原生支持 /responses(Codex CLI)
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  rightapi-grok:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://rightapi.ai/grok/v1"
-    protocol: "openai"
-    timeout: 60s
-    responses_api: true            # grok 走 Responses API
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # Gemini 渠道(Right Code 转成 OpenAI 兼容 chat/completions;无原生 Responses API)
-  rightapi-gemini:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://rightapi.ai/gemini/v1"
-    protocol: "openai"
-    timeout: 60s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # Claude 官渠(含 claude-fable-5)
-  rightapi-claude:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://rightapi.ai/claude"
-    protocol: "anthropic"
-    timeout: 60s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
-
-  # Claude AWSQ 逆向渠道(比官渠少 claude-fable-5)
-  rightapi-claude-aws:
-    enabled: true
-    billing_source: "api"
-    endpoint: "https://rightapi.ai/claude-aws"
-    protocol: "anthropic"
-    timeout: 60s
-    circuit_breaker:
-      failure_threshold: 5
-      failure_window: 60s
-      open_timeout: 30s
-      half_open_requests: 1
-      countable_errors: ["5xx", "timeout", "connection_error"]
-      excluded_errors: ["429"]
+    circuit_breaker: *default_circuit
 
 routing:
-  # 自动模式(catch_all: {} 空规则):所有 enabled provider 自动参与,
-  #   - 客户端发任何 model 名(gpt-5 / qwen-plus / 任意探测名)→ 一律走这条链,
-  #     客户端模型名只是标签,不参与路由决策(真实名也不直连声明它的 provider)
-  #   - 协议面按请求路径过滤(/v1/messages → anthropic 面,/v1/chat/completions → openai 面)
-  #   - 每个 provider 用它的默认模型承接(DB provider_models 该厂商首个 model_id)
-  #   - tier 计费自动(token_plan → api → free):token plan 额度耗尽 → 自动切 api
-  #     计费的 provider,无需改配置;没 key 的 provider 自动跳过
-  #   - 同 tier 桶内候选按 name 确定性排序(自动模式无优先级概念)
-  # 显式模式(providers 列表):自定义参与方与优先级 — priority 数字小者先试;
-  # tier 分桶在排序之后,priority 只影响同 tier 桶内顺序,「token_plan 未耗尽
-  # 不落 api」不变式不受影响。注意:显式列表 = 未列出的 provider 不再参与链!
-  # 新增 provider 必须同步加进列表,否则它不会进链
-  # catch_all:
-  #   providers:
-  #     - name: "minimax"
-  #       model: "MiniMax-M3"
-  #       priority: 1
-  #     - name: "mimo-token-plan-anthropic"
-  #       model: "mimo-v2.5"
-  #       priority: 2
-  #     - name: "deepseek-anthropic"
-  #       model: "deepseek-v4-flash"
-  #       priority: 3
+  # 空对象表示启用自动候选发现；不写 catch_all 则未知模型没有兜底路由。
   catch_all: {}
-  default_strategy: "priority"
+  default_strategy: priority
 
-# Key Pool 配置(P3 阶段真正生效)
 keypool:
+  # sticky 始终选当前最高优先级可用 key；高位恢复后自动回位。
+  key_rotation: sticky
   cooling_duration: 60s
-  health_check_interval: 30s
-  key_rotation: "sticky"   # sticky(默认,先用尽一把再切) | round_robin / least_used / random 可选
-  # P68: quota polling / restore 全部 flat key(和 KeyPoolConfig struct 的
-  # mapstructure tag 对齐)。不要嵌 quota: 子块,viper 不会自动展开。
   quota_enabled: true
   quota_probe_initial_delay: 5m
   quota_probe_max_backoff: 30m
@@ -340,64 +132,40 @@ keypool:
   quota_poll_jitter_pct: 10
   quota_http_timeout: 10s
   quota_user_agent: "native-llm-gateway/quota-restore-1.0"
+  quota_warn_threshold_pct: 10
 
-# 超时与重试(P5 阶段真正生效)
-# HTTP server 真正生效的超时见 server.read_timeout/write_timeout/idle_timeout
-# (Server.ReadTimeout/WriteTimeout/IdleTimeout);timeouts 仅剩 provider_default
 timeouts:
   provider_default: 60s
 
 retry:
-  enabled: true
-  # 每层(token_plan / api / free)最多实际尝试几个候选。
-  #   0 = 动态:该层有几个候选就试几个,走到层穷尽为止(推荐)
-  #   正整数 = 显式封顶,给最坏延迟设上界
-  # 计的是**候选数**不是请求数:换 key 重试、纯 429 同 key 重试都在单个候选内部。
-  # 候选很多且常 429 时最坏延迟 ≈ 候选数 × 10 次同 key 重试,受 write_timeout 兜底;
-  # 想收紧就把这里设成一个正整数(如 8)。
+  # 每个计费层最多尝试的候选数；0 表示尝试该层全部候选。
+  # HTTP 429 首次失败后最多再同 key 重试 10 次，不由此字段控制。
   max_attempts: 0
-  no_failover_on:
-    - "invalid_request"
-    - "auth"
-  failover_on:
-    - "rate_limit"
-    - "server_error"
-    - "timeout"
-    - "connection"
 
-# 日志
 logging:
-  level: "info"
-  format: "console"         # P0 阶段用 console 方便看;生产改 json
-  output: "stdout"
-  file_path: "logs/gateway.log"
+  level: info
+  format: console
 
-# 指标(P8 阶段真正生效)
-metrics:
-  enabled: false
-  path: "/metrics"
-  port: 9090
-
-# Usage(P8 阶段真正生效)
+# /metrics 当前始终注册在 server.port，不需要 metrics 配置块。
 usage:
   flush_interval: 10s
   batch_size: 100
-  retention_days: 90
 
-# 设备指纹归一化(可选)—— 多台机器经网关共用一把上游 key 时,把 body 里
-# 设备级指纹(device_id / platform / shell / os version)归一成网关一套固定值,
-# 抹平「多头」信号,降低封号风险。只改无功能副作用的纯指纹,不碰工作目录/对话内容。
+# 未配置 enabled 时默认开启。关闭后请求体原样透传。
 fingerprint:
-  # enabled: 是否归一化。默认 true(留空即开);显式 false 关闭 → 透传原样。
-  # enabled: true
-  # canonical_device_id: 统一 device_id。留空则启动时随机生成一次(存内存,不落盘);
-  # 想固定或更换统一值,填一个 64 字符 hex 字符串。
-  # canonical_device_id: ""
+  enabled: true
+  # 留空时每次进程启动生成一个内存值；固定值应为 64 字符十六进制字符串。
+  canonical_device_id: ""
 
-# P-admin-auth: 管理员认证配置(保护 /admin/* 端点)
+# 管理后台认证。启用时三个数值必须显式填写，当前服务端没有零值兜底。
+# 首次启动会创建 admin / Gateway@2026；登录后立即修改默认密码。
 admin_auth:
-  enabled: false                    # 是否启用管理员认证,默认关闭
-  # session_ttl: 168h              # session 有效期,默认 7 天
-  # max_login_attempts: 5          # 最大登录尝试次数,默认 5
-  # login_ban_duration: 15m        # 登录封禁时长,默认 15 分钟
-  # session_cleanup_age: 720h      # session 清理阈值,默认 30 天
+  enabled: true
+  session_ttl: 168h
+  max_login_attempts: 5
+  login_ban_duration: 15m
+
+# 以下结构仍能被解析但当前运行路径不消费，不要把它们当作控制面：
+# redis.*、keypool.health_check_interval、retry.enabled/no_failover_on/failover_on、
+# logging.output/file_path、metrics.*、usage.retention_days、
+# admin_auth.session_cleanup_age、circuit_breaker.countable_errors/excluded_errors。
