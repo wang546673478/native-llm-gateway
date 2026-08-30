@@ -2,7 +2,7 @@
 
 **日期**：2026-08-30  
 **问题编号**：403-rate-limit-retry-issue  
-**状态**：部分修复完成，核心问题待解决
+**状态**：代码修复完成，待线上观察验证
 
 ---
 
@@ -75,7 +75,7 @@ if len(o.AllowedProviders) > 0 {
 
 1. **上游返回 403**：body 包含 quota 关键字（如 MiniMax 的 base_resp.status_code=2056）
 
-2. **错误分类** (`anthropic_compatible.go:124-143`):
+2. **错误分类** (`anthropic_compatible.go:128-143`):
    ```go
    errType := provider.ClassifyErrorWithBody(status, body)  // 返回 quota_exceeded
    if errType == provider.ErrorTypeQuotaExceeded && b.balanceGuardHealthy(key) {
@@ -86,7 +86,7 @@ if len(o.AllowedProviders) > 0 {
    - `balanceGuardHealthy(key)` 检查余额守卫：如果 key 的 remaining > threshold → 返回 true
    - 降级为 `rate_limit`（认为是瞬时误报）
 
-3. **Base 内部重试** (`anthropic_compatible.go:202-213`):
+3. **Base 内部重试** (`anthropic_compatible.go:213-224`):
    ```go
    if errType == provider.ErrorTypeRateLimit {
        b.cfg.Pool.ReportRateLimit(key, retryAfter)
@@ -99,7 +99,7 @@ if len(o.AllowedProviders) > 0 {
    ```
    - 第 1 次请求 → 403 → 等 1s → 第 2 次请求 → 403 → 返回错误
 
-4. **Proxy 层检测到 rate_limit** (`proxy.go:1431-1444`):
+4. **Proxy 层检测到 rate_limit** (`proxy.go:1428-1485`):
    ```go
    if pe.ErrorType == provider.ErrorTypeRateLimit {
        if e.retrySameKeyRateLimit(...) {  // 最多 10 次
@@ -110,7 +110,7 @@ if len(o.AllowedProviders) > 0 {
    }
    ```
 
-5. **`retrySameKeyRateLimit` 循环** (`proxy.go:1623-1656`):
+5. **修复前的 `retrySameKeyRateLimit` 循环** (`proxy.go:1651-1682`):
    ```go
    func (e *Engine) retrySameKeyRateLimit(...) bool {
        attempts := 0
@@ -129,13 +129,14 @@ if len(o.AllowedProviders) > 0 {
        }
    }
    ```
-   - 每次 `attemptOne` 都会调用 Base，Base 内部又重试 1 次
-   - 理论最大 = 10 × 2 = 20 次请求
-   - 实际 11 次可能是因为某次中途退出
+   - 每次 `attemptOne` 都会调用 Base，旧逻辑下 Base 内部还会重试 1 次
+   - access log 记录的是 Proxy 的 `attemptOne`，所以 11 条记录正好是：首次 1 次 + 同 key 重试 10 次
+   - 在旧 Anthropic Base 逻辑下，每个 Proxy attempt 还可能产生 2 次上游 HTTP 请求，实际最多约 22 次
 
 6. **为什么是 11 次而不是 20 次？**
-   - 可能 Base 内部的 `retried` flag 在某些情况下没有重置
-   - 或者 `retrySameKeyRateLimit` 只执行了 5 轮（5 × 2 + 1 = 11）
+   - 11 次是 access log 中的 Proxy 尝试数，不是上游 HTTP 请求数
+   - `retrySameKeyRateLimit` 的 `attempts` 统计的是首次失败之后的 10 次重试，因此总记录数为 1 + 10 = 11
+   - 修复后 403 在 Provider 和 Proxy 两层都不会进入同 key 重试，首把 key 只发 1 次后换 key
 
 ### 数据验证
 
@@ -158,13 +159,13 @@ rateLimitSameKeyRetries = 10  // 同一把 key 最多重试 10 次
 ```
 proxy.tryCandidate (proxy.go:1323)
   ↓
-bindKey (proxy.go:1659): 设置 req.Key = result.Key (来自 router)
+bindKey (proxy.go:1684): 设置 req.Key = result.Key (来自 router)
   ↓
 attemptOne
   ↓
 doRequest (proxy.go:536): pv.SendRequest(ctx, req)
   ↓
-anthropic_compatible.Base.SendRequest (anthropic_compatible.go:161-219)
+anthropic_compatible.Base.SendRequest (anthropic_compatible.go:155-237)
   ↓
 检查 req.Key != nil → 直接使用这把 key (line 161-168)
   ↓
@@ -172,11 +173,11 @@ anthropic_compatible.Base.SendRequest (anthropic_compatible.go:161-219)
   ↓
 返回错误到 proxy.tryCandidate
   ↓
-检测到 ErrorTypeRateLimit (proxy.go:1431)
+检测到 ErrorTypeRateLimit (proxy.go:1428)
   ↓
-retrySameKeyRateLimit (proxy.go:1432): 用同一把 key 重试最多 10 次
+retrySameKeyRateLimit (proxy.go:1651): 用同一把 key 重试最多 10 次
   ↓
-所有重试失败后 → swapToOtherKey (proxy.go:1444): 换 key
+所有重试失败后 → swapToOtherKey (proxy.go:1699): 换 key
 ```
 
 ### 关键代码位置
@@ -200,7 +201,7 @@ if key == nil {
 - Base 内部的 rate_limit 重试只会用同一把 key 重试 1 次（line 202-213）
 
 #### 2. Proxy 的 rate_limit 重试逻辑
-**文件**: `backend/internal/proxy/proxy.go:1431-1444`
+**文件**: `backend/internal/proxy/proxy.go:1428-1485`
 
 ```go
 if pe.ErrorType == provider.ErrorTypeRateLimit {
@@ -230,7 +231,7 @@ if pe.ErrorType == provider.ErrorTypeRateLimit {
 - 只有在所有重试失败后，才会调用 `swapToOtherKey` 换 key
 
 #### 3. swapToOtherKey 换 key 逻辑
-**文件**: `backend/internal/proxy/proxy.go:1671-1693`
+**文件**: `backend/internal/proxy/proxy.go:1699-1721`
 
 ```go
 func (e *Engine) swapToOtherKey(c *gin.Context, req *provider.Request, result *router.RouteResult) bool {
@@ -266,37 +267,22 @@ func (e *Engine) swapToOtherKey(c *gin.Context, req *provider.Request, result *r
 
 ---
 
-## 需要检查的点
+## 已确认的检查点
 
 ### 1. `retrySameKeyRateLimit` 方法的实现
 **位置**: `backend/internal/proxy/proxy.go`（需要搜索方法定义）
 
-**问题**：
-- 这个方法具体实现是什么？
-- 为什么会重试这么多次？
-- 重试次数是硬编码的 10 次，还是可配置？
-
-**待确认**：
-```bash
-grep -n "func.*retrySameKeyRateLimit" backend/internal/proxy/proxy.go
-```
+**结论**：方法位于 `proxy.go:1651`，`rateLimitSameKeyRetries` 为硬编码常量 10；当前仅 HTTP 429 会进入该循环。
 
 ### 2. 403 vs 429 的处理差异
 **位置**: `backend/internal/provider/provider.go:442-466`
 
-**问题**：
-- 代码注释多处提到 "429"，但实际错误是 403
-- `ClassifyErrorWithBody` 是否将 403 错误正确分类为 `rate_limit`？
-- 403 和 429 是否应该用不同的重试策略？
+**结论**：普通 403 会被分类为 `auth`，含 quota 关键词且余额守卫健康时才会降级成 `rate_limit`；403 与 429 使用不同重试策略。
 
 **语义差异**：
 - **429 Too Many Requests**：瞬时限流，等待后可能恢复 → 适合同 key 重试
 - **403 Forbidden**：权限/配额问题，通常是 key 级别的限制 → 应该立即换 key
 
-**待确认**：
-```bash
-grep -A 20 "ClassifyErrorWithBody" backend/internal/provider/provider.go | grep -A 5 "403"
-```
 
 ### 3. Relay provider 的 Pool 注入
 **位置**: 
@@ -307,32 +293,32 @@ grep -A 20 "ClassifyErrorWithBody" backend/internal/provider/provider.go | grep 
 - `GenericRelayProvider.SetPool` 会调用 `impl.SetPool(pool)`
 - 通过 Go 方法提升，`RelayOpenAIProvider` 和 `RelayAnthropicProvider` 会继承 `Base.SetPool`
 
-**待确认**：
-- Pool 是否真的被注入到了 Base？
-- 可以通过日志验证：在 `Base.SendRequest` 开头打印 `b.cfg.Pool != nil`
+**结论**：Pool 已通过 `GenericRelayProvider.SetPool` 注入每个协议实现，Relay Anthropic 实现继承 Base 的 `SetPool`；新增 Provider 测试也验证了请求可使用注入的 Pool。
 
-### 4. 为什么是 11 次而不是 12 次（10 + 1 + 1）？
+### 4. 为什么日志是 11 次而不是 20 次？
 **理论计算**：
-- Base 内部重试 1 次 = 2 次请求
-- `retrySameKeyRateLimit` 最多 10 轮
-- 理论最多 = 10 × 2 = 20 次
+- `retrySameKeyRateLimit` 的 10 次是首次失败之后的重试次数
+- access log 的记录单位是 Proxy 的 `attemptOne`，所以是首次 1 次 + 重试 10 次 = 11 条
+- 旧 Anthropic Base 每次还会内部重试 1 次，上游 HTTP 请求数与 access log 条数不同
 
-**实际只有 11 次**：
-- 可能 `retrySameKeyRateLimit` 中途退出
-- 或者某次请求被其他机制拦截
+**修复后的行为**：
+- 403 在 Provider 层直接返回，在 Proxy 层直接换 key，不再对首把 key 做同 key 重试
+- 429 仍按原策略允许同 key 重试
 
 ---
 
 ## 修复方案
 
-### ✅ 方案 A：在 ProviderError 中传递 HTTP 状态码（推荐并实施）
+### ✅ 方案 A：按 HTTP 状态码区分重试策略（已实施）
 
 **核心思路**：
-- 在 `ProviderError` 结构中已有 `StatusCode` 字段
-- 在 `proxy.go:1431` 检查 `pe.StatusCode == 403` 时，立即换 key，不进入 `retrySameKeyRateLimit`
-- 429 仍然允许同 key 重试（应对瞬时限流）
+- `ProviderError` 已有 `StatusCode` 字段，Proxy 直接使用该字段区分策略
+- Proxy 仅对 HTTP 429 进入 `retrySameKeyRateLimit`；403 及其他非 429 `rate_limit` 立即换 key
+- Anthropic compatible Base 的非流式、流式路径仅对 429 做内部同 key 重试，403 直接返回给 Proxy
+- Anthropic compatible Base 上报 KeyPool 后在 `ProviderError.KeyPoolReported` 留下标记，Proxy 只补报尚未上报的错误
+- 去掉 Proxy 403 分支和同 key 重试结束处的额外 `ReportRateLimit`，确保一次 403 只累计一次冷却计数
 
-**修改位置**: `backend/internal/proxy/proxy.go:1431-1444`
+**修改位置**: `backend/internal/proxy/proxy.go:1434-1485`；`backend/internal/provider/anthropic_compatible/anthropic_compatible.go:106-115,213-224`
 
 **修改前**：
 ```go
@@ -358,13 +344,8 @@ if pe.ErrorType == provider.ErrorTypeRateLimit {
 **修改后**：
 ```go
 if pe.ErrorType == provider.ErrorTypeRateLimit {
-    // 403 rate_limit: 配额/权限问题,立即换 key,不同 key 重试
-    // 背景: 403 quota 被 balanceGuardHealthy 降级为 rate_limit 后,不应反复用同一把 key
-    // (2026-08-30: tokenmarket-kiro 403 重试 11 次才换 key 的根因)
-    if pe.StatusCode == http.StatusForbidden {
-        if pool := e.router.Pool(result.ProviderName); pool != nil {
-            pool.ReportRateLimit(result.Key, pe.RetryAfter)
-        }
+    // 只有 HTTP 429 允许同 key 重试；403/其他非 429 直接换 key。
+    if pe.StatusCode != http.StatusTooManyRequests {
         if e.swapToOtherKey(c, req, result) {
             if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
                 return outcomeOK, false, true
@@ -373,8 +354,8 @@ if pe.ErrorType == provider.ErrorTypeRateLimit {
         // 换不到其他 key / 换 key 仍失败 → 继续 failover
         return outcomeContinue, false, true
     }
-    
-    // 429 rate_limit: 瞬时限流,允许同 key 重试(但最多 10 次)
+
+    // 429 rate_limit: 瞬时限流,允许同 key 重试(最多 10 次)
     if e.retrySameKeyRateLimit(c, ctx, req, result, outProviderName, lastErr, entry) {
         return outcomeOK, false, true
     }
@@ -402,9 +383,16 @@ if pe.ErrorType == provider.ErrorTypeRateLimit {
 - ✅ 提高 failover 速度
 - ✅ 不影响 429 的现有重试逻辑
 
+**实现文件**：
+- `backend/internal/proxy/proxy.go`
+- `backend/internal/provider/anthropic_compatible/anthropic_compatible.go`
+- `backend/internal/proxy/proxy_test.go`
+- `backend/internal/provider/anthropic_compatible/anthropic_compatible_test.go`
+
 **影响范围**：
-- 只影响 `ErrorTypeRateLimit` 且 `StatusCode == 403` 的场景
-- 不影响 429、其他错误类型、以及没有 StatusCode 的历史错误
+- `ErrorTypeRateLimit` 只有 HTTP 429 继续同 key 重试
+- HTTP 403 及其他非 429 `rate_limit` 直接换 key；其他错误类型不变
+- Anthropic Base 保留 HTTP 429 和 HTTP 200 内嵌错误的一次重试
 
 **测试验证**：
 - 模拟 403 rate_limit，验证立即切换到另一把 key
@@ -525,13 +513,13 @@ if key == nil {
 }
 ```
 
-### B. Base 的 rate_limit 重试逻辑
+### B. Base 的 rate_limit 重试逻辑（当前）
 ```go
 // anthropic_compatible.go:202-213
 if errType == provider.ErrorTypeRateLimit {
     retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
     b.cfg.Pool.ReportRateLimit(key, retryAfter)
-    if !retried {
+    if shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
         retried = true
         select {
         case <-time.After(rateLimitRetryDelay(retryAfter)):
@@ -542,6 +530,9 @@ if errType == provider.ErrorTypeRateLimit {
     }
 }
 ```
+
+其中 `shouldRetryRateLimitStatus` 只允许 HTTP 429 和 HTTP 200（MiniMax
+内嵌错误）进入 Provider 内部重试；HTTP 403 会立即返回给 Proxy。
 
 ### C. ClassifyErrorWithBody 的 403 处理
 ```go
@@ -560,9 +551,11 @@ case statusCode == http.StatusForbidden:
 
 ## 下一步行动
 
-1. ✅ **确认 `retrySameKeyRateLimit` 的实现** — 找到方法定义 (proxy.go:1623)
+1. ✅ **确认 `retrySameKeyRateLimit` 的实现** — 找到方法定义 (proxy.go:1651)
 2. ✅ **确认 403 错误的实际分类** — 确认为 `rate_limit` (被 balanceGuardHealthy 降级)
 3. ✅ **根因确认** — 403 quota 被降级为 rate_limit 后，进入 10 次同 key 重试循环
-4. ⬜ **实施修复** — 在 ProviderError 中传递 HTTP 状态码，区分 403 和 429
-5. ⬜ **编写测试用例** — 验证 403 立即换 key，429 同 key 重试
-6. ⬜ **部署验证** — 观察线上 access logs 的改善情况
+4. ✅ **实施修复** — Proxy 和 Anthropic Base 两层区分 403/429，403 立即换 key
+5. ✅ **去重冷却上报** — Anthropic compatible Base 用 `KeyPoolReported` 标记已上报错误，Proxy 不再重复累计；403 分支和同 key 重试收尾也不再额外上报
+6. ✅ **编写测试用例** — 覆盖非流式/流式 403、429 保持重试、200 内嵌错误换 key，以及 Provider 已上报时 Proxy 不重复累计
+7. ✅ **提交代码** — 初版 Commit `a21994c` 已推送；本次后续修复随当前提交推送
+8. ⬜ **线上验证** — 观察后续 access logs，确认 403 不再重复同 key 重试

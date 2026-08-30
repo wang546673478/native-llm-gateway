@@ -842,10 +842,10 @@ streamEnd:
 //   - > 2MB: 45s (极大请求)
 func (e *Engine) calculateIdleTimeout(bodySize int) time.Duration {
 	const (
-		kb100  = 100 * 1024
-		kb500  = 500 * 1024
-		mb1    = 1024 * 1024
-		mb2    = 2 * 1024 * 1024
+		kb100 = 100 * 1024
+		kb500 = 500 * 1024
+		mb1   = 1024 * 1024
+		mb2   = 2 * 1024 * 1024
 	)
 
 	switch {
@@ -1121,6 +1121,9 @@ func (e *Engine) reportKeySuccess(result *router.RouteResult) {
 }
 
 func (e *Engine) reportKeyError(result *router.RouteResult, pe *provider.ProviderError) {
+	if pe == nil || pe.KeyPoolReported {
+		return
+	}
 	if pool := e.router.Pool(result.ProviderName); pool != nil && result.Key != nil {
 		switch pe.ErrorType {
 		case provider.ErrorTypeRateLimit:
@@ -1425,28 +1428,28 @@ afterWhitelist:
 		return outcomeFatal, false, true
 	}
 
-	// rate_limit 处理(2026-08-30):区分 403 和 429
-	//   - 403 rate_limit: 配额/权限问题(如 MiniMax quota 被 balanceGuardHealthy 降级),
+	// rate_limit 处理(2026-08-30):区分 429 和其他状态码
+	//   - 非 429 rate_limit(常见为 403 配额/权限问题,也可能是 HTTP 200 内嵌错误),
 	//     立即换 key,不同 key 重试 — 避免用同一把 key 反复请求(tokenmarket-kiro 403
 	//     重试 11 次才换 key 的根因)
 	//   - 429 rate_limit: 瞬时限流,用「同一把 key」重试到 10 次(限流是瞬态,重试同一把
 	//     大概率 429 消失),10 次还限流才标 COOLING 并推进下一把 key
 	if pe.ErrorType == provider.ErrorTypeRateLimit {
-		// 403 rate_limit: 配额/权限问题,立即换 key
-		if pe.StatusCode == http.StatusForbidden {
-			// 标记这把 key 为 COOLING(让后续请求避开它)
-			if pool := e.router.Pool(result.ProviderName); pool != nil && result.Key != nil {
-				pool.ReportRateLimit(result.Key, pe.RetryAfter)
-			}
+		// 非 429 rate_limit(403 配额/权限,以及 200 内嵌限流错误等):
+		// 立即换 key,不进入同 key 重试循环。
+		if pe.StatusCode != http.StatusTooManyRequests {
+			// 本次错误已由 Provider 或 doRequest/doStream 的 reportKeyError 上报。
+			// 这里不要再次 ReportRateLimit,否则一次上游错误会把
+			// CoolingCount 累加两次,过早把 token_plan key 升级为 QE。
 			// 尝试换 key 重试一次
 			if e.swapToOtherKey(c, req, result) {
 				if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
 					return outcomeOK, false, true
 				}
-				pe3 := *lastErr
-				if pe3 == nil {
+				if lastErr == nil || *lastErr == nil {
 					return outcomeContinue, false, true
 				}
+				pe3 := *lastErr
 				// 换 key 后仍是额度类 → token_plan 层记证据,允许降档
 				if isQuotaClass(pe3) && result.Tier == string(keypool.BillingSourceTokenPlan) {
 					return outcomeContinue, true, true
@@ -1461,10 +1464,10 @@ afterWhitelist:
 			return outcomeOK, false, true
 		}
 		// 10 次全 429 → 已 ReportRateLimit(COOLING),推进到下一把 key
-		pe = *lastErr
-		if pe == nil {
+		if lastErr == nil || *lastErr == nil {
 			return outcomeContinue, false, true
 		}
+		pe = *lastErr
 		if !errorIsRetryable(pe) {
 			return outcomeFatal, false, true
 		}
@@ -1473,10 +1476,10 @@ afterWhitelist:
 			if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
 				return outcomeOK, false, true
 			}
-			pe3 := *lastErr
-			if pe3 == nil {
+			if lastErr == nil || *lastErr == nil {
 				return outcomeContinue, false, true
 			}
+			pe3 := *lastErr
 			if isQuotaClass(pe3) && result.Tier == string(keypool.BillingSourceTokenPlan) {
 				return outcomeContinue, true, true
 			}
@@ -1645,8 +1648,9 @@ func (e *Engine) attemptOne(
 }
 
 // retrySameKeyRateLimit 纯 429 限流:用「同一把 key」重试到 rateLimitSameKeyRetries 次。
-// 每次 success → return true。全部还是 429 → ReportRateLimit 标 COOLING(token_plan 连续冷却
-// 自动升级 QE,由 quotacheck poll 接管恢复),return false(调用方推进下一把 key)。
+// 每次 success → return true。全部还是 429 → return false(每次 attemptOne 已由
+// Provider 或 reportKeyError 上报冷却,调用方推进下一把 key;token_plan 连续冷却
+// 升级 QE,由 quotacheck poll 接管恢复)。
 // 同一把 key = result.Key 不变,429 冷却标到真正发请求的这把 key 上(踩坑 #15)。
 func (e *Engine) retrySameKeyRateLimit(
 	c *gin.Context,
@@ -1662,20 +1666,20 @@ func (e *Engine) retrySameKeyRateLimit(
 		if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
 			return true // 重试成功
 		}
-		pe := *lastErr
-		if pe == nil {
+		if lastErr == nil || *lastErr == nil {
 			return false
 		}
+		pe := *lastErr
 		attempts++
-		// 不是纯 429(额度类/不可重试等)→ 不再同 key 重试,返回 false 走统一处理
-		if pe.ErrorType != provider.ErrorTypeRateLimit {
+		// 只有 HTTP 429 才是瞬时限流,允许继续使用同一把 key。
+		// 403 rate_limit(以及缺少/其他状态码的 rate_limit)必须立即返回,
+		// 交给外层换 key,避免把权限/配额错误重复打到同一把 key。
+		if pe.ErrorType != provider.ErrorTypeRateLimit || pe.StatusCode != http.StatusTooManyRequests {
 			return false
 		}
 		if attempts >= rateLimitSameKeyRetries {
-			// 10 次都 429 → 这把 key 被限住 → COOLING(result.Key 不变,标对 key)
-			if pool := e.router.Pool(result.ProviderName); pool != nil {
-				pool.ReportRateLimit(result.Key, pe.RetryAfter)
-			}
+			// 第 10 次 429 已由 Provider 或 reportKeyError 上报。
+			// 这里只结束同 key 重试,避免再次累加 CoolingCount。
 			return false
 		}
 	}

@@ -42,6 +42,8 @@ type fakeProvider struct {
 	err error
 	// Task 5: 按 key ID 区分的错误(换 key 重试用) — 命中时优先于 p.err
 	errByKey map[string]error
+	// beforeError 模拟真实 Provider 在返回错误前先向 KeyPool 上报。
+	beforeError func(*provider.Request, error)
 	// 记录收到的请求
 	gotBody   []byte
 	gotAuth   string
@@ -75,6 +77,9 @@ func (p *fakeProvider) errFor(req *provider.Request) error {
 func (p *fakeProvider) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	p.recordCall(req)
 	if err := p.errFor(req); err != nil {
+		if p.beforeError != nil {
+			p.beforeError(req, err)
+		}
 		return nil, err
 	}
 	hdrs := http.Header{}
@@ -101,6 +106,9 @@ func (p *fakeProvider) SendRequest(ctx context.Context, req *provider.Request) (
 func (p *fakeProvider) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	p.recordCall(req)
 	if err := p.errFor(req); err != nil {
+		if p.beforeError != nil {
+			p.beforeError(req, err)
+		}
 		return nil, nil, err
 	}
 	ch := make(chan *provider.StreamChunk, len(p.streamChunks)+2)
@@ -1473,6 +1481,99 @@ func TestProxy_RateLimit_SwapsKeyInProvider(t *testing.T) {
 	// key-1 重试 10 次全 429 → COOLING → key-2 成功 1 次
 	if want := rateLimitSameKeyRetries + 2; mm.callCount != want {
 		t.Errorf("callCount = %d, want %d (key-1 重试%d次 429 后换 key-2)", mm.callCount, want, rateLimitSameKeyRetries)
+	}
+}
+
+// TestProxy_RateLimit403_SwapsKeyImmediately 回归 403-rate-limit 重试问题：
+// 403 rate_limit 不是瞬时 429，首把 key 失败后必须立即换到下一把 key，
+// 且一次错误只计入一次 CoolingCount。
+func TestProxy_RateLimit403_SwapsKeyImmediately(t *testing.T) {
+	firstErr := &provider.ProviderError{
+		ProviderName: "mm-403", StatusCode: http.StatusForbidden,
+		ErrorType: provider.ErrorTypeRateLimit, Message: "quota limited",
+		KeyPoolReported: true,
+	}
+	mm := &fakeProvider{name: "mm-403", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey:   map[string]error{"1": firstErr},
+		respStatus: http.StatusOK, respBody: `{"id":"mm-403-ok"}`}
+	pool := mkPool("mm-403", []string{"1", "2"}, "token_plan")
+	mm.beforeError = func(req *provider.Request, err error) {
+		pool.ReportRateLimit(req.Key, 0)
+	}
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm}, map[string]*keypool.Pool{
+		"mm-403": pool,
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "mm-403", Model: "m", Priority: 1},
+		}},
+	})
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (403 rate_limit should fail over to key-2); body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mm-403-ok") {
+		t.Fatalf("response = %s, want key-2 success response", w.Body.String())
+	}
+	if mm.callCount != 2 {
+		t.Errorf("callCount = %d, want 2 (key-1 once, then key-2 once; no same-key retry)", mm.callCount)
+	}
+	if mm.gotAuth != "Bearer sk-2" {
+		t.Errorf("final request auth = %q, want Bearer sk-2", mm.gotAuth)
+	}
+
+	var key1, key2 *keypool.Key
+	keys := pool.Keys()
+	for i := range keys {
+		k := keys[i]
+		switch k.ID {
+		case "1":
+			key1 = &k
+		case "2":
+			key2 = &k
+		}
+	}
+	if key1 == nil || key2 == nil {
+		t.Fatalf("pool keys missing after request: key1=%v key2=%v", key1, key2)
+	}
+	if key1.Status != keypool.KeyStatusCooling {
+		t.Errorf("key-1 status = %s, want COOLING", key1.Status)
+	}
+	if key1.CoolingCount != 1 {
+		t.Errorf("key-1 CoolingCount = %d, want 1 (no duplicate ReportRateLimit)", key1.CoolingCount)
+	}
+	if key2.Status != keypool.KeyStatusActive {
+		t.Errorf("key-2 status = %s, want ACTIVE", key2.Status)
+	}
+}
+
+// TestProxy_RateLimitEmbedded200_SwapsKeyImmediately protects providers that
+// return a rate-limit error envelope with HTTP 200 (for example, MiniMax).
+// Such errors must not enter the 429 same-key retry loop.
+func TestProxy_RateLimitEmbedded200_SwapsKeyImmediately(t *testing.T) {
+	mm := &fakeProvider{name: "mm-embedded", proto: provider.ProtocolOpenAI, models: []string{"m"},
+		errByKey: map[string]error{"1": &provider.ProviderError{
+			ProviderName: "mm-embedded", StatusCode: http.StatusOK,
+			ErrorType: provider.ErrorTypeRateLimit, Message: "embedded rate limit"}},
+		respStatus: http.StatusOK, respBody: `{"id":"mm-embedded-ok"}`}
+	p := mkPool("mm-embedded", []string{"1", "2"}, "token_plan")
+	e, _ := buildEngineMulti(t, []*fakeProvider{mm}, map[string]*keypool.Pool{
+		"mm-embedded": p,
+	}, map[string]router.AliasConfig{
+		"x": {Strategy: "priority", Providers: []router.ProviderRoute{
+			{Name: "mm-embedded", Model: "m", Priority: 1},
+		}},
+	})
+
+	w := doProxyRequest(e, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (embedded rate_limit should fail over to key-2); body = %s", w.Code, w.Body.String())
+	}
+	if mm.callCount != 2 {
+		t.Errorf("callCount = %d, want 2 (embedded 200 error must not retry key-1)", mm.callCount)
+	}
+	if mm.gotAuth != "Bearer sk-2" {
+		t.Errorf("final request auth = %q, want Bearer sk-2", mm.gotAuth)
 	}
 }
 

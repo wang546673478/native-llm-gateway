@@ -103,6 +103,26 @@ func rateLimitRetryDelay(retryAfter time.Duration) time.Duration {
 	return retryAfter
 }
 
+// shouldRetryRateLimitStatus reports whether a rate-limit response is safe to
+// retry with the same key inside this provider.  HTTP 429 represents a
+// transient request throttle.  A MiniMax quota error can instead be embedded
+// in an HTTP 200 response (classifyUpstream/ParseMiniMaxBaseResp); that path
+// retains the one-retry guard as well.  A 403 may be downgraded to rate_limit
+// by balanceGuardHealthy, but it is key-scoped quota/permission state and must
+// be returned immediately so the caller can switch keys.
+func shouldRetryRateLimitStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusOK
+}
+
+// newReportedError constructs an error for a failure that this Base has
+// already applied to its KeyPool. The Proxy uses the marker to avoid counting
+// the same upstream response a second time.
+func newReportedError(providerName string, status int, errType provider.ErrorType, msg string, rawErr ...[]byte) *provider.ProviderError {
+	pe := provider.NewError(providerName, status, errType, msg, rawErr...)
+	pe.KeyPoolReported = true
+	return pe
+}
+
 // buildMessagesURL 构造 /v1/messages 端点 URL,自动适配 endpoint 是否已包含 /v1。
 // 若 endpoint 以 /v1 结尾,则拼接 /messages;否则拼接 /v1/messages。
 // 示例: http://x/v1 → http://x/v1/messages, http://x → http://x/v1/messages
@@ -188,13 +208,13 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		if err != nil {
 			errType := provider.ClassifyTransportError(ctx, err)
 			b.cfg.Pool.ReportError(key, string(errType))
-			return nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
+			return nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 		}
 		respBody, readErr := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
 		if readErr != nil {
 			b.cfg.Pool.ReportError(key, string(provider.ErrorTypeConnection)) // io read 失败即连接型 — 与返回的 ErrorTypeConnection 一致
-			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, readErr.Error())
+			return nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeConnection, readErr.Error())
 		}
 		// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
 		// 1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded;P-quota-guard 见 classifyUpstream
@@ -202,12 +222,12 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		if errType == provider.ErrorTypeRateLimit {
 			retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
 			b.cfg.Pool.ReportRateLimit(key, retryAfter)
-			if !retried {
+			if shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
 				retried = true
 				select {
 				case <-time.After(rateLimitRetryDelay(retryAfter)):
 				case <-ctx.Done():
-					return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+					return nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
 				}
 				continue
 			}
@@ -215,7 +235,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			b.cfg.Pool.ReportError(key, string(errType))
 		}
 		if errType != "" {
-			return nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
+			return nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
 		}
 
 		b.cfg.Pool.ReportSuccess(key)
@@ -294,7 +314,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		if err != nil {
 			errType := provider.ClassifyTransportError(ctx, err)
 			b.cfg.Pool.ReportError(key, string(errType))
-			return nil, nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
+			return nil, nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 		}
 
 		if httpResp.StatusCode >= 400 {
@@ -305,19 +325,19 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			if errType == provider.ErrorTypeRateLimit {
 				retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
 				b.cfg.Pool.ReportRateLimit(key, retryAfter)
-				if !retried {
+				if shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
 					retried = true
 					select {
 					case <-time.After(rateLimitRetryDelay(retryAfter)):
 					case <-ctx.Done():
-						return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+						return nil, nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
 					}
 					continue
 				}
 			} else if errType != "" {
 				b.cfg.Pool.ReportError(key, string(errType))
 			}
-			return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
+			return nil, nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
 		}
 
 		// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
@@ -343,19 +363,19 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			}
 			if errType == provider.ErrorTypeRateLimit {
 				b.cfg.Pool.ReportRateLimit(key, 0)
-				if !retried {
+				if shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
 					retried = true
 					select {
 					case <-time.After(rateLimitRetryDelay(0)):
 					case <-ctx.Done():
-						return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+						return nil, nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
 					}
 					continue
 				}
 			} else {
 				b.cfg.Pool.ReportError(key, string(errType))
 			}
-			return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+			return nil, nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
 				fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
 		}
 		// P-sse-stream-error: 上游 200 之后在流里发错误事件然后收流。
@@ -365,7 +385,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			httpResp.Body.Close()
 			errType := provider.ClassifySSEStreamError(se)
 			b.cfg.Pool.ReportError(key, string(errType))
-			return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+			return nil, nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
 				fmt.Sprintf("upstream stream error %s: %s", se.Code, se.Message), peeked)
 		}
 		// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
@@ -560,12 +580,12 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 }
 
 // ListModels 调用上游模型列表端点，支持两种格式:
-// 1. New API (rightapi.ai 等中转站): GET /api/models
-//    Headers: Authorization: Bearer {key}
-//    Response: {"success": true, "data": {"1": ["model-1"], "2": ["model-2"]}}
-// 2. Anthropic 标准 API: GET /v1/models
-//    Headers: x-api-key: {key}, anthropic-version: 2023-06-01
-//    Response: {"data": [{"id": "claude-opus-5", "type": "model", ...}, ...]}
+//  1. New API (rightapi.ai 等中转站): GET /api/models
+//     Headers: Authorization: Bearer {key}
+//     Response: {"success": true, "data": {"1": ["model-1"], "2": ["model-2"]}}
+//  2. Anthropic 标准 API: GET /v1/models
+//     Headers: x-api-key: {key}, anthropic-version: 2023-06-01
+//     Response: {"data": [{"id": "claude-opus-5", "type": "model", ...}, ...]}
 //
 // 先尝试 /api/models (New API),失败后降级到 /v1/models (Anthropic 标准)。
 func (b *Base) ListModels(ctx context.Context) ([]string, error) {

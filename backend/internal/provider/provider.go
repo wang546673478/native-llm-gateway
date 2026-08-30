@@ -407,6 +407,9 @@ type ProviderError struct {
 	Message      string
 	RetryAfter   time.Duration
 	RawError     []byte
+	// KeyPoolReported 表示 Provider 已将本次失败上报给 KeyPool。
+	// Proxy 看到该标记后不再重复上报，避免一次上游错误累计两次冷却/错误计数。
+	KeyPoolReported bool
 }
 
 func (e *ProviderError) Error() string {

@@ -403,7 +403,9 @@ func markKeyHealthy(t *testing.T, pool *keypool.Pool) {
 // TestSendRequest_BalanceGuardQuotaToRateLimit P-quota-guard:
 // 有余额(99%)却收到 MiniMax 2056(套餐耗尽) → 降级 rate_limit,key 不被误杀成 QUOTA_EXCEEDED
 func TestSendRequest_BalanceGuardQuotaToRateLimit(t *testing.T) {
+	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
 		w.Write([]byte(`{"base_resp":{"status_code":2056,"status_msg":"已达到 Token Plan 用量上限"}}`))
@@ -428,6 +430,9 @@ func TestSendRequest_BalanceGuardQuotaToRateLimit(t *testing.T) {
 	}
 	if pe.ErrorType != provider.ErrorTypeRateLimit {
 		t.Errorf("error type = %q, want rate_limit (balance guard downgrade)", pe.ErrorType)
+	}
+	if requests != 2 {
+		t.Errorf("upstream requests = %d, want 2 (HTTP 200 MiniMax base_resp keeps one retry)", requests)
 	}
 	if got := pool.Status().QuotaExceededKeys; got != 0 {
 		t.Errorf("quota_exceeded keys = %d, want 0 (key must not be killed)", got)
@@ -506,6 +511,52 @@ func TestSendRequest_RetryOnRateLimit(t *testing.T) {
 	}
 	if got := pool.Status().QuotaExceededKeys; got != 0 {
 		t.Errorf("quota_exceeded keys = %d, want 0", got)
+	}
+}
+
+// TestSendRequest_403RateLimitDoesNotRetrySameKey P-403-rate-limit:
+// 403 配额响应可能被 balanceGuardHealthy 降级成 rate_limit,但它不是瞬时
+// 429,Provider 层必须立即返回给 Proxy 换 key,不能在同一把 key 上再发请求。
+func TestSendRequest_403RateLimitDoesNotRetrySameKey(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"Token Plan 用量上限"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	markKeyHealthy(t, pool) // 403 quota 会被守卫降级为 rate_limit
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	resp, err := b.SendRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[]}`),
+	})
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeRateLimit {
+		t.Fatalf("error type = %q, want rate_limit", pe.ErrorType)
+	}
+	if pe.StatusCode != http.StatusForbidden {
+		t.Errorf("status code = %d, want %d", pe.StatusCode, http.StatusForbidden)
+	}
+	if !pe.KeyPoolReported {
+		t.Error("KeyPoolReported = false, want true")
+	}
+	if requests != 1 {
+		t.Errorf("upstream requests = %d, want 1 (403 must not retry same key)", requests)
+	}
+	if got := pool.KeyPtrs()[0].CoolingCount; got != 1 {
+		t.Errorf("cooling count = %d, want 1 (one upstream failure)", got)
 	}
 }
 
@@ -592,6 +643,54 @@ func TestSendStreamRequest_GuardDowngradeThenRetry(t *testing.T) {
 	}
 	if got := pool.Status().QuotaExceededKeys; got != 0 {
 		t.Errorf("quota_exceeded keys = %d, want 0", got)
+	}
+}
+
+// TestSendStreamRequest_403RateLimitDoesNotRetrySameKey P-403-rate-limit:
+// 流式请求收到 HTTP 403 时同样应立即返回,不能进入同 key 的限流重试。
+func TestSendStreamRequest_403RateLimitDoesNotRetrySameKey(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"Token Plan 用量上限"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool(t)
+	markKeyHealthy(t, pool)
+	b := NewBase(Config{Name: "test", Endpoint: upstream.URL, Timeout: 5 * time.Second, Pool: pool})
+
+	ch, resp, err := b.SendStreamRequest(context.Background(), &provider.Request{
+		Method: "POST", Path: "/v1/messages",
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"m","max_tokens":1,"messages":[],"stream":true}`),
+	})
+	if resp != nil {
+		t.Errorf("resp = %+v, want nil", resp)
+	}
+	if ch != nil {
+		t.Errorf("channel = %v, want nil", ch)
+	}
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want *provider.ProviderError", err)
+	}
+	if pe.ErrorType != provider.ErrorTypeRateLimit {
+		t.Fatalf("error type = %q, want rate_limit", pe.ErrorType)
+	}
+	if pe.StatusCode != http.StatusForbidden {
+		t.Errorf("status code = %d, want %d", pe.StatusCode, http.StatusForbidden)
+	}
+	if !pe.KeyPoolReported {
+		t.Error("KeyPoolReported = false, want true")
+	}
+	if requests != 1 {
+		t.Errorf("upstream requests = %d, want 1 (403 must not retry same key)", requests)
+	}
+	if got := pool.KeyPtrs()[0].CoolingCount; got != 1 {
+		t.Errorf("cooling count = %d, want 1 (one upstream failure)", got)
 	}
 }
 
