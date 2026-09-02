@@ -29,24 +29,24 @@ func TestKeyStatus_QuotaExceededSkipped(t *testing.T) {
 	// 构造 3 把 key,前两把标记为 QUOTA_EXCEEDED
 	keys := []*keypool.Key{
 		{
-			ID:           "1",
-			Key:          "sk-test-1",
-			ProviderName: "provider1",
-			Status:       keypool.KeyStatusQuotaExceeded,
+			ID:            "1",
+			Key:           "sk-test-1",
+			ProviderName:  "provider1",
+			Status:        keypool.KeyStatusQuotaExceeded,
 			BillingSource: string(keypool.BillingSourceAPI),
 		},
 		{
-			ID:           "2",
-			Key:          "sk-test-2",
-			ProviderName: "provider1",
-			Status:       keypool.KeyStatusQuotaExceeded,
+			ID:            "2",
+			Key:           "sk-test-2",
+			ProviderName:  "provider1",
+			Status:        keypool.KeyStatusQuotaExceeded,
 			BillingSource: string(keypool.BillingSourceAPI),
 		},
 		{
-			ID:           "3",
-			Key:          "sk-test-3",
-			ProviderName: "provider1",
-			Status:       keypool.KeyStatusActive,
+			ID:            "3",
+			Key:           "sk-test-3",
+			ProviderName:  "provider1",
+			Status:        keypool.KeyStatusActive,
 			BillingSource: string(keypool.BillingSourceAPI),
 		},
 	}
@@ -114,18 +114,18 @@ func TestKeyStatus_CoolingKeySkipped(t *testing.T) {
 	// key1 冷却中(还有 5 分钟), key2 正常
 	keys := []*keypool.Key{
 		{
-			ID:           "1",
-			Key:          "sk-test-1",
-			ProviderName: "provider1",
-			Status:       keypool.KeyStatusCooling,
-			CoolingUntil: now.Add(5 * time.Minute),
+			ID:            "1",
+			Key:           "sk-test-1",
+			ProviderName:  "provider1",
+			Status:        keypool.KeyStatusCooling,
+			CoolingUntil:  now.Add(5 * time.Minute),
 			BillingSource: string(keypool.BillingSourceAPI),
 		},
 		{
-			ID:           "2",
-			Key:          "sk-test-2",
-			ProviderName: "provider1",
-			Status:       keypool.KeyStatusActive,
+			ID:            "2",
+			Key:           "sk-test-2",
+			ProviderName:  "provider1",
+			Status:        keypool.KeyStatusActive,
 			BillingSource: string(keypool.BillingSourceAPI),
 		},
 	}

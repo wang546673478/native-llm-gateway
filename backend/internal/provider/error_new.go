@@ -1,5 +1,7 @@
 package provider
 
+import "net/http"
+
 // NewError 构造 *ProviderError。
 //
 // 单一职责:anthropic_compatible / google 两个 base 此前各有一份字节相同的
@@ -22,3 +24,20 @@ func NewError(providerName string, status int, errType ErrorType, msg string, ra
 	return pe
 }
 
+// WithUpstreamHeaders attaches an owned copy of the HTTP response headers to
+// an error. The copy prevents later transport or retry mutations from changing
+// the final response contract.
+func WithUpstreamHeaders(pe *ProviderError, headers http.Header) *ProviderError {
+	if pe != nil {
+		if headers == nil {
+			// A custom RoundTripper may legally return a response with no header
+			// map. Preserve the fact that an HTTP response was received so relay
+			// error handling can still return its status/body instead of turning
+			// it into a synthetic 502 transport failure.
+			pe.UpstreamHeaders = make(http.Header)
+		} else {
+			pe.UpstreamHeaders = headers.Clone()
+		}
+	}
+	return pe
+}

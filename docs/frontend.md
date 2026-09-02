@@ -164,13 +164,18 @@ Gateway Key 是客户端访问代理端点时使用的凭证。创建时由后�
 `provider_api_keys`；短于 8 个字符的值不会被同步。删除中转站还会清理其模型面归属、路由
 顺序和相关上游 Key。
 
-当前计费来源存在契约问题：前端下拉提交的是枚举对象键，而中转站 Key 同步代码固定写入
-`api`。在修复前不能依靠此字段把中转站 Key 放入 `token_plan` 或 `free` 层。
+中转站 UI 的 `billing_source` 选项为 `token_plan`、`api`、`free`；动态加载时会登记到
+face/vendor，并作为新同步 Provider Key 的默认值，空值默认 `api`。运行时 KeyPool 以每把
+key 自身的 `BillingSource` 调度，因此已有同后缀 key 不会因站点 reload 自动改写 key 或计费层。
+修改后需执行站点 reload；若要改变旧 key 的 tier，先显式更新或删除并重建，再从 Provider/
+Access Log 核对候选层和实际 key。当前 Provider Keys 页面没有 relay key 的编辑入口，不要
+直接在未备份的生产数据库中改值。
 
-协议控件也超出了后端当前可靠能力：Google 虽可选择，但 relay 构造器会拒绝加载；
-`multi` 模式虽可保存，运行时仍存在非主协议路由、冷启动 Pool 注入和模型面隔离缺口。
-当前只应创建名称互不冲突的 `single` 站点，并选择 OpenAI 或 Anthropic；同一上游的两个
-协议面应建成两个独立站点。完整限制见 [`relay-stations.md`](relay-stations.md)。
+协议控件仍超出当前生产承诺范围：Google 虽可选择，但 relay 构造器会拒绝加载；`multi`
+模式的 face protocol、pool/endpoint 回退和未知 path 门禁已有工作树实现及针对性测试，但
+尚未完成真实 DB、热重载和并发生产矩阵验收。当前只应创建名称互不冲突的 `single` 站点，
+并选择 OpenAI 或 Anthropic；同一上游的两个协议面应建成两个独立站点。完整限制见
+[`relay-stations.md`](relay-stations.md)。
 
 ### 5.2 路由 `/routing`
 
@@ -293,9 +298,12 @@ metadata、请求/响应 body，并可在人类可读和原始 JSON 之间切换
 5. Gateway Key TPM 当前只记账不拒绝；`default_model` 更新不持久化，CRUD 重载还会丢失
    内存默认模型。
 6. AdminUsers 的锁定字段和解锁请求与后端不匹配。
-7. RelayStations 的计费来源选择与中转站 Key 同步逻辑不匹配，运行时仍固定为 `api`。
+7. RelayStations 的计费来源后端运行时已支持 `token_plan|api|free`、station 默认层和新同步
+   key；KeyPool 按每把 key 调度，旧 key 不会因重复同步自动改层，修改后需 reload 并核对
+   候选顺序，必要时显式更新/重建旧 key。
 8. RelayStations 仍提供 Google 选项，但后端构造器会拒绝加载。
-9. RelayStations 的 `multi` 模式表面可选，当前跨协议路由、冷启动 Pool 和模型面隔离不可靠。
+9. RelayStations 的 `multi` 模式已有工作树 face/protocol/pool/path 修复和针对性测试，但尚未
+   完成真实 DB/热重载/并发生产矩阵验收；生产仍建议使用 `single`。
 10. Routing 页面没有 `free` 层，也不能编辑 catch-all 或默认策略。
 11. ProviderKeys 页面没有编辑、启停或手动标记额度耗尽操作。
 12. Access Logs 标题含“24h”，但只有统计徽标是 24h，列表查询范围由实际保留数据决定。

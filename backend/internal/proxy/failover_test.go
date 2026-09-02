@@ -409,7 +409,6 @@ func newTestManager(t *testing.T, providers ...provider.Provider) *provider.Mana
 	return mgr
 }
 
-
 // newTestPool 构造测试用 Pool (单个 key)
 func newTestPool(providerName string, keyCount int) *keypool.Pool {
 	return newTestPoolWithKeys(providerName, keyCount)
@@ -448,9 +447,12 @@ type fakeResponseWriter struct {
 	body       []byte
 }
 
-func (w *fakeResponseWriter) Header() http.Header              { return w.header }
-func (w *fakeResponseWriter) Write(b []byte) (int, error)      { w.body = append(w.body, b...); return len(b), nil }
-func (w *fakeResponseWriter) WriteHeader(statusCode int)       { w.statusCode = statusCode }
+func (w *fakeResponseWriter) Header() http.Header { return w.header }
+func (w *fakeResponseWriter) Write(b []byte) (int, error) {
+	w.body = append(w.body, b...)
+	return len(b), nil
+}
+func (w *fakeResponseWriter) WriteHeader(statusCode int)        { w.statusCode = statusCode }
 func (w *fakeResponseWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
 func (w *fakeResponseWriter) Status() int                       { return w.statusCode }
 func (w *fakeResponseWriter) Size() int                         { return len(w.body) }

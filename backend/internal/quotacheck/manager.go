@@ -75,13 +75,13 @@ type PoolsRef struct {
 }
 
 func NewPoolsRef(initial map[string]*keypool.Pool) *PoolsRef {
-	return &PoolsRef{pools: initial}
+	return &PoolsRef{pools: clonePools(initial)}
 }
 
 func (r *PoolsRef) Set(pools map[string]*keypool.Pool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pools = pools
+	r.pools = clonePools(pools)
 }
 
 func (r *PoolsRef) Get() map[string]*keypool.Pool {
@@ -272,7 +272,21 @@ func (m *Manager) Pools() *PoolsRef { return m.pools }
 func (r *PoolsRef) SwapPools(newMap map[string]*keypool.Pool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pools = newMap
+	r.pools = clonePools(newMap)
+}
+
+// clonePools keeps the map owned by PoolsRef.  Pool pointers are intentionally
+// shared, but the map itself must be immutable after publication so a caller
+// assembling a replacement snapshot cannot race the worker's Get iteration.
+func clonePools(src map[string]*keypool.Pool) map[string]*keypool.Pool {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]*keypool.Pool, len(src))
+	for name, pool := range src {
+		dst[name] = pool
+	}
+	return dst
 }
 
 // rescanExisting 冷启动:把已有 QUOTA_EXCEEDED 的 key 立即入堆

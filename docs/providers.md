@@ -147,8 +147,8 @@ key 可能不一致。
   `QUOTA_EXCEEDED`，下一次请求会重新试探。
 - 该 probe 保护不覆盖 `ReportRateLimit` 的升级旁路：`token_plan` key 连续第 3 次
   `rate_limit` 会直接进入 `QUOTA_EXCEEDED`，且当前不会触发 probe 调度回调。无 balancer
-  的此类 key 可能需要重启、重建 Pool 或外部状态恢复；动态中转站自动创建的 key 固定为
-  `api`，正常路径不会触发这一例外。
+  的此类 key 可能需要重启、重建 Pool 或外部状态恢复；动态中转站自动创建的 key 继承站点
+  `billing_source`（未填写时为 `api`），正常 `api` 路径不会触发这一例外。
 - `token_plan`、`api`、`free` 是跨 Provider 的固定层级，不等同于 key 状态。
 - 熔断器按 key 隔离，内置厂商从该 vendor 的 Provider 配置读取熔断参数。
 - 动态中转站不在 `config.providers` 中，因此目前拿不到厂商级熔断配置；它仍有 key

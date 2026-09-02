@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -39,6 +40,16 @@ type Config struct {
 type Base struct {
 	cfg    Config
 	client *http.Client
+	pool   atomic.Pointer[keypool.Pool]
+}
+
+// newReportedError marks an error after this provider has applied the
+// corresponding result to its key pool.  The proxy uses the marker to avoid
+// counting one upstream response twice.
+func newReportedError(providerName string, status int, errType provider.ErrorType, msg string, rawErr ...[]byte) *provider.ProviderError {
+	pe := provider.NewError(providerName, status, errType, msg, rawErr...)
+	pe.KeyPoolReported = true
+	return pe
 }
 
 // NewBase 构造 Base
@@ -50,24 +61,29 @@ func NewBase(cfg Config) *Base {
 	if cfg.StreamTimeoutFloor <= 0 {
 		cfg.StreamTimeoutFloor = 120 * time.Second // google 协议默认 2 分钟
 	}
-	return &Base{
+	b := &Base{
 		cfg:    cfg,
 		client: &http.Client{Timeout: timeout},
 	}
+	b.pool.Store(cfg.Pool)
+	return b
 }
+
+func (b *Base) keyPool() *keypool.Pool { return b.pool.Load() }
 
 // SendRequest POST {endpoint}/models/{model}:generateContent
 // 鉴权: x-goog-api-key header(官方推荐;不用 ?key= query 是为了不让 key 进 URL 日志)
 // body 原样透传(Gateway 已经抽出了 model,这里直接从 body 找 model)
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
-	if b.cfg.Pool == nil {
+	pool := b.keyPool()
+	if pool == nil {
 		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 优先用路由层已 acquire 的 key(双 acquire 会标错冷却 key)
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolGoogle))
+		key, err = pool.AcquireForProtocol(string(provider.ProtocolGoogle))
 		if err != nil {
 			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
@@ -90,15 +106,20 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	httpResp, err := b.client.Do(httpReq)
 	if err != nil {
 		errType := provider.ClassifyTransportError(ctx, err)
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		b.cfg.Pool.ReportError(key, string(provider.ErrorTypeConnection)) // io read 失败即连接型 — 与返回的 ErrorTypeConnection 一致
-		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
+		errType := provider.ClassifyTransportError(ctx, err)
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -109,35 +130,45 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 			// (核心源 provider.ParseRetryAfter;google 之前丢弃头部用 0)。
 			// 注:google 不做 in-provider 重试(与 openai 同),只用于冷却上报。
 			retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
-			b.cfg.Pool.ReportRateLimit(key, retryAfter)
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportRateLimit(key, retryAfter)
+			}
 		} else {
-			b.cfg.Pool.ReportError(key, string(errType))
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
 		}
-		return nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+		return nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
 			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
 	}
 
-	b.cfg.Pool.ReportSuccess(key)
+	keyPoolReported := false
+	if provider.ShouldReportKeyPool(ctx, provider.ErrorType("")) {
+		pool.ReportSuccess(key)
+		keyPoolReported = true
+	}
 	usage := parseGoogleUsage(body)
 
 	return &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
-		Body:       body,
-		Usage:      usage,
+		StatusCode:      httpResp.StatusCode,
+		Headers:         httpResp.Header,
+		Body:            body,
+		Usage:           usage,
+		KeyPoolReported: keyPoolReported,
 	}, nil
 }
 
 // SendStreamRequest 流式 Google 请求
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
-	if b.cfg.Pool == nil {
+	pool := b.keyPool()
+	if pool == nil {
 		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolGoogle))
+		key, err = pool.AcquireForProtocol(string(provider.ProtocolGoogle))
 		if err != nil {
 			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
@@ -163,8 +194,10 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		errType := provider.ClassifyTransportError(ctx, err)
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -174,15 +207,23 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 		if errType == provider.ErrorTypeRateLimit {
 			retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
-			b.cfg.Pool.ReportRateLimit(key, retryAfter)
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportRateLimit(key, retryAfter)
+			}
 		} else {
-			b.cfg.Pool.ReportError(key, string(errType))
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
 		}
-		return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+		return nil, nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
 			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
 	}
 
-	b.cfg.Pool.ReportSuccess(key)
+	keyPoolReported := false
+	if provider.ShouldReportKeyPool(ctx, provider.ErrorType("")) {
+		pool.ReportSuccess(key)
+		keyPoolReported = true
+	}
 
 	ch := make(chan *provider.StreamChunk, 16)
 	go func() {
@@ -220,8 +261,9 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	}()
 
 	return ch, &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
+		StatusCode:      httpResp.StatusCode,
+		Headers:         httpResp.Header,
+		KeyPoolReported: keyPoolReported,
 	}, nil
 }
 
@@ -235,12 +277,10 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolGoogle)); err == nil {
-			req.Header.Set("x-goog-api-key", k.Key)
-			defer b.cfg.Pool.ReportSuccess(k)
-		}
-	}
+	// HealthCheck is endpoint liveness only. Do not acquire a key or report a
+	// synthetic success: a 401/405 proves the endpoint is reachable but says
+	// nothing about any configured key, and touching the pool here can rotate or
+	// mutate key state before a real request is made.
 	resp, err := b.client.Do(req)
 	if err != nil {
 		return err
@@ -255,15 +295,16 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 
 // ListModels GET {endpoint}/models,返回 models/* 去前缀后的模型 id。
 func (b *Base) ListModels(ctx context.Context) ([]string, error) {
+	pool := b.keyPool()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimRight(b.cfg.Endpoint, "/")+"/models", nil)
 	if err != nil {
 		return nil, err
 	}
-	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolGoogle)); err == nil {
+	if pool != nil {
+		if k, err := pool.AcquireForProtocol(string(provider.ProtocolGoogle)); err == nil {
 			req.Header.Set("x-goog-api-key", k.Key)
-			defer b.cfg.Pool.ReportSuccess(k)
+			defer pool.ReportSuccess(k)
 		}
 	}
 	resp, err := b.client.Do(req)
@@ -297,7 +338,7 @@ func (b *Base) Close() error {
 
 // SetPool P30:让 Server 把从 DB 读出来的 Pool 注入到 Base
 func (b *Base) SetPool(p *keypool.Pool) {
-	b.cfg.Pool = p
+	b.pool.Store(p)
 }
 
 // buildEndpoint 拼接 URL: {endpoint}/models/{model}:generateContent?key={apiKey}

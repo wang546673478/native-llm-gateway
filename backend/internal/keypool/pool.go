@@ -376,6 +376,10 @@ func (p *Pool) ReportRateLimit(k *Key, retryAfter time.Duration) {
 //   - quota_exceeded → P68: 走 quota restore 路径(QUOTA_EXCEEDED + worker 探测)
 //   - 其他 → 仅累计计数
 func (p *Pool) ReportError(k *Key, errType string) {
+	// 客户端取消不代表上游或 key 故障，不参与错误计数、冷却或熔断。
+	if ErrorType(errType) == ErrorTypeClientDisconnected {
+		return
+	}
 	p.mu.Lock()
 	now := time.Now()
 	k.ErrorCount++
@@ -579,7 +583,6 @@ func (p *Pool) EarliestKeyTime() time.Time {
 	}
 	return t
 }
-
 
 // MutateKey 在持有 p.mu(写锁)下安全改单把 key 的字段。
 // 低耦合修复:quotacheck 轮询此前直接写 k.Status/k.Remaining/k.QuotaZeroStreak

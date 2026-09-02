@@ -16,13 +16,14 @@ package keypool
 type ErrorType string
 
 const (
-	ErrorTypeRateLimit      ErrorType = "rate_limit"      // 429:限流(计费率),不触发熔断
-	ErrorTypeAuth           ErrorType = "auth"            // 401/403 auth:key 本身问题 → 冷却
-	ErrorTypeInvalidRequest ErrorType = "invalid_request" // 400:请求内容不支持,只计数
-	ErrorTypeServerError    ErrorType = "server_error"    // 5xx:熔断计数
-	ErrorTypeTimeout        ErrorType = "timeout"         // 超时:熔断计数
-	ErrorTypeConnection     ErrorType = "connection"      // 连接/网络错误:熔断计数
-	ErrorTypeQuotaExceeded  ErrorType = "quota_exceeded"  // 配额耗尽:标 QE 等 poll 恢复
+	ErrorTypeRateLimit          ErrorType = "rate_limit"          // 429:限流(计费率),不触发熔断
+	ErrorTypeAuth               ErrorType = "auth"                // 401/403 auth:key 本身问题 → 冷却
+	ErrorTypeInvalidRequest     ErrorType = "invalid_request"     // 400:请求内容不支持,只计数
+	ErrorTypeServerError        ErrorType = "server_error"        // 5xx:熔断计数
+	ErrorTypeTimeout            ErrorType = "timeout"             // 超时:熔断计数
+	ErrorTypeConnection         ErrorType = "connection"          // 连接/网络错误:熔断计数
+	ErrorTypeClientDisconnected ErrorType = "client_disconnected" // 客户端取消:不属于 key/upstream 故障
+	ErrorTypeQuotaExceeded      ErrorType = "quota_exceeded"      // 配额耗尽:标 QE 等 poll 恢复
 
 	// breakerErrs 触发 per-key 熔断的错误类型集合(circuit 默认可计数集合同一个集合)
 )

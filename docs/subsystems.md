@@ -92,8 +92,9 @@ Pool 构建规则：
 - token-plan Key 连续进入冷却 3 次后升级为 `QUOTA_EXCEEDED`。
 - 上述第 3 次 `rate_limit` 升级不会检查 balancer，也不会调用 `OnQuotaExceeded` 或
   `QuotaRecoveryProbe`。因此手工放入 token-plan 层且没有 balancer 的 Key 可能一直停在
-  `QUOTA_EXCEEDED`，直到 Pool 重建、进程重启或其他外部恢复路径介入。自动管理的 relay Key
-  当前固定属于 `api` 层，正常不会进入这个分支。
+  `QUOTA_EXCEEDED`，直到 Pool 重建、进程重启或其他外部恢复路径介入。动态 relay 新同步的
+  Key 继承站点 `billing_source`（未填写时为 `api`）；已有 Key 的计费层不会因重复同步自动
+  覆盖，需显式更新或重建后才会改变。
 - `auth`：固定冷却 5 分钟。
 - `quota_exceeded`：有 balance 恢复通道的 Pool 标记为 `QUOTA_EXCEEDED`；没有 balancer 的 Pool 在该分支只计数，避免进入无法恢复的永久死状态。
 - `invalid_request`：只累计错误，不改变可用状态。

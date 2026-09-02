@@ -250,6 +250,9 @@ sqlite3 data/gateway.db '.backup gateway-backup.db'
 | `gateway_requests_total` | 按 provider/status/error_type 的请求与错误率 |
 | `gateway_tokens_total` | 输入/输出 token 趋势 |
 | `gateway_request_duration_seconds` | 延迟分布 |
+| `gateway_stream_ttft_seconds` | relay 流首个 body/ping/data 延迟，按 provider/model/请求规模分层 |
+| `gateway_relay_events_total` | relay 候选、首包超时、响应提交、流中断和透明性门禁事件 |
+| `gateway_relay_active_upstreams` | 当前 relay 上游调用/流数量，用于发现连接未释放 |
 | `gateway_quota_probe_total` | quota 恢复探测结果 |
 | `gateway_quota_poll_total` | 余额轮询结果 |
 | `gateway_quota_key_status_transitions_total` | key 状态变化 |
@@ -269,6 +272,46 @@ CONFIG_FILE=/path/to/config.yaml \
 建议对就绪失败、5xx/timeout/connection 错误率、持续增长的 pending probes、磁盘空间和
 PostgreSQL 连接耗尽告警。不要只看最终 200：流式上游可在 HTTP 200 内发送结构化失败事件，
 应结合 access log 的 `error_type` 和应用日志判断。
+
+调整 `retry.relay_first_byte_timeout` 前，应分别查看冷/热请求以及各模型、请求规模的 TTFT
+P50/P95/P99。默认 180s 是首轮保护值；预算到期只会切换尚未提交正文的 relay 候选，收到
+ping/data 后该流已承诺且不再切换。修改该配置后需要重启 Gateway。
+
+relay 灰度看板至少加入：
+
+```promql
+# 分 provider/请求规模/阶段的 1h TTFT P99
+histogram_quantile(
+  0.99,
+  sum by (le, provider, model, request_size, phase) (
+    rate(gateway_stream_ttft_seconds_bucket[1h])
+  )
+)
+
+# headers 前与 headers 后正文静默的首包预算触发量
+sum by (provider, stage) (
+  increase(gateway_relay_events_total{event="first_byte_timeout"}[15m])
+)
+
+# 已提交流的中断原因
+sum by (provider, stage) (
+  increase(gateway_relay_events_total{event="stream_interrupted"}[15m])
+)
+
+# 当前活动上游；请求低谷仍持续不降需要排查泄漏
+max by (provider) (gateway_relay_active_upstreams)
+```
+
+以下是发布硬门禁，任一结果大于 0 应立即停止灰度并回滚：
+
+```promql
+sum(increase(gateway_relay_events_total{event="body_mismatch"}[5m])) or vector(0)
+sum(increase(gateway_relay_events_total{event="switch_after_response_committed"}[5m])) or vector(0)
+```
+
+取消后的额外候选数目前记录在 zap 的 `candidate chain canceled` 摘要中，字段必须保持
+`post_cancel_candidate_count=0`。同一 trace 已取消后若仍出现新的候选日志，同样属于发布
+阻断。`client_gone` 本身不能要求为 0：真实客户端取消或测首字时主动终止 curl 都会产生它。
 
 ## 日志与数据保留
 

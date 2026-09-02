@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const testYamlHead = `
@@ -42,6 +43,23 @@ func TestLoad_CatchAllEmptyRule(t *testing.T) {
 	}
 	if len(cfg.Routing.CatchAll.Providers) != 0 || cfg.Routing.CatchAll.TargetModel != "" {
 		t.Errorf("catch_all = %+v, want empty rule", cfg.Routing.CatchAll)
+	}
+}
+
+func TestLoad_RelayFirstByteTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := testYamlHead + "retry:\n  relay_first_byte_timeout: 180s\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Retry.RelayFirstByteTimeout != 180*time.Second {
+		t.Fatalf("relay_first_byte_timeout = %v, want 180s", cfg.Retry.RelayFirstByteTimeout)
 	}
 }
 

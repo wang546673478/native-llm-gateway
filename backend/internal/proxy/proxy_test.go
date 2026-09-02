@@ -591,6 +591,30 @@ func TestCopyResponseHeadersStripsHopByHop(t *testing.T) {
 	}
 }
 
+func TestCopyResponseHeaders_CaseInsensitiveConnectionNomination(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	src := http.Header{
+		"connection":    {"x-lower-hop, X-Another-Hop"},
+		"x-lower-hop":   {"must-not-forward"},
+		"X-Another-Hop": {"must-not-forward"},
+		"x-end-to-end":  {"kept"},
+	}
+	copyResponseHeaders(c, src)
+
+	if got := c.Writer.Header().Get("x-lower-hop"); got != "" {
+		t.Fatalf("lower-case Connection nomination leaked header: %q", got)
+	}
+	if got := c.Writer.Header().Get("X-Another-Hop"); got != "" {
+		t.Fatalf("mixed-case Connection nomination leaked header: %q", got)
+	}
+	if got := c.Writer.Header().Get("x-end-to-end"); got != "kept" {
+		t.Fatalf("ordinary response header was not preserved: %q", got)
+	}
+}
+
 // silence unused if some imports trimmed
 var _ = json.NewEncoder
 var _ = bytes.NewReader

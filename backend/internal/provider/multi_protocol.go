@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 )
@@ -17,14 +16,13 @@ type multiProtocolAdapter struct {
 	name            string
 	primaryProtocol Protocol // 主协议(用于 Protocol() 返回值和兼容性)
 	implementations map[Protocol]Provider
-	pool            *keypool.Pool
 }
 
 // MultiProtocolConfig 多协议 Provider 的配置
 type MultiProtocolConfig struct {
 	Name            string
-	PrimaryProtocol Protocol                 // 主协议
-	Implementations map[Protocol]Provider    // 各协议的实现
+	PrimaryProtocol Protocol              // 主协议
+	Implementations map[Protocol]Provider // 各协议的实现
 }
 
 // NewMultiProtocolAdapter 创建多协议 Provider 适配器
@@ -73,42 +71,28 @@ func (p *multiProtocolAdapter) SupportsProtocol(proto Protocol) bool {
 
 // selectImplementation 根据请求路径选择协议实现
 func (p *multiProtocolAdapter) selectImplementation(req *Request) (Provider, error) {
-	// 从请求路径推断协议
-	reqProto := detectProtocolFromPath(req.Path)
+	if req == nil {
+		return nil, NewError(p.name, 0, ErrorTypeInvalidRequest, "request is nil")
+	}
+	// 从请求路径推断协议；未知路径不得静默回退到 primary face。
+	reqProto, ok := ProtocolForPath(req.Path)
+	if !ok {
+		return nil, NewError(p.name, 0, ErrorTypeInvalidRequest, "request path does not identify a supported protocol")
+	}
 
 	// 优先使用推断的协议
 	if impl, ok := p.implementations[reqProto]; ok && reqProto != "" {
 		return impl, nil
 	}
 
-	// 回退到主协议
-	if impl, ok := p.implementations[p.primaryProtocol]; ok {
-		return impl, nil
-	}
-
-	// 最后使用任意可用的实现
-	for _, impl := range p.implementations {
-		return impl, nil
-	}
-
-	return nil, fmt.Errorf("no suitable protocol implementation found for path: %s", req.Path)
+	return nil, NewError(p.name, 0, ErrorTypeInvalidRequest,
+		fmt.Sprintf("request protocol %q is not supported", reqProto))
 }
 
 // detectProtocolFromPath 从请求路径推断协议(与 router 的 detectProtocol 逻辑一致)
 func detectProtocolFromPath(path string) Protocol {
-	p := strings.ToLower(path)
-	switch {
-	case strings.Contains(p, "/v1/messages"):
-		return ProtocolAnthropic
-	case strings.Contains(p, "/chat/completions"):
-		return ProtocolOpenAI
-	case strings.Contains(p, "/responses"):
-		return ProtocolOpenAI
-	case strings.Contains(p, ":generatecontent") || strings.Contains(p, "/v1beta/models"):
-		return ProtocolGoogle
-	default:
-		return ""
-	}
+	proto, _ := ProtocolForPath(path)
+	return proto
 }
 
 // SendRequest 根据请求协议选择实现并发送请求
@@ -127,6 +111,30 @@ func (p *multiProtocolAdapter) SendStreamRequest(ctx context.Context, req *Reque
 		return nil, nil, err
 	}
 	return impl.SendStreamRequest(ctx, req)
+}
+
+// DiagnoseKey selects exactly one registered protocol face and delegates its
+// read-only diagnostic capability. Unlike request routing, an unsupported or
+// mismatched path is never silently sent through the primary protocol.
+func (p *multiProtocolAdapter) DiagnoseKey(ctx context.Context, key *keypool.Key, d KeyDiagnosticRequest) (*KeyDiagnosticResult, error) {
+	proto := d.Protocol
+	if proto == "" {
+		if inferred, ok := DiagnosticProtocolForPath(d.Path); ok {
+			proto = inferred
+		} else {
+			proto = p.primaryProtocol
+		}
+	}
+	impl, ok := p.implementations[proto]
+	if !ok {
+		return nil, NewDiagnosticUnavailable(proto, d.Path, "multi-protocol provider does not support requested protocol")
+	}
+	diagnoser, ok := impl.(KeyDiagnoser)
+	if !ok {
+		return nil, NewDiagnosticUnavailable(proto, d.Path, "selected protocol has no key diagnostic implementation")
+	}
+	d.Protocol = proto
+	return diagnoser.DiagnoseKey(ctx, key, d)
 }
 
 // HealthCheck 对所有协议实现执行健康检查
@@ -170,7 +178,6 @@ func (p *multiProtocolAdapter) ListModels(ctx context.Context) ([]string, error)
 
 // SetPool 为所有协议实现注入 KeyPool
 func (p *multiProtocolAdapter) SetPool(pool *keypool.Pool) {
-	p.pool = pool
 	for _, impl := range p.implementations {
 		impl.SetPool(pool)
 	}

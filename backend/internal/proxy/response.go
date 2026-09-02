@@ -25,8 +25,24 @@ var hopByHopHeaders = []string{
 // copyResponseHeaders 把 Provider 响应 headers 复制到 gin context
 // 跳过 hop-by-hop headers 和 Content-Length(由 Gin 按 body 长度自动设置)
 func copyResponseHeaders(c *gin.Context, src map[string][]string) {
+	connectionHeaders := make(map[string]struct{})
+	for key, values := range src {
+		if !strings.EqualFold(key, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			for _, token := range strings.Split(value, ",") {
+				if token = strings.TrimSpace(strings.ToLower(token)); token != "" {
+					connectionHeaders[token] = struct{}{}
+				}
+			}
+		}
+	}
 	for k, vs := range src {
 		if isHopByHop(k) {
+			continue
+		}
+		if _, nominated := connectionHeaders[strings.ToLower(k)]; nominated {
 			continue
 		}
 		if strings.EqualFold(k, "Content-Length") {
@@ -35,6 +51,17 @@ func copyResponseHeaders(c *gin.Context, src map[string][]string) {
 		for _, v := range vs {
 			c.Writer.Header().Add(k, v)
 		}
+	}
+}
+
+// copyRelayResponseHeaders replaces Gateway defaults with the upstream
+// end-to-end header set. A Gateway trace is added only when the upstream did
+// not provide its own request ID.
+func copyRelayResponseHeaders(c *gin.Context, src http.Header, traceID string) {
+	clear(c.Writer.Header())
+	copyResponseHeaders(c, src)
+	if c.Writer.Header().Get("X-Request-Id") == "" && traceID != "" {
+		c.Writer.Header().Set("X-Request-Id", traceID)
 	}
 }
 

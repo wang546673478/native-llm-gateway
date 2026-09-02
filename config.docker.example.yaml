@@ -139,6 +139,8 @@ timeouts:
 retry:
   # 每个计费层最多尝试的候选数；0 表示尝试该层全部候选。
   max_attempts: 0
+  # Relay 首个上游 body 字节预算；收到 PING/data 后停止计时并锁定当前候选。
+  relay_first_byte_timeout: 180s
 
 logging:
   level: info

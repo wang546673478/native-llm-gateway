@@ -63,6 +63,7 @@ timeouts:
 
 retry:
   max_attempts: 0
+  relay_first_byte_timeout: 180s
 
 usage:
   flush_interval: 10s
@@ -201,6 +202,12 @@ provider 顺序和 Level 3 key 顺序写入 `route_order`，会覆盖各层默�
 - `timeouts.provider_default`：provider 未单独设置 timeout 时的兜底。
 - `retry.max_attempts`：每个计费层最多尝试的候选数；`0` 表示尝试该层全部候选。
   同 key 的 429 重试和换 key 不按独立候选计数。
+- `retry.relay_first_byte_timeout`：只限制 relay 流式候选从开始上游请求到收到首个非空
+  response body chunk 的等待时间，默认 180s。预算覆盖等待 response headers 和 headers
+  后无正文两个阶段；到期时仅在响应尚未提交的情况下取消当前候选并继续正常 failover。
+  收到 `: PING`、其他 SSE 注释或 data 字节后立即停止计时并承诺该候选，因此不限制后续
+  完整生成时长，也不会在已经提交响应后切路由。该值应基于
+  `gateway_stream_ttft_seconds` 的分层 P99 调整，不要设得低于正常冷请求的首字延迟。
 - `logging.level`、`logging.format`：分别控制 zap 等级和 `console|json` 输出格式；
   `--log-json` 强制 JSON。
 - `usage.flush_interval`、`usage.batch_size`：异步用量批写；零值兜底 10s/100。
@@ -259,7 +266,8 @@ admin_auth:
 - 后续 Provider Key CRUD、route order CRUD、中转站 CRUD 各有自己的热更新路径
 
 需要重启：database、HTTP server、静态目录、access log、usage collector、provider
-实例/endpoint/timeout，以及管理员认证开关和参数。配置 watcher 不更新 Fingerprint；
+实例/endpoint/timeout、`retry.relay_first_byte_timeout`，以及管理员认证开关和参数。配置
+watcher 不更新 Fingerprint；
 `fingerprint.enabled` 可通过管理 API 临时热切换，改 `canonical_device_id` 必须重启。
 
 ## 数据库表

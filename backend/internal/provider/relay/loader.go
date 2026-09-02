@@ -102,6 +102,7 @@ func registerAndLoadRelayStation(ctx context.Context, s database.RelayStation, m
 	relayProvider, err := NewGenericRelayProvider(Config{
 		Name:               s.Name,
 		BaseURL:            s.BaseURL,
+		BillingSource:      s.BillingSource,
 		ProtocolMode:       s.ProtocolMode,
 		PrimaryProtocol:    provider.Protocol(s.PrimaryProtocol),
 		SupportedProtocols: supportedProtocols,
@@ -118,12 +119,20 @@ func registerAndLoadRelayStation(ctx context.Context, s database.RelayStation, m
 	if s.ProtocolMode == "multi" {
 		for _, proto := range supportedProtocols {
 			faceName := fmt.Sprintf("%s-%s", s.Name, proto)
+			// A multi station has one shared GenericRelayProvider, but each
+			// registered face must expose its own protocol to Router/KeyPool.
+			// Registering relayProvider itself here leaks primaryProtocol for
+			// every face and can select the wrong key/path.
+			face, err := relayProvider.Face(faceName, proto)
+			if err != nil {
+				return fmt.Errorf("create relay face %s: %w", faceName, err)
+			}
 			registry.RegisterWithProtocolVendorRelay(faceName, func(cfg provider.ProviderConfig) (provider.Provider, error) {
-				return relayProvider, nil
+				return face, nil
 			}, proto, s.Name, true) // vendor = name
 
 			// 加载到 manager
-			if err := mgr.AddProvider(ctx, faceName, relayProvider); err != nil {
+			if err := mgr.AddProvider(ctx, faceName, face); err != nil {
 				return fmt.Errorf("add provider %s to manager: %w", faceName, err)
 			}
 		}
@@ -185,15 +194,19 @@ func syncRelayStationKeys(db *gorm.DB, s database.RelayStation) error {
 		existingKeyNames[ek.Name] = true
 	}
 
+	billingSource := s.BillingSource
+	if billingSource == "" {
+		billingSource = "api"
+	}
 	for name, keyHash := range targetKeyNames {
 		if !existingKeyNames[name] {
 			newKey := database.ProviderAPIKey{
-				ProviderName:   s.Name,
-				Name:           name,
-				KeyHash:        keyHash,
-				Enabled:        database.BoolPtr(true),
-				BillingSource:  "api", // 中转站默认 api
-				Protocols:      "",    // 空表示支持所有协议
+				ProviderName:  s.Name,
+				Name:          name,
+				KeyHash:       keyHash,
+				Enabled:       database.BoolPtr(true),
+				BillingSource: billingSource,
+				Protocols:     "", // 空表示支持所有协议
 			}
 			if err := db.Create(&newKey).Error; err != nil {
 				log.Printf("[relay] Failed to create key %s for %s: %v", name, s.Name, err)
@@ -220,6 +233,11 @@ func ReloadFromDatabase(db *gorm.DB, mgr ProviderManager) error {
 	// 2. 删除所有中转站
 	for _, name := range toRemove {
 		mgr.RemoveProvider(name)
+		// Manager removal closes the live instance, but the global registry also
+		// owns the dynamic factory/protocol metadata. Drop that registration so a
+		// deleted face cannot reappear in admin discovery or classify a later
+		// same-name builtin provider as a relay.
+		registry.UnregisterRelay(name)
 		log.Printf("[relay] Removed relay station: %s", name)
 	}
 

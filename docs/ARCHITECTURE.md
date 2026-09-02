@@ -93,16 +93,17 @@ OpenAI、Anthropic、Google compatible 包是协议实现，不代表对应厂�
 Gin route
   -> 可选 Gateway Key auth + RPM limit
   -> 取得或生成 X-Request-Id
-  -> 读取 body
-  -> /responses 请求剥离跨厂商 reasoning 块
-  -> 写 access-log 请求 body
+  -> 读取 body 并保存不可变 body/header/path/query/model 快照
+  -> 写 access-log 原始请求 body
   -> 从 body 提取 model 和 stream
-  -> 解析 alias，必要时重写 model
-  -> Fingerprint Sanitize
+  -> 解析 alias/default，仅得到 RoutingModel
   -> 建立 inflight 快照
   -> Router.Route 生成有限候选迭代器
   -> Gateway Key 的 provider/model/key-ID 约束过滤
-  -> 逐候选选择具体 Key 并调用 Provider
+  -> 每个候选从原始快照派生独立 Request
+       relay: 保留 RequestedModel 和原始 body/header
+       builtin: 应用 reasoning/model/fingerprint 等厂商适配
+  -> 绑定具体 Key 并调用 Provider
   -> 成功响应或错误/failover
   -> metrics、usage、access-log 收尾
   -> 删除 inflight 快照
@@ -111,8 +112,12 @@ Gin route
 有几个边界需要注意：
 
 - `stream` 以 JSON body 中的值为准，不以调用了哪个 Handler 为准。
-- `/responses` 的 reasoning 清理发生在请求 body 落 access 文件之前；alias、候选模型和 fingerprint 改写发生在其后。因此 access 文件不是所有场景下“发往上游的最终字节”。
-- alias 短格式解析和候选选择都可能重写 `model`；每次 failover 到不同候选时还会再次按该候选的真实模型重写。
+- Access Log 请求文件始终保存客户端进入 Gateway 的原始 body。它等于 relay 上行 body；
+  内置厂商的上行 body 可能因候选适配而不同。
+- 请求同时保存 `RequestedModel` 和 `RoutingModel`。relay 用前者做模型筛选和上行；内置
+  厂商用后者做 alias/default 路由，并在自己的候选副本上重写最终模型。
+- `/responses` reasoning 清理、候选模型重写和 fingerprint 只发生在非 relay 候选副本。
+  failover 到新候选会重新从原始快照派生，不会继承上一候选的修改。
 - Router 已经选出的 Key 会绑定到 `provider.Request`，Provider 不应再次从 Pool 获取另一把 Key。
 
 ## 6. 路由解析
@@ -199,7 +204,8 @@ Provider 将错误归类为 `rate_limit`、`quota_exceeded`、`auth`、`invalid_
 - `auth`：该 Key 冷却，并换另一把 Key重试一次；仍失败可继续同层其他候选。
 - `quota_exceeded`：token-plan 层产生“额度耗尽证据”；API/free 层的额度或限流错误不会成为跨层证据。
 - `invalid_request`、`model_not_found` 通常终止；当它只说明某个候选模型/Relay 不适配时，可以继续下一候选。
-- 客户端断开不重试。
+- 客户端断开归类为 `client_disconnected`，立即停止整条候选链，不上报 key 失败、不冷却、
+  不计入 circuit，也不再尝试 key/provider。
 
 跨 tier 不是普通错误的无条件 failover。当前循环在一个 tier 有实际失败但没有额度证据时直接收尾；token-plan 层出现额度证据后，才允许进入下一 tier。纯白名单跳过没有真正发请求，可以直接越过空层。
 
@@ -210,21 +216,27 @@ Provider 将错误归类为 `rate_limit`、`quota_exceeded`、`auth`、`invalid_
 
 当前 `retry.enabled`、`retry.no_failover_on`、`retry.failover_on` 没有运行时消费者，不能依赖它们改变上述决策。
 
+内置厂商的 HTTP 200 内嵌错误仍按厂商规则分类；relay 透明模式保持原始 HTTP 200 和 body。
+所有候选耗尽后，如果最后一个 relay 错误带真实 HTTP response，Proxy 返回该 response 的
+原始 status、过滤后的端到端 headers 和 body；没有 HTTP response 的 transport 错误才生成
+Gateway 502/504。relay 响应一旦提交，状态机保护会阻止任何后续候选切换。
+
 ## 9. 流式响应的提交边界
 
-流式 failover 只在客户端尚未收到 HTTP 200 和响应字节时可行：
+流式 failover 只在响应尚未向客户端提交时可行。内置厂商和 relay 的主通道不同：
 
-1. OpenAI/Anthropic compatible Provider 在返回 channel 前同步读取前两行，识别流头的结构化错误。命中时直接返回 `ProviderError`。
-2. Proxy 再读取一个 chunk。该 chunk 的 `Err` 发生在写 200 前，仍可进入普通 failover。
-3. 第一个 chunk 可用后，Proxy 上报 Key 成功、写 SSE headers 和 HTTP 200。此后不能透明切换 Provider。
+1. 内置 OpenAI/Anthropic compatible Provider 保留协议适配和早期结构化错误识别。
+2. relay Provider 使用 raw byte channel，不按 SSE 行重建；观察器只读取字节副本。
+3. relay 候选从开始调用到首个非空 body chunk 受
+   `retry.relay_first_byte_timeout` 限制。headers 前阻塞和 headers 后正文静默分别记录
+   `first_byte_stage=headers|body`；超时且未提交时可以 failover。
+4. 收到任何非空 relay body，包括 `: PING` 或其他注释，就复制上游 status/headers 并
+   原样提交该 chunk。此后不能切换 Provider。
 
-提交后的行为：
-
-- `chunk.Err`：向客户端写 SSE error，access log 标记 `stream_interrupted`。
-- 流中的结构化上游 error event：原样转发，标记 `upstream_stream_error`；不冷却 Key，也不 failover。
-- 客户端写失败：标记 `client_disconnected`，不 failover。
-- request context 结束：标记 `context_canceled`。
-- 长时间无 chunk：写 `stream_idle_timeout` SSE error 并结束。
+提交后，relay 的 `chunk.Err` 或 idle timeout 只关闭流并记录 `stream_interrupted`，不注入
+Gateway 自造 SSE error；上游结构化 error event 仍按原始字节转发并在 Access Log 标记。
+客户端写失败或 request context 取消标记 `client_disconnected`，立即关闭当前上游且不
+failover。内置厂商仍保留其规范化 SSE/error 输出契约。
 
 空闲超时由请求 body 大小硬编码分段为 10、15、20、30、45 秒。Engine 虽持有 `StreamIdleTimeout` 字段，但当前 `calculateIdleTimeout` 不读取它；动态 timer 也只在第一个 Proxy 缓冲 chunk 已处理并发送 200 后启动。
 
@@ -243,7 +255,7 @@ Provider 将错误归类为 `rate_limit`、`quota_exceeded`、`auth`、`invalid_
 
 - HTTP host/port/timeouts、静态目录、数据库和 AccessLog/Usage 构造参数。
 - Provider 实例、endpoint、Provider timeout、`force_thinking_disabled` 和现有 Pool/Circuit 实例。
-- `retry.max_attempts` 和 fingerprint 的配置文件值。
+- `retry.max_attempts`、`retry.relay_first_byte_timeout` 和 fingerprint 的配置文件值。
 - `auth.enabled` / `admin_auth.enabled` 的中间件拓扑。
 - Key rotation、cooling、circuit 等 Pool 配置不会因文件变化立即重建；Provider Key CRUD 或重启后才应用到新 Pool。
 

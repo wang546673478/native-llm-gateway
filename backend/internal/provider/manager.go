@@ -231,8 +231,12 @@ func (m *Manager) GetByProtocol(proto Protocol) []Provider {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]Provider, 0)
-	for _, p := range m.providers {
-		if p.Protocol() == proto {
+	for name, p := range m.providers {
+		faceProto := m.registry.ProtocolFor(name)
+		if faceProto == "" {
+			faceProto = p.Protocol()
+		}
+		if faceProto == proto {
 			out = append(out, p)
 		}
 	}
@@ -281,6 +285,23 @@ func (m *Manager) BillingSourceFor(provider string) string {
 // vendor 未声明时 registry 返回 name 本身(单协议厂商,天然一致)。
 func (m *Manager) VendorFor(name string) string {
 	return m.registry.VendorFor(name)
+}
+
+// ProtocolFor returns the registered face protocol, falling back to the
+// loaded implementation for legacy providers whose registry metadata is
+// absent. Multi-protocol relay faces must use this value rather than the
+// shared instance's primary Protocol().
+func (m *Manager) ProtocolFor(name string) Protocol {
+	if proto := m.registry.ProtocolFor(name); proto != "" {
+		return proto
+	}
+	m.mu.RLock()
+	p := m.providers[name]
+	m.mu.RUnlock()
+	if p == nil {
+		return ""
+	}
+	return p.Protocol()
 }
 
 // ModelsFor 返回某注册面的可用模型 id。
@@ -338,6 +359,11 @@ func (m *Manager) Reload(ctx context.Context, cfg *ManagerConfig) error {
 		}
 	}
 	m.providers = make(map[string]Provider)
+	// Endpoint metadata is rebuilt from the new config (and any subsequent
+	// dynamic providers).  Retaining old entries would make quota probes target
+	// a removed provider after a reload.
+	m.endpoints = make(map[string]string)
+	m.billingSources = make(map[string]string)
 	m.mu.Unlock()
 
 	return m.LoadFromConfig(ctx, cfg)
@@ -359,6 +385,15 @@ func (m *Manager) ReloadPricing(cfg *ManagerConfig) {
 		m.billingSources[name] = bs
 		// P-responses: 能力标记同频热重载
 		m.responsesAPI[name] = pcfg.ResponsesAPI
+	}
+	// DB-loaded relay faces are absent from cfg.Providers. Preserve their live
+	// station metadata across a config-only reload instead of silently falling
+	// back to api and losing tier ordering.
+	for name, p := range m.providers {
+		if _, configured := cfg.Providers[name]; configured {
+			continue
+		}
+		m.registerDynamicMetadataLocked(name, p)
 	}
 	m.logger.Info("billing/responses reloaded", zap.Int("providers", len(m.billingSources)))
 }
@@ -457,8 +492,18 @@ func (m *Manager) DefaultModelFor(name string) string {
 // 提供 baseURL)。未注册返回空串。
 func (m *Manager) EndpointFor(name string) string {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.endpoints[name]
+	endpoint := m.endpoints[name]
+	if endpoint == "" {
+		// DB-loaded relay faces are registered as <station>-<protocol>, while
+		// endpoint metadata is stored once under the station/vendor name.  Keep
+		// endpoint lookup aligned with pool lookup and fall back to that vendor.
+		vendor := m.registry.VendorFor(name)
+		if vendor != "" && vendor != name {
+			endpoint = m.endpoints[vendor]
+		}
+	}
+	m.mu.RUnlock()
+	return endpoint
 }
 
 // Close 关闭所有 Provider
@@ -472,6 +517,10 @@ func (m *Manager) Close() error {
 		}
 	}
 	m.providers = make(map[string]Provider)
+	// Dynamic endpoint metadata follows the provider lifecycle just like the
+	// provider map.  Do not leave removed relay URLs available to quota probes.
+	m.endpoints = make(map[string]string)
+	m.billingSources = make(map[string]string)
 	return firstErr
 }
 
@@ -480,6 +529,7 @@ func (m *Manager) SetForTesting(name string, p Provider) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.providers[name] = p
+	m.registerDynamicMetadataLocked(name, p)
 }
 
 // AddProvider 添加一个已构造的 Provider 到 manager(用于动态加载,如中转站)
@@ -502,7 +552,45 @@ func (m *Manager) AddProvider(ctx context.Context, name string, p Provider) erro
 	}
 
 	m.providers[name] = p
+	// Dynamic providers (notably DB-loaded relay stations) do not pass through
+	// LoadFromConfig, so capture endpoint and billing metadata while they are
+	// added. Keep vendor aliases because all protocol faces share one pool.
+	m.registerDynamicMetadataLocked(name, p)
 	return nil
+}
+
+// registerDynamicMetadataLocked records metadata exposed by a provider loaded
+// outside Manager.LoadFromConfig (for example a relay station from DB).
+// Caller must hold m.mu. Face and vendor aliases are intentionally kept in
+// sync so Router, Proxy and quota workers resolve the same runtime contract.
+func (m *Manager) registerDynamicMetadataLocked(name string, p Provider) {
+	if p == nil {
+		return
+	}
+	vendor := m.registry.VendorFor(name)
+	if vendor == "" {
+		vendor = name
+	}
+	if endpointProvider, ok := p.(interface{ Endpoint() string }); ok {
+		if endpoint := endpointProvider.Endpoint(); endpoint != "" {
+			if m.endpoints == nil {
+				m.endpoints = make(map[string]string)
+			}
+			m.endpoints[name] = endpoint
+			m.endpoints[vendor] = endpoint
+		}
+	}
+	if billingProvider, ok := p.(interface{ BillingSource() string }); ok {
+		bs := billingProvider.BillingSource()
+		if bs == "" {
+			bs = "api"
+		}
+		if m.billingSources == nil {
+			m.billingSources = make(map[string]string)
+		}
+		m.billingSources[name] = bs
+		m.billingSources[vendor] = bs
+	}
 }
 
 // RemoveProvider 从 Manager 中移除指定的 provider
@@ -518,6 +606,28 @@ func (m *Manager) RemoveProvider(name string) {
 				zap.Error(err))
 		}
 		delete(m.providers, name)
+		delete(m.endpoints, name)
+		delete(m.billingSources, name)
+		// Do not remove a shared vendor endpoint while another face remains
+		// loaded.  A subsequent dynamic face can still serve quota probes.
+		vendor := m.registry.VendorFor(name)
+		if vendor != "" && vendor != name {
+			keepVendorEndpoint := false
+			keepVendorBilling := false
+			for other := range m.providers {
+				if m.registry.VendorFor(other) == vendor {
+					keepVendorEndpoint = true
+					keepVendorBilling = true
+					break
+				}
+			}
+			if !keepVendorEndpoint {
+				delete(m.endpoints, vendor)
+			}
+			if !keepVendorBilling {
+				delete(m.billingSources, vendor)
+			}
+		}
 		m.logger.Info("provider removed", zap.String("provider", name))
 	}
 }

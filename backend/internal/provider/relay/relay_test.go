@@ -51,6 +51,13 @@ func TestGenericRelayProvider_NormalizesRequestURL(t *testing.T) {
 			wantPath:    "/v1/chat/completions",
 		},
 		{
+			name:        "OpenAI with path prefix and version suffix",
+			baseSuffix:  "/prefix/v1/",
+			protocol:    provider.ProtocolOpenAI,
+			requestPath: "/v1/chat/completions",
+			wantPath:    "/prefix/v1/chat/completions",
+		},
+		{
 			name:        "OpenAI Responses without version suffix",
 			protocol:    provider.ProtocolOpenAI,
 			requestPath: "/v1/responses",
@@ -89,6 +96,13 @@ func TestGenericRelayProvider_NormalizesRequestURL(t *testing.T) {
 			protocol:    provider.ProtocolAnthropic,
 			requestPath: "/v1/messages",
 			wantPath:    "/v1/messages",
+		},
+		{
+			name:        "Anthropic with path prefix",
+			baseSuffix:  "/prefix",
+			protocol:    provider.ProtocolAnthropic,
+			requestPath: "/v1/messages",
+			wantPath:    "/prefix/v1/messages",
 		},
 	}
 
@@ -156,5 +170,43 @@ func TestNewGenericRelayProvider_RejectsEmptyBaseURL(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewGenericRelayProvider accepted an empty base URL")
+	}
+}
+
+// TestGenericRelayProviderRejectsUnsupportedRecognizedProtocol ensures a
+// multi relay never silently falls back to its primary implementation when a
+// recognized path has no corresponding protocol face.
+func TestGenericRelayProviderRejectsUnsupportedRecognizedProtocol(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p, err := NewGenericRelayProvider(Config{
+		Name:               "openai-only-multi",
+		BaseURL:            upstream.URL,
+		ProtocolMode:       "multi",
+		PrimaryProtocol:    provider.ProtocolOpenAI,
+		SupportedProtocols: []provider.Protocol{provider.ProtocolOpenAI},
+	})
+	if err != nil {
+		t.Fatalf("NewGenericRelayProvider: %v", err)
+	}
+	defer p.Close()
+
+	key := &keypool.Key{ID: "1", ProviderName: p.Name(), Key: "synthetic", Status: keypool.KeyStatusActive}
+	p.SetPool(keypool.NewPool(p.Name(), []*keypool.Key{key}, nil, keypool.Config{}))
+	_, err = p.SendRequest(context.Background(), &provider.Request{
+		Method: http.MethodPost, Path: "/v1/messages", Headers: make(http.Header),
+		Body: []byte(`{"model":"claude-opus-5"}`), Key: key,
+	})
+	pe, ok := provider.AsProviderError(err)
+	if !ok || pe.ErrorType != provider.ErrorTypeInvalidRequest || pe.StatusCode != http.StatusBadRequest {
+		t.Fatalf("error = %#v, want invalid_request/400", err)
+	}
+	if calls != 0 {
+		t.Fatalf("unsupported protocol reached upstream %d time(s), want 0", calls)
 	}
 }

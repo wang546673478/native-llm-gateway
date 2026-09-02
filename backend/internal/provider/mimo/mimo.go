@@ -84,6 +84,12 @@ func (p *Provider) SendStreamRequest(ctx context.Context, req *provider.Request)
 	return p.base.SendStreamRequest(ctx, req)
 }
 
+// DiagnoseKey forwards the explicit read-only probe to the OpenAI
+// compatibility base. The base deliberately does not acquire or report keys.
+func (p *Provider) DiagnoseKey(ctx context.Context, key *keypool.Key, req provider.KeyDiagnosticRequest) (*provider.KeyDiagnosticResult, error) {
+	return p.base.DiagnoseKey(ctx, key, req)
+}
+
 func (p *Provider) HealthCheck(ctx context.Context) error {
 	return p.base.HealthCheck(ctx)
 }

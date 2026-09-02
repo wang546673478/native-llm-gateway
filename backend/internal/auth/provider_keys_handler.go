@@ -30,6 +30,12 @@ type ProviderKeyStore interface {
 	GetPlainKeys(ctx context.Context, providerName string) ([]string, error) // 内部用,返回明文
 }
 
+// KeyDiagnosticFunc executes one explicit, single-key provider diagnostic.
+// The callback receives only the provider/key identifiers; the handler never
+// exposes or accepts upstream key material. Implementations must not mutate
+// key-pool state.
+type KeyDiagnosticFunc func(context.Context, string, string, provider.KeyDiagnosticRequest) (*provider.KeyDiagnosticResult, error)
+
 type gormProviderKeyStore struct{ db *gorm.DB }
 
 func NewProviderKeyStore(db *gorm.DB) ProviderKeyStore { return &gormProviderKeyStore{db: db} }
@@ -178,6 +184,9 @@ func maskKey(k string) string {
 // ProviderKeysHandler CRUD for /api/v1/providers/:name/api-keys
 type ProviderKeysHandler struct {
 	store ProviderKeyStore
+	// P6: explicit read-only one-key diagnostic callback, wired by server.go.
+	// It is nil until the provider manager and live pools are ready.
+	diagnosticFunc KeyDiagnosticFunc
 	// P35: reload hook — Create/Delete 后调一次,让 Server 重建 Pool 并注入到 Provider
 	reload func(providerName string)
 	// P68: 查运行时 key status (QUOTA_EXCEEDED / DISABLED 等)
@@ -213,6 +222,13 @@ func (h *ProviderKeysHandler) SetPoolLookup(fn func(providerName, keyID string) 
 	h.poolLookup = fn
 }
 
+// SetKeyDiagnosticFunc wires the explicit read-only key diagnostic operation.
+// The callback is deliberately narrow so the HTTP layer cannot acquire or
+// report keys on its own.
+func (h *ProviderKeysHandler) SetKeyDiagnosticFunc(fn KeyDiagnosticFunc) {
+	h.diagnosticFunc = fn
+}
+
 // Register 挂到 r.Group
 func (h *ProviderKeysHandler) Register(r *gin.RouterGroup) {
 	// 单独在 Providers 那块路径下
@@ -229,6 +245,8 @@ func (h *ProviderKeysHandler) RegisterOn(r *gin.RouterGroup) {
 	r.POST("/providers/:name/api-keys", h.create)
 	r.DELETE("/providers/:name/api-keys/:id", h.delete)
 	// P68: 手动 mark key 为 QUOTA_EXCEEDED(调试 / 强制触发 UI 状态)
+	// P6: single-key diagnostic; result is metadata-only and does not alter pool state.
+	r.POST("/providers/:name/api-keys/:id/diagnose", h.diagnose)
 	r.POST("/providers/:name/api-keys/:id/mark-quota-exceeded", h.markQuotaExceeded)
 }
 
@@ -374,6 +392,147 @@ func (h *ProviderKeysHandler) delete(c *gin.Context) {
 		h.reload(providerName)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": id})
+}
+
+type diagnoseProviderKeyRequest struct {
+	Protocol string `json:"protocol"`
+	Path     string `json:"path"`
+	Model    string `json:"model"`
+}
+
+const providerKeyDiagnosticTimeout = 30 * time.Second
+
+// diagnose POST /api/v1/providers/:name/api-keys/:id/diagnose.
+// The operation is deliberately single-shot: it validates ownership here and
+// delegates execution to the server's read-only provider callback. Upstream
+// response bodies and headers are never included in this API response.
+func (h *ProviderKeysHandler) diagnose(c *gin.Context) {
+	providerName := strings.TrimSpace(c.Param("name"))
+	if providerName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing_provider_name"})
+		return
+	}
+	idStr := c.Param("id")
+	var id uint
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_id"})
+		return
+	}
+
+	var in diagnoseProviderKeyRequest
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
+		return
+	}
+	model := strings.TrimSpace(in.Model)
+	if model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model_required"})
+		return
+	}
+
+	protocolName := strings.ToLower(strings.TrimSpace(in.Protocol))
+	var proto provider.Protocol
+	if protocolName != "" {
+		parsed, err := provider.ParseProtocol(protocolName)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_protocol"})
+			return
+		}
+		proto = parsed
+	}
+	path := strings.TrimSpace(in.Path)
+	if path != "" {
+		lowerPath := strings.ToLower(path)
+		validPath := strings.HasPrefix(path, "/") &&
+			!strings.Contains(path, "://") &&
+			!strings.ContainsAny(path, "\r\n?#") &&
+			(strings.HasSuffix(lowerPath, "/messages") ||
+				strings.HasSuffix(lowerPath, "/chat/completions") ||
+				strings.HasSuffix(lowerPath, "/responses"))
+		if !validPath {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_path"})
+			return
+		}
+	}
+
+	// Provider faces can share a vendor pool (for example a multi-protocol
+	// relay). Validate ownership against the face first, then its registered
+	// vendor name when keys are stored at station level.
+	lookupName := providerName
+	rows, err := h.store.List(c.Request.Context(), lookupName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "diagnostic_lookup_failed"})
+		return
+	}
+	var row *dbpkg.ProviderAPIKey
+	for i := range rows {
+		if rows[i].ID == id {
+			row = &rows[i]
+			break
+		}
+	}
+	// A multi-protocol face can have a non-empty face-specific row set while
+	// its keys are stored under the shared vendor name. Only fall back after
+	// failing to find this exact ID; checking len(rows) alone rejects valid
+	// vendor-owned keys when the face also has unrelated rows.
+	if row == nil {
+		vendor := provider.Default().VendorFor(providerName)
+		if vendor != providerName {
+			lookupName = vendor
+			rows, err = h.store.List(c.Request.Context(), lookupName)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "diagnostic_lookup_failed"})
+				return
+			}
+			for i := range rows {
+				if rows[i].ID == id {
+					row = &rows[i]
+					break
+				}
+			}
+		}
+	}
+	if row == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "key_not_found"})
+		return
+	}
+	if !dbpkg.IsEnabled(row.Enabled) {
+		c.JSON(http.StatusConflict, gin.H{"error": "key_disabled"})
+		return
+	}
+	if h.diagnosticFunc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "diagnostic_unavailable"})
+		return
+	}
+
+	dctx, cancel := context.WithTimeout(c.Request.Context(), providerKeyDiagnosticTimeout)
+	defer cancel()
+	result, err := h.diagnosticFunc(dctx, providerName, idStr, provider.KeyDiagnosticRequest{
+		Protocol: proto,
+		Path:     path,
+		Model:    model,
+	})
+	if provider.IsDiagnosticUnavailable(err) {
+		// Capability/configuration mismatch is distinct from a request that was
+		// sent and failed upstream. In particular, this branch must not imply
+		// that a key was probed.
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "diagnostic_unavailable"})
+		return
+	}
+	if err != nil || result == nil {
+		// Do not expose callback errors: a provider error may contain an endpoint,
+		// request fragment, or another value that is unsafe for an admin API.
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "diagnostic_failed"})
+		return
+	}
+
+	// Make the response metadata-only even if a future provider implementation
+	// returns a verbose message. The callback result itself is not serialized.
+	safe := *result
+	safe.ProviderName = providerName
+	safe.KeyID = idStr
+	safe.Message = ""
+	c.JSON(http.StatusOK, &safe)
 }
 
 // markQuotaExceeded POST /api/v1/providers/:name/api-keys/:id/mark-quota-exceeded

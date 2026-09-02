@@ -71,6 +71,8 @@ docs/                             当前长期文档
   否则错误状态可能记到没有真正发请求的 key 上。
 - Relay 候选始终按客户端模型名筛选并透传，与纯 relay 或混合绑定无关；当前 relay 候选
   还会跳过 Gateway Key 模型白名单。混合绑定时白名单仍约束普通厂商候选。
+- 每个候选必须从不可变客户端快照独立派生。Relay body 与入站 body 逐字节一致，跳过
+  reasoning/model/thinking/fingerprint/stream-options 改写；内置厂商继续在自己的副本适配。
 
 ### 错误、重试与状态
 
@@ -80,8 +82,13 @@ docs/                             当前长期文档
 - `auth` 错误让对应 key 固定冷却 5 分钟；不受 `keypool.cooling_duration` 控制。
 - `server_error`、`timeout`、`connection` 只计入对应 key 的熔断器，不连坐整个厂商。
 - `quota_exceeded` 的恢复由 quota poll/probe 管理；不要引入无法自动恢复的永久禁用状态。
-- HTTP 200 不等于成功。OpenAI/Anthropic 兼容基类会在首个输出前识别结构化 SSE 错误；
-  已向客户端输出后的中途流错误只能记录，不能透明重放。
+- 内置厂商的 HTTP 200 不一定成功，兼容基类会识别专属结构化错误；Relay 透明模式保持
+  HTTP 200、headers 和 body 原样，不应用厂商错误适配。
+- Relay 首个原始 body 字节（包括 SSE PING）提交后禁止 failover；中途错误只记录并关闭，
+  不注入 Gateway SSE event。提交前的首包预算超时仍可切换。
+- `client_disconnected` 必须终止全候选链，不得上报 key 失败、冷却或继续请求其他候选。
+- 候选耗尽且最后一个 Relay 错误有 HTTP response 时返回其原始 status/header/body；只有
+  没有 HTTP response 的 transport 失败才生成 Gateway 502/504。
 - 同一次上游失败只能上报 key 状态一次，避免重复增加冷却和错误计数。
 
 ### URL 与协议
@@ -97,6 +104,7 @@ docs/                             当前长期文档
 
 - access log 的 metadata 在数据库，request/response body 是每请求一个 JSON 文件；
   JSONL 只用于导出。单个 body 上限 16 MiB。
+- access log 请求文件保存客户端原始 body；Relay 上行与其一致，内置候选上行可能不同。
 - 流式 token 以 Usage 记录为准，不能假定 access-log 详情一定有最终 token。
 - 请求 body、管理 session、Provider/Gateway key 都是敏感数据；测试夹具只用明确假值。
 - SQLite 适合本地和低负载；生产写并发使用 PostgreSQL。

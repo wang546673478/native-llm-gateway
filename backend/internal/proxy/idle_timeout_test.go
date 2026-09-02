@@ -76,11 +76,11 @@ func TestCalculateIdleTimeout_Consistency(t *testing.T) {
 	engine := &Engine{}
 
 	testSizes := []int{
-		50 * 1024,      // 50KB
-		100 * 1024,     // 100KB
-		500 * 1024,     // 500KB
-		1024 * 1024,    // 1MB
-		1500 * 1024,    // 1.5MB
+		50 * 1024,       // 50KB
+		100 * 1024,      // 100KB
+		500 * 1024,      // 500KB
+		1024 * 1024,     // 1MB
+		1500 * 1024,     // 1.5MB
 		2 * 1024 * 1024, // 2MB
 		5 * 1024 * 1024, // 5MB
 	}
@@ -101,11 +101,11 @@ func TestCalculateIdleTimeout_Monotonic(t *testing.T) {
 	engine := &Engine{}
 
 	sizes := []int{
-		10 * 1024,       // 10KB
-		100 * 1024,      // 100KB
-		500 * 1024,      // 500KB
-		1024 * 1024,     // 1MB
-		2 * 1024 * 1024, // 2MB
+		10 * 1024,        // 10KB
+		100 * 1024,       // 100KB
+		500 * 1024,       // 500KB
+		1024 * 1024,      // 1MB
+		2 * 1024 * 1024,  // 2MB
 		10 * 1024 * 1024, // 10MB
 	}
 
@@ -127,10 +127,10 @@ func TestCalculateIdleTimeout_ReasonableRange(t *testing.T) {
 
 	testSizes := []int{
 		0,
-		1 * 1024,        // 1KB
-		100 * 1024,      // 100KB
-		1 * 1024 * 1024, // 1MB
-		10 * 1024 * 1024, // 10MB
+		1 * 1024,          // 1KB
+		100 * 1024,        // 100KB
+		1 * 1024 * 1024,   // 1MB
+		10 * 1024 * 1024,  // 10MB
 		100 * 1024 * 1024, // 100MB (极端情况)
 	}
 

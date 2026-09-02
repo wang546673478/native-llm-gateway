@@ -223,7 +223,7 @@ func TestModelAlias_AliasWithProviderBinding(t *testing.T) {
 	rtr := router.NewRouter(zap.NewNop(), mgr, pools, router.Config{
 		Aliases: map[string]router.AliasConfig{
 			"fast": {
-				Alias:    "fast",
+				Alias: "fast",
 				Providers: []router.ProviderRoute{
 					{
 						Name:  "provider1",

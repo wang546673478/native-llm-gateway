@@ -29,7 +29,10 @@ import (
 
 // maxConcurrentStreams 是为 Access Log 累积流式响应 body 的全局并发上限。
 // 超过此值的新流式请求只记 metadata,不缓存 response body。
-const maxConcurrentStreams = 1000
+const (
+	maxConcurrentStreams         = 1000
+	DefaultRelayFirstByteTimeout = 180 * time.Second
+)
 
 // Engine 是 Gateway 的代理引擎
 type Engine struct {
@@ -54,6 +57,9 @@ type Engine struct {
 	// streamIdleTimeout 是预留的流式空闲超时配置。当前 doStream 实际按请求体
 	// 大小调用 calculateIdleTimeout,尚未读取该字段。
 	streamIdleTimeout time.Duration
+	// relayFirstByteTimeout limits one relay candidate only until its first
+	// response body byte. It is stopped after PING/data commits the response.
+	relayFirstByteTimeout time.Duration
 	// streamBuf 持有当前正在累积的流式响应 buffer,key 是 traceID。
 	// Task 7: 配合 streamCnt 实现 F4 全局 1000 上限。
 	streamBuf sync.Map
@@ -105,6 +111,10 @@ type Config struct {
 	// StreamIdleTimeout 是预留的流式空闲超时配置。<=0 时会归一为 10s,
 	// 但当前 doStream 使用 calculateIdleTimeout 的固定分段值,尚未消费该字段。
 	StreamIdleTimeout time.Duration
+	// RelayFirstByteTimeout limits a relay stream candidate from request start
+	// through its first non-empty body chunk. <=0 uses the conservative 180s
+	// default (above the observed 115.596s successful TTFT).
+	RelayFirstByteTimeout time.Duration
 	// GkContext 可选的 GatewayKey 提取抽象;nil 时用默认实现(defaultGatewayKeyContext)。
 	// 供测试 mock / 特殊上下文注入,生产留空即可。
 	GkContext GatewayKeyContext
@@ -112,6 +122,37 @@ type Config struct {
 	// 由 server 注入 fingerprint.Sanitize 闭包(捕获启动时的 Snapshot),proxy 不直接
 	// import fingerprint 包——与 QuotaChecker 同构,保持低耦合。
 	FingerprintSanitizer func(body []byte) []byte
+}
+
+// clientRequestSnapshot owns the immutable client bytes and headers captured
+// before any routing or provider-specific adaptation. Candidate requests are
+// always derived from a fresh copy of this snapshot.
+type clientRequestSnapshot struct {
+	method         string
+	path           string
+	rawQuery       string
+	headers        http.Header
+	body           []byte
+	requestedModel string
+	isStream       bool
+	gatewayKeyID   string
+	traceID        string
+}
+
+func (s *clientRequestSnapshot) routingRequest(routingModel string) *provider.Request {
+	return &provider.Request{
+		Method:         s.method,
+		Path:           s.path,
+		RawQuery:       s.rawQuery,
+		Headers:        s.headers.Clone(),
+		Body:           bytes.Clone(s.body),
+		RequestedModel: s.requestedModel,
+		RoutingModel:   routingModel,
+		Model:          routingModel,
+		IsStream:       s.isStream,
+		GatewayKeyID:   s.gatewayKeyID,
+		TraceID:        s.traceID,
+	}
 }
 
 // NewEngine 构造 Proxy Engine
@@ -136,54 +177,48 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.StreamIdleTimeout <= 0 {
 		cfg.StreamIdleTimeout = 10 * time.Second
 	}
+	if cfg.RelayFirstByteTimeout <= 0 {
+		cfg.RelayFirstByteTimeout = DefaultRelayFirstByteTimeout
+	}
 	if cfg.GkContext == nil {
 		cfg.GkContext = defaultGatewayKeyContext
 	}
 	return &Engine{
-		logger:               cfg.Logger,
-		router:               cfg.Router,
-		usage:                cfg.Usage,
-		metrics:              cfg.Metrics,
-		tokenRecorder:        cfg.TokenRecorder,
-		authn:                cfg.Authenticator,
-		accessLog:            cfg.AccessLog,
-		inflight:             cfg.Inflight,
-		quotaChecker:         cfg.QuotaChecker,
-		maxRetry:             cfg.MaxRetry,
-		writeTimeout:         cfg.WriteTimeout,
-		streamIdleTimeout:    cfg.StreamIdleTimeout,
-		gkCtx:                cfg.GkContext,
-		fingerprintSanitizer: cfg.FingerprintSanitizer,
+		logger:                cfg.Logger,
+		router:                cfg.Router,
+		usage:                 cfg.Usage,
+		metrics:               cfg.Metrics,
+		tokenRecorder:         cfg.TokenRecorder,
+		authn:                 cfg.Authenticator,
+		accessLog:             cfg.AccessLog,
+		inflight:              cfg.Inflight,
+		quotaChecker:          cfg.QuotaChecker,
+		maxRetry:              cfg.MaxRetry,
+		writeTimeout:          cfg.WriteTimeout,
+		streamIdleTimeout:     cfg.StreamIdleTimeout,
+		relayFirstByteTimeout: cfg.RelayFirstByteTimeout,
+		gkCtx:                 cfg.GkContext,
+		fingerprintSanitizer:  cfg.FingerprintSanitizer,
 	}
 }
 
 // HandleRequest 处理非流式代理请求
-// tryDefaultModelFallback 尝试用 client key 的 default_model 替换 model 名
+// tryDefaultModelFallback 尝试用 client key 的 default_model 替换路由模型名
 // 返回替换后的 model 名,空字符串表示不需要/无法 fallback
 //
-// 调用方应该:
-//  1. 用返回值更新自己的 model 变量
-//  2. 重写 req.Model 和 req.Body(用 rewriteModelField)
-//  3. 重新调 router.Route
+// 客户端原始 body/model 快照保持不变；fallback 只影响非 relay 的路由模型。
 //
 // 检查项:
 //   - client key 必须有 DefaultModel 配置
 //   - DefaultModel != 当前 model(避免无意义的自循环)
 //   - DefaultModel 必须经过 CheckAllowed(防止 fallback 绕过白名单)
-func (e *Engine) tryDefaultModelFallback(c *gin.Context, currentModel string, req *provider.Request) string {
+func (e *Engine) tryDefaultModelFallback(c *gin.Context, currentModel string) string {
 	if gk := e.gkCtx.Get(c); gk != nil && gk.DefaultModel != "" && gk.DefaultModel != currentModel {
 		// fallback 必须本身在白名单里 — 防止 fallback 绕过白名单
 		if e.authn != nil && e.authn.CheckAllowed(gk, gk.DefaultModel) != nil {
 			return ""
 		}
-		// 只有 body 重写成功才切 default model — 否则 body 仍是原模型,Model 与
-		// Body 会不同步(与 alias/tryCandidate 的 rewriteModelField 用法一致)
-		if newBody, ok2 := rewriteModelField(req.Body, gk.DefaultModel); ok2 {
-			req.Body = newBody
-			req.Model = gk.DefaultModel
-			return gk.DefaultModel
-		}
-		return ""
+		return gk.DefaultModel
 	}
 	return ""
 }
@@ -261,14 +296,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		writeJSONError(c, http.StatusBadRequest, "invalid_request", "failed to read request body")
 		return
 	}
-	// P-responses: /responses 透传前剥离推理块(跨厂商切换时 MiniMax 的
-	// reasoning 会被 DeepSeek 400 拒收;剥离后目标模型重新推理)
-	if isResponsesPath(c.Request.URL.Path) {
-		if nb, _ := stripResponsesReasoning(body); nb != nil {
-			body = nb
-		}
-	}
-	// P67: 写请求 body(同步,file-per-trace,失败也继续)
+	// P67: Access Log 永远保存客户端原始 body；候选适配发生在它之后。
 	if entry != nil && e.accessLog != nil {
 		if p, _ := e.accessLog.WriteBody(traceID, "req", body); p != "" {
 			entry.ReqBodyPath = p
@@ -287,6 +315,17 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	// requestedModel 记客户端原始请求名(alias 解析前),供 inflight 快照展示「请求模型」。
 	// 它必须在这行拿住 —— 下方 alias 解析会把 model 覆盖成 target。
 	requestedModel := model
+	snapshot := &clientRequestSnapshot{
+		method:         c.Request.Method,
+		path:           c.Request.URL.Path,
+		rawQuery:       c.Request.URL.RawQuery,
+		headers:        c.Request.Header.Clone(),
+		body:           bytes.Clone(body),
+		requestedModel: requestedModel,
+		isStream:       isStream,
+		gatewayKeyID:   e.gkCtx.ID(c),
+		traceID:        traceID,
+	}
 	if entry != nil {
 		// P-stream-flag: entry 在 body 解析前创建,IsStream 当时是零值 —
 		// 解析完 body 后补写真实值(之前日志 stream 列恒为 False)
@@ -300,14 +339,11 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	// Claude Code 发探测名(被 alias 解析后)也能通过白名单
 	if e.router != nil {
 		if target, ok := e.router.ResolveAlias(model); ok && target != model {
-			if newBody, ok2 := rewriteModelField(body, target); ok2 {
-				body = newBody
-				e.logger.Debug("alias resolved",
-					zap.String("alias", model),
-					zap.String("target", target),
-					zap.String("trace_id", traceID),
-				)
-			}
+			e.logger.Debug("alias resolved",
+				zap.String("alias", model),
+				zap.String("target", target),
+				zap.String("trace_id", traceID),
+			)
 			model = target
 		}
 	}
@@ -331,24 +367,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	//     Route OK → CheckAllowed fail → fallback 到 default_model(假设 default_model 在白名单)
 	//     如果 default_model 不在白名单 → 403
 
-	// 3. 设备指纹归一化(可选)—— 在构造 Provider.Request 前,对最终要发的 body 做一次。
-	// nil = 不归一(fingerprint 开关关闭),body 原样透传,零改动零开销。
-	// 非 anthropic 面(openai/google)的 body 无 device_id/Environment 块,Sanitize 天然 no-op。
-	if e.fingerprintSanitizer != nil {
-		body = e.fingerprintSanitizer(body)
-	}
-
-	// 3.5 构造 Provider.Request(Body 透传)
-	req := &provider.Request{
-		Method:       c.Request.Method,
-		Path:         c.Request.URL.Path,
-		Headers:      c.Request.Header.Clone(),
-		Body:         body,
-		Model:        model,
-		IsStream:     isStream,
-		GatewayKeyID: e.gkCtx.ID(c),
-		TraceID:      traceID,
-	}
+	// 3.5 路由请求只携带原始快照和逻辑模型。真正的上游 body/header
+	// 在每个候选开始时独立派生，relay 因而不会继承内置厂商的改写。
+	req := snapshot.routingRequest(model)
 	// 注意:此刻还没路由,协议未知 —— 不要拿 anthropic-version 请求头凑数。
 	// 那个头是 API 版本(如 2023-06-01),不是协议名,写进 protocol 列是错的;
 	// 且 openai 客户端不发这个头,只会留空。真协议在路由出来后补(见 attemptOne
@@ -399,8 +420,9 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 	iter, err := e.router.Route(ctx, req, routeOpts...)
 	if err != nil {
 		// 4.1: Route 失败 → 试 default_model fallback
-		if fb := e.tryDefaultModelFallback(c, model, req); fb != "" {
+		if fb := e.tryDefaultModelFallback(c, model); fb != "" {
 			model = fb
+			req = snapshot.routingRequest(model)
 			iter, err = e.router.Route(ctx, req, routeOpts...)
 		}
 		if err != nil {
@@ -421,7 +443,7 @@ func (e *Engine) handle(c *gin.Context, isStream bool) {
 		probeResult, probeErr := iter.Next()
 		if probeErr != nil {
 			// 没更多候选
-			e.handleAllFailed(c, req, lastErr, traceID)
+			e.handleAllFailed(c, ctx, req, lastErr, traceID, entry)
 			return
 		}
 		// P19: provider 绑定检查 — 若 key.Providers 非空,路由结果必须在列表里
@@ -490,6 +512,19 @@ func classifyError(statusCode int, providerEmpty bool, upstreamErrType *provider
 	if upstreamErrType != nil && upstreamErrType.ErrorType == provider.ErrorTypeModelNotAllowed {
 		return "model_not_allowed"
 	}
+	// Preserve a structured transport cause even when handleAllFailed has to
+	// synthesize a 502/504 status.  Checking status first would misclassify a
+	// parent deadline as upstream_5xx and hide the P0 timeout contract.
+	if upstreamErrType != nil {
+		switch upstreamErrType.ErrorType {
+		case provider.ErrorTypeTimeout:
+			return "timeout"
+		case provider.ErrorTypeConnection:
+			return "connection_error"
+		case provider.ErrorTypeRateLimit:
+			return "upstream_429"
+		}
+	}
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return "auth_failed"
@@ -504,20 +539,6 @@ func classifyError(statusCode int, providerEmpty bool, upstreamErrType *provider
 	if statusCode >= 500 {
 		return "upstream_5xx"
 	}
-	if upstreamErrType != nil {
-		switch upstreamErrType.ErrorType {
-		case provider.ErrorTypeTimeout:
-			return "timeout"
-		case provider.ErrorTypeConnection:
-			return "connection_error"
-		case provider.ErrorTypeRateLimit:
-			// P-429-failover: 上游 429(rate_limit)是 retryable,failover 耗尽时会
-			// 被 handleAllFailed 重写为 502 wire status —— 但真实成因还是上游限流。
-			// 按上游错误而非重写后的 client status 归类,否则 429 被误记 upstream_5xx,
-			// ?status=upstream_429 过滤查不到(与 metrics 的 429 标签分裂)。
-			return "upstream_429"
-		}
-	}
 	return "upstream_4xx"
 }
 
@@ -528,13 +549,27 @@ func (e *Engine) doRequest(
 	req *provider.Request,
 	result *router.RouteResult,
 ) (*provider.Response, *provider.ProviderError) {
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		return nil, pe
+	}
 	// P-per-key-circuit: 熔断器下沉到 keypool — RecordSuccess/RecordFailure
 	// 由 Pool.ReportSuccess / ReportError(server_error|timeout|connection)内部处理,
 	// 只熔断这一把 key,不连坐同 provider 其他 key
 	resp, err := pv.SendRequest(ctx, req)
 	if err == nil {
-		e.reportKeySuccess(result)
+		if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+			return nil, pe
+		}
+		// Protocol providers may already have recorded the successful upstream
+		// request.  Keep the proxy fallback for test/custom providers, but never
+		// count the same real request twice.
+		if resp == nil || !resp.KeyPoolReported {
+			e.reportKeySuccess(result)
+		}
 		return resp, nil
+	}
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		return nil, pe
 	}
 
 	var pe *provider.ProviderError
@@ -545,9 +580,10 @@ func (e *Engine) doRequest(
 
 	// 非 ProviderError 的错误(例如网络层未到 Provider)— 也要上报 Pool,
 	// 让 connection 错误进 per-key 熔断计数(之前 "unknown" 不计入熔断)
+	errType := provider.ClassifyTransportError(ctx, err)
 	pe = &provider.ProviderError{
 		ProviderName: result.ProviderName,
-		ErrorType:    provider.ErrorTypeConnection,
+		ErrorType:    errType,
 		Message:      err.Error(),
 	}
 	e.reportKeyError(result, pe)
@@ -577,18 +613,139 @@ func (e *Engine) doStream(
 	// 到达时刻减去它即为首字时间(ms)。与 attemptOne 里的 start 意义一致,
 	// 但 doStream 不持有那个 start,这里单独计时保持内聚(不跨函数传时间锚点)。
 	streamStart := time.Now()
-	chunkCh, headerResp, err := pv.SendStreamRequest(ctx, req)
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		return false, nil, pe, 0
+	}
+
+	isRelay := e.router != nil && e.router.Manager().IsRelay(result.ProviderName)
+	var relayPhaseObserver *provider.SSEEventObserver
+	phaseSeen := make(map[string]bool, 3)
+	recordPhase := func(phase string) {
+		if !isRelay || phaseSeen[phase] {
+			return
+		}
+		phaseSeen[phase] = true
+		e.recordStreamTTFT(result.ProviderName, result.ModelID, len(req.Body), phase, time.Since(streamStart))
+	}
+	if isRelay {
+		relayPhaseObserver = &provider.SSEEventObserver{
+			OnEvent: func(event []byte) {
+				for _, line := range bytes.Split(event, []byte("\n")) {
+					line = bytes.TrimSpace(line)
+					switch {
+					case bytes.HasPrefix(line, []byte(":")):
+						recordPhase("ping")
+					case bytes.HasPrefix(line, []byte("data:")):
+						recordPhase("data")
+					}
+				}
+			},
+		}
+		defer relayPhaseObserver.Finish()
+	}
+	streamCtx := ctx
+	cancelStream := func() {}
+	var firstByteTimer *time.Timer
+	var firstByteDeadline <-chan time.Time
+	relayBudgetEnabled := isRelay && e.relayFirstByteTimeout > 0
+	firstByteBudget := e.relayFirstByteTimeout
+	if remaining, ok := candidateBudgetRemaining(ctx); ok {
+		firstByteBudget = remaining
+	}
+	if relayBudgetEnabled && firstByteBudget <= 0 {
+		pe := relayFirstByteTimeoutError(result.ProviderName, e.relayFirstByteTimeout, "body")
+		e.recordRelayEvent(result.ProviderName, "first_byte_timeout", "body")
+		e.reportKeyError(result, pe)
+		return false, nil, pe, 0
+	}
+
+	type streamStartResult struct {
+		chunks <-chan *provider.StreamChunk
+		resp   *provider.Response
+		err    error
+	}
+	var started streamStartResult
+	if relayBudgetEnabled {
+		streamCtx, cancelStream = context.WithCancel(ctx)
+		defer cancelStream()
+		firstByteTimer = time.NewTimer(firstByteBudget)
+		firstByteDeadline = firstByteTimer.C
+		defer stopTimer(firstByteTimer)
+
+		startCh := make(chan streamStartResult, 1)
+		go func() {
+			chunks, resp, err := pv.SendStreamRequest(streamCtx, req)
+			startCh <- streamStartResult{chunks: chunks, resp: resp, err: err}
+		}()
+		select {
+		case started = <-startCh:
+		case <-ctx.Done():
+			cancelStream()
+			if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+				return false, nil, pe, 0
+			}
+			return false, nil, &provider.ProviderError{
+				ProviderName: result.ProviderName,
+				ErrorType:    provider.ErrorTypeTimeout,
+				Message:      ctx.Err().Error(),
+			}, 0
+		case <-firstByteDeadline:
+			cancelStream()
+			pe := relayFirstByteTimeoutError(result.ProviderName, firstByteBudget, "headers")
+			e.recordRelayEvent(result.ProviderName, "first_byte_timeout", "headers")
+			e.logger.Info("relay first-byte timeout",
+				zap.String("provider", result.ProviderName),
+				zap.Bool("passthrough", true),
+				zap.String("first_byte_stage", "headers"),
+				zap.Bool("response_committed", false),
+				zap.String("trace_id", req.TraceID))
+			e.reportKeyError(result, pe)
+			return false, nil, pe, 0
+		}
+	} else {
+		started.chunks, started.resp, started.err = pv.SendStreamRequest(ctx, req)
+	}
+	chunkCh, headerResp, err := started.chunks, started.resp, started.err
 	if err != nil {
+		if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+			return false, nil, pe, 0
+		}
+		// The relay first-byte timer cancels only streamCtx.  A provider that
+		// observes that cancellation and returns ctx.Err() can race the timer
+		// select above; classify that local cancellation as a retryable candidate
+		// timeout, not as a client disconnect on the still-live parent request.
+		if relayBudgetContextExpired(ctx, streamCtx) {
+			pe := relayFirstByteTimeoutError(result.ProviderName, firstByteBudget, "headers")
+			e.recordRelayEvent(result.ProviderName, "first_byte_timeout", "headers")
+			e.reportKeyError(result, pe)
+			return false, nil, pe, 0
+		}
 		var pe *provider.ProviderError
 		if errors.As(err, &pe) {
 			e.reportKeyError(result, pe)
 			return false, nil, pe, 0
 		}
-		return false, nil, &provider.ProviderError{
+		errType := provider.ClassifyTransportError(ctx, err)
+		pe = &provider.ProviderError{
+			ProviderName: result.ProviderName,
+			ErrorType:    errType,
+			Message:      err.Error(),
+		}
+		e.reportKeyError(result, pe)
+		return false, nil, pe, 0
+	}
+	if chunkCh == nil || headerResp == nil {
+		// A Provider that returns nil channel/response with a nil error has not
+		// established a usable stream. Treat it as a transport failure instead
+		// of blocking forever on a nil channel or panicking while copying
+		// response headers; normal failover can then try the next candidate.
+		pe := &provider.ProviderError{
 			ProviderName: result.ProviderName,
 			ErrorType:    provider.ErrorTypeConnection,
-			Message:      err.Error(),
-		}, 0
+			Message:      "provider returned incomplete stream response",
+		}
+		e.reportKeyError(result, pe)
+		return false, nil, pe, 0
 	}
 
 	// Task 7 / F4: 全局流上限由 acquireStreamSlot 内部处理 — 在 chunk
@@ -605,43 +762,190 @@ func (e *Engine) doStream(
 	// 只缓冲 1 个:既能过滤"根本连不上"的 provider,又不显著增加 TTFT。
 	const bufferSize = 1
 	buffer := make([][]byte, 0, bufferSize)
-	for i := 0; i < bufferSize; i++ {
-		chunk, ok := <-chunkCh
+firstChunk:
+	for len(buffer) < bufferSize {
+		var chunk *provider.StreamChunk
+		var ok bool
+		select {
+		case <-ctx.Done():
+			if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+				return false, nil, pe, 0
+			}
+			return false, nil, &provider.ProviderError{
+				ProviderName: result.ProviderName,
+				ErrorType:    provider.ErrorTypeTimeout,
+				Message:      ctx.Err().Error(),
+			}, 0
+		case <-firstByteDeadline:
+			cancelStream()
+			pe := relayFirstByteTimeoutError(result.ProviderName, firstByteBudget, "body")
+			e.recordRelayEvent(result.ProviderName, "first_byte_timeout", "body")
+			e.logger.Info("relay first-byte timeout",
+				zap.String("provider", result.ProviderName),
+				zap.Bool("passthrough", true),
+				zap.String("first_byte_stage", "body"),
+				zap.Bool("response_committed", false),
+				zap.String("trace_id", req.TraceID))
+			e.reportKeyError(result, pe)
+			return false, nil, pe, 0
+		case chunk, ok = <-chunkCh:
+		}
 		if !ok {
-			// 流太短,没等到 N 个就结束了 — 这也算成功(有些模型输出很短)
-			break
+			// A raw relay producer may observe parent cancellation and close its
+			// channel without enqueueing a sentinel error. Check the authoritative
+			// parent before treating that close as a clean stream end.
+			if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+				if entry != nil {
+					entry.ErrorType = string(pe.ErrorType)
+				}
+				if isRelay {
+					stage := "client_disconnected"
+					if pe.ErrorType == provider.ErrorTypeTimeout {
+						stage = "timeout"
+					}
+					e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
+				}
+				return false, nil, pe, 0
+			}
+			// A relay stream that closes before producing any body byte has not
+			// committed a usable response.  Treat it as an upstream failure so
+			// the candidate budget/failover machinery can try the next candidate;
+			// otherwise the old path committed an empty HTTP 200 and prevented
+			// every later relay from being attempted.
+			if isRelay && len(buffer) == 0 {
+				pe := &provider.ProviderError{
+					ProviderName:   result.ProviderName,
+					ErrorType:      provider.ErrorTypeServerError,
+					Message:        "relay stream ended before first response byte",
+					FirstByteStage: "body",
+				}
+				e.reportKeyError(result, pe)
+				if entry != nil {
+					entry.ErrorType = string(pe.ErrorType)
+				}
+				e.recordRelayEvent(result.ProviderName, "stream_interrupted", "empty_body")
+				return false, nil, pe, 0
+			}
+			// 流太短,没等到 N 个就结束了 — 内置 provider 仍保留历史行为
+			// (有些实现会用空流表示已完成的短响应)。
+			break firstChunk
 		}
 		if chunk.Err != nil {
 			// 前 N 个 chunk 内出错 → 还没发 200 → 可以 failover
+			if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+				return false, nil, pe, 0
+			}
+			// See the equivalent start error handling above.  A raw context
+			// sentinel from a producer after the local relay budget canceled its
+			// child context is a candidate timeout, while the parent remains live.
+			if relayBudgetContextExpired(ctx, streamCtx) {
+				pe := relayFirstByteTimeoutError(result.ProviderName, firstByteBudget, "body")
+				e.recordRelayEvent(result.ProviderName, "first_byte_timeout", "body")
+				e.reportKeyError(result, pe)
+				return false, nil, pe, 0
+			}
+			// A provider may report the context sentinel before the parent
+			// cancellation is observed by this select. Treat both sentinels as
+			// terminal client/request cancellation; never turn them into a
+			// retryable upstream failure.
+			if errors.Is(chunk.Err, context.Canceled) || errors.Is(chunk.Err, context.DeadlineExceeded) {
+				errType := provider.ClassifyTransportError(ctx, chunk.Err)
+				pe := &provider.ProviderError{
+					ProviderName: result.ProviderName,
+					ErrorType:    errType,
+					Message:      "stream stopped before response commit: " + chunk.Err.Error(),
+				}
+				if entry != nil {
+					entry.ErrorType = string(errType)
+				}
+				if isRelay {
+					stage := "client_disconnected"
+					if errType == provider.ErrorTypeTimeout {
+						stage = "timeout"
+					}
+					e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
+				}
+				return false, nil, pe, 0
+			}
+			if isRelay && errors.Is(chunk.Err, io.EOF) && len(buffer) == 0 {
+				pe := &provider.ProviderError{
+					ProviderName:   result.ProviderName,
+					ErrorType:      provider.ErrorTypeServerError,
+					Message:        "relay stream ended before first response byte",
+					FirstByteStage: "body",
+				}
+				e.reportKeyError(result, pe)
+				if entry != nil {
+					entry.ErrorType = string(pe.ErrorType)
+				}
+				e.recordRelayEvent(result.ProviderName, "stream_interrupted", "empty_body")
+				return false, nil, pe, 0
+			}
 			var pe *provider.ProviderError
 			if errors.As(chunk.Err, &pe) {
 				e.reportKeyError(result, pe)
 				return false, nil, pe, 0
 			}
-			return false, nil, &provider.ProviderError{
+			errType := provider.ClassifyTransportError(ctx, chunk.Err)
+			pe = &provider.ProviderError{
 				ProviderName: result.ProviderName,
-				ErrorType:    provider.ErrorTypeConnection,
+				ErrorType:    errType,
 				Message:      "stream failed early: " + chunk.Err.Error(),
-			}, 0
+			}
+			e.reportKeyError(result, pe)
+			return false, nil, pe, 0
 		}
 		if len(chunk.Data) > 0 {
+			recordPhase("body")
+			if relayPhaseObserver != nil {
+				relayPhaseObserver.Observe(chunk.Data)
+			}
 			buffer = append(buffer, chunk.Data)
+			stopTimer(firstByteTimer)
+			firstByteDeadline = nil
 		}
 	}
+	stopTimer(firstByteTimer)
+	firstByteDeadline = nil
 
-	// 前 N 个 chunk 都成功 → 认为上游稳定 → 现在才报告 key 成功、发送 200
-	// P-per-key-circuit: 熔断上报已并入 Pool.ReportSuccess(per-key)
-	e.reportKeySuccess(result)
-
-	// 设置 SSE headers
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	if req.TraceID != "" {
-		c.Writer.Header().Set("X-Request-Id", req.TraceID)
+	// 前 N 个 chunk 都成功 → 认为上游稳定 → 现在才发送 200。内置协议
+	// Provider 可能已在拿到响应头时报告成功，透明 relay 则由 proxy 负责；
+	// 用 Response 标记避免一次真实请求被重复计数。
+	if headerResp == nil || !headerResp.KeyPoolReported {
+		e.reportKeySuccess(result)
 	}
-	c.Writer.WriteHeader(http.StatusOK)
+
+	statusCode := http.StatusOK
+	commitStage := "body"
+	if isRelay {
+		if len(buffer) > 0 {
+			commitStage = relayResponseStage(buffer[0])
+		}
+		copyRelayResponseHeaders(c, headerResp.Headers, req.TraceID)
+		if headerResp.StatusCode >= 100 && headerResp.StatusCode <= 599 {
+			statusCode = headerResp.StatusCode
+		}
+	} else {
+		// Builtin providers keep the Gateway's normalized SSE response contract.
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		if req.TraceID != "" {
+			c.Writer.Header().Set("X-Request-Id", req.TraceID)
+		}
+	}
+	c.Writer.WriteHeader(statusCode)
 	c.Writer.Flush()
+	if isRelay {
+		e.recordRelayEvent(result.ProviderName, "response_committed", commitStage)
+		e.logger.Debug("relay candidate response committed",
+			zap.String("provider", result.ProviderName),
+			zap.String("key_id", keyIDOf(result.Key)),
+			zap.Bool("passthrough", true),
+			zap.String("first_byte_stage", commitStage),
+			zap.Bool("response_committed", true),
+			zap.String("trace_id", req.TraceID))
+	}
 
 	flusher, _ := c.Writer.(http.Flusher)
 	canFlush := flusher != nil
@@ -672,6 +976,9 @@ func (e *Engine) doStream(
 		if _, err := c.Writer.Write(data); err != nil {
 			if entry != nil {
 				entry.ErrorType = "client_disconnected"
+			}
+			if isRelay {
+				e.recordRelayEvent(result.ProviderName, "stream_interrupted", "client_disconnected")
 			}
 			e.logger.Warn("write buffered chunk (client likely disconnected)",
 				zap.String("provider", result.ProviderName),
@@ -704,6 +1011,21 @@ func (e *Engine) doStream(
 		select {
 		case chunk, ok := <-chunkCh:
 			if !ok {
+				// A raw relay producer may close after observing parent cancellation
+				// without sending an error sentinel. Preserve P0 classification.
+				if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+					if entry != nil {
+						entry.ErrorType = string(pe.ErrorType)
+					}
+					if isRelay {
+						stage := "client_disconnected"
+						if pe.ErrorType == provider.ErrorTypeTimeout {
+							stage = "timeout"
+						}
+						e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
+					}
+					goto streamEnd
+				}
 				// channel 关闭,正常结束
 				goto streamEnd
 			}
@@ -720,6 +1042,60 @@ func (e *Engine) doStream(
 
 			if chunk.Err != nil {
 				if errors.Is(chunk.Err, io.EOF) {
+					// EOF can race a parent cancellation when a raw producer
+					// delivers its final sentinel just as the client leaves. Keep
+					// cancellation visible in Access Log instead of reporting a
+					// clean stream.
+					if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+						if entry != nil {
+							entry.ErrorType = string(pe.ErrorType)
+						}
+						if isRelay {
+							stage := "client_disconnected"
+							if pe.ErrorType == provider.ErrorTypeTimeout {
+								stage = "timeout"
+							}
+							e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
+						}
+					}
+					goto streamEnd
+				}
+				// A context sentinel is a local termination signal, not an
+				// upstream stream error. The response may already be committed,
+				// so close the stream without manufacturing an SSE error event.
+				var streamPE *provider.ProviderError
+				if errors.As(chunk.Err, &streamPE) &&
+					(streamPE.ErrorType == provider.ErrorTypeClientDisconnected || streamPE.ErrorType == provider.ErrorTypeTimeout) {
+					if entry != nil {
+						entry.ErrorType = string(streamPE.ErrorType)
+					}
+					if isRelay {
+						stage := "client_disconnected"
+						if streamPE.ErrorType == provider.ErrorTypeTimeout {
+							stage = "timeout"
+						}
+						e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
+					}
+					e.logger.Warn("stream stopped by context",
+						zap.String("provider", result.ProviderName),
+						zap.Error(chunk.Err))
+					goto streamEnd
+				}
+				if errors.Is(chunk.Err, context.Canceled) || errors.Is(chunk.Err, context.DeadlineExceeded) {
+					errType := provider.ClassifyTransportError(ctx, chunk.Err)
+					if entry != nil {
+						entry.ErrorType = string(errType)
+					}
+					if isRelay {
+						stage := "client_disconnected"
+						if errType == provider.ErrorTypeTimeout {
+							stage = "timeout"
+						}
+						e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
+					}
+					e.logger.Warn("stream stopped by context",
+						zap.String("provider", result.ProviderName),
+						zap.Error(chunk.Err))
 					goto streamEnd
 				}
 				// 流中途错误(上游断流 / 连接被杀 / context canceled):
@@ -728,18 +1104,26 @@ func (e *Engine) doStream(
 				if entry != nil {
 					entry.ErrorType = "stream_interrupted"
 				}
+				if isRelay {
+					e.recordRelayEvent(result.ProviderName, "stream_interrupted", "upstream_error")
+				}
 				e.logger.Warn("stream mid-error",
 					zap.String("provider", result.ProviderName),
 					zap.Error(chunk.Err))
-				fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":%q}}\n\n",
-					chunk.Err.Error())
-				if canFlush {
-					flusher.Flush()
+				if !isRelay {
+					fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":{\"type\":\"stream_error\",\"message\":%q}}\n\n",
+						chunk.Err.Error())
+					if canFlush {
+						flusher.Flush()
+					}
 				}
 				goto streamEnd
 			}
 			if len(chunk.Data) == 0 {
 				continue
+			}
+			if relayPhaseObserver != nil {
+				relayPhaseObserver.Observe(chunk.Data)
 			}
 			// P-sse-stream-error: 流**中途**的上游错误事件(Provider 的 peek 窗口只覆盖
 			// 流头,窗口之外由这里兜底 — 实测 minimax 在第 42 个事件才发内容审核错误)。
@@ -773,6 +1157,9 @@ func (e *Engine) doStream(
 				if entry != nil {
 					entry.ErrorType = "client_disconnected"
 				}
+				if isRelay {
+					e.recordRelayEvent(result.ProviderName, "stream_interrupted", "client_disconnected")
+				}
 				e.logger.Warn("write stream chunk (client likely disconnected)",
 					zap.String("provider", result.ProviderName),
 					zap.Error(err))
@@ -789,27 +1176,59 @@ func (e *Engine) doStream(
 			_ = rc.SetWriteDeadline(time.Now().Add(e.writeTimeout))
 
 		case <-idleTimer.C:
+			// A parent cancellation can race the idle timer. Prefer the
+			// authoritative client/deadline classification when it is already
+			// observable, rather than recording an upstream idle timeout.
+			if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+				if entry != nil {
+					entry.ErrorType = string(pe.ErrorType)
+				}
+				if isRelay {
+					stage := "client_disconnected"
+					if pe.ErrorType == provider.ErrorTypeTimeout {
+						stage = "timeout"
+					}
+					e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
+				}
+				goto streamEnd
+			}
 			// 空闲超时:连续 N 秒没收到新 chunk → 认为上游断流
 			// 快速失败让客户端重试,不等 provider.timeout(60s)
 			if entry != nil {
 				entry.ErrorType = "stream_idle_timeout"
+			}
+			if isRelay {
+				e.recordRelayEvent(result.ProviderName, "stream_interrupted", "idle_timeout")
 			}
 			idleDuration := time.Since(lastChunkTime)
 			e.logger.Warn("stream idle timeout",
 				zap.String("provider", result.ProviderName),
 				zap.Duration("idle_duration", idleDuration),
 				zap.Duration("idle_timeout", idleTimeout))
-			fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":{\"type\":\"stream_idle_timeout\",\"message\":\"no data received for %s\"}}\n\n",
-				idleDuration.Round(time.Second))
-			if canFlush {
-				flusher.Flush()
+			if !isRelay {
+				fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":{\"type\":\"stream_idle_timeout\",\"message\":\"no data received for %s\"}}\n\n",
+					idleDuration.Round(time.Second))
+				if canFlush {
+					flusher.Flush()
+				}
 			}
 			goto streamEnd
 
 		case <-ctx.Done():
 			// context 取消(客户端断开 / 超时)
 			if entry != nil {
-				entry.ErrorType = "context_canceled"
+				if errors.Is(ctx.Err(), context.Canceled) {
+					entry.ErrorType = "client_disconnected"
+				} else {
+					entry.ErrorType = "timeout"
+				}
+			}
+			if isRelay {
+				stage := "idle_timeout"
+				if errors.Is(ctx.Err(), context.Canceled) {
+					stage = "client_disconnected"
+				}
+				e.recordRelayEvent(result.ProviderName, "stream_interrupted", stage)
 			}
 			e.logger.Warn("stream context canceled",
 				zap.String("provider", result.ProviderName),
@@ -827,6 +1246,101 @@ streamEnd:
 		streamUsage = headerResp.GetUsage()
 	}
 	return true, streamUsage, nil, ttftMs
+}
+
+func relayFirstByteTimeoutError(providerName string, timeout time.Duration, stage string) *provider.ProviderError {
+	return &provider.ProviderError{
+		ProviderName:   providerName,
+		ErrorType:      provider.ErrorTypeTimeout,
+		Message:        fmt.Sprintf("relay first byte timeout after %s", timeout),
+		FirstByteStage: stage,
+	}
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+// relayBudgetContextExpired identifies cancellation caused by the local
+// first-byte budget child context, rather than by the client request context.
+// It is intentionally limited to an expired candidate budget so an arbitrary
+// provider-originated context.Canceled remains classified by the normal P0
+// transport rules.
+func relayBudgetContextExpired(ctx, streamCtx context.Context) bool {
+	if ctx == nil || streamCtx == nil || streamCtx == ctx {
+		return false
+	}
+	parent := parentRequestContext(ctx)
+	if parent == nil || parent.Err() != nil || streamCtx.Err() == nil {
+		return false
+	}
+	deadline, ok := candidateBudgetDeadline(ctx)
+	return ok && !time.Now().Before(deadline)
+}
+
+func (e *Engine) recordStreamTTFT(providerName, model string, bodySize int, phase string, duration time.Duration) {
+	recorder, ok := e.metrics.(StreamTTFTRecorder)
+	if !ok {
+		return
+	}
+	recorder.RecordStreamTTFT(providerName, model, requestSizeBucket(bodySize), phase, duration)
+}
+
+func (e *Engine) recordRelayEvent(providerName, event, stage string) {
+	recorder, ok := e.metrics.(RelayEventRecorder)
+	if !ok {
+		return
+	}
+	recorder.RecordRelayEvent(providerName, event, stage)
+}
+
+func (e *Engine) addRelayActiveUpstreams(providerName string, delta int) {
+	recorder, ok := e.metrics.(RelayEventRecorder)
+	if !ok {
+		return
+	}
+	recorder.AddRelayActiveUpstreams(providerName, delta)
+}
+
+func relayResponseStage(data []byte) string {
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		switch {
+		case bytes.HasPrefix(line, []byte(":")):
+			return "ping"
+		case bytes.HasPrefix(line, []byte("data:")):
+			return "data"
+		default:
+			return "body"
+		}
+	}
+	return "body"
+}
+
+func requestSizeBucket(bodySize int) string {
+	switch {
+	case bodySize < 100*1024:
+		return "lt_100kb"
+	case bodySize < 500*1024:
+		return "100kb_500kb"
+	case bodySize < 1024*1024:
+		return "500kb_1mb"
+	case bodySize < 2*1024*1024:
+		return "1mb_2mb"
+	default:
+		return "gte_2mb"
+	}
 }
 
 // calculateIdleTimeout 根据请求体大小动态计算流空闲超时时间。
@@ -873,10 +1387,33 @@ func (e *Engine) writeNonStreamResponse(
 	latency time.Duration,
 	entry *accesslog.AccessEntry,
 ) {
-	copyResponseHeaders(c, resp.Headers)
+	isRelay := e.router.Manager().IsRelay(result.ProviderName)
+	if isRelay {
+		copyRelayResponseHeaders(c, resp.Headers, req.TraceID)
+	} else {
+		copyResponseHeaders(c, resp.Headers)
+	}
 	c.Writer.WriteHeader(resp.StatusCode)
+	if isRelay {
+		e.recordRelayEvent(result.ProviderName, "response_committed", "body")
+		e.logger.Debug("relay candidate response committed",
+			zap.String("provider", result.ProviderName),
+			zap.String("key_id", keyIDOf(result.Key)),
+			zap.Bool("passthrough", true),
+			zap.String("first_byte_stage", "body"),
+			zap.Bool("response_committed", true),
+			zap.String("trace_id", req.TraceID))
+	}
 	if _, err := c.Writer.Write(resp.Body); err != nil {
-		e.logger.Warn("write response", zap.Error(err))
+		// The status/header commitment means this response cannot be retried
+		// with another candidate.  Keep the existing terminal routing behavior,
+		// but expose the write-side disconnect to Access Log instead of letting
+		// the deferred recorder classify a failed client write as a successful
+		// upstream response.
+		if entry != nil {
+			entry.ErrorType = string(provider.ErrorTypeClientDisconnected)
+		}
+		e.logger.Warn("write response (client likely disconnected)", zap.Error(err))
 	}
 	// P67 / Task 7: 同步写响应 body 文件(失败也继续 — body 文件丢了不影响主响应)
 	if entry != nil && e.accessLog != nil && !req.IsStream {
@@ -885,7 +1422,7 @@ func (e *Engine) writeNonStreamResponse(
 			entry.RespBodySize = len(resp.Body)
 		}
 	}
-	e.recordUsageWithTokens(req, result, latency, 0, resp.StatusCode, "", req.IsStream, resp.Usage)
+	e.recordUsageWithTokens(req, result, latency, 0, resp.StatusCode, entryErrorType(entry), req.IsStream, resp.Usage)
 }
 
 // isResponsesPath 判断请求路径是否是 OpenAI Responses API(Codex)
@@ -962,12 +1499,35 @@ func stripResponsesReasoning(body []byte) ([]byte, bool) {
 // handleAllFailed 所有 failover 都失败
 func (e *Engine) handleAllFailed(
 	c *gin.Context,
+	ctx context.Context,
 	req *provider.Request,
 	lastErr *provider.ProviderError,
 	traceID string,
+	entry *accesslog.AccessEntry,
 ) {
+	// A parent request deadline is terminal just like client cancellation. The
+	// candidate-local relay timeout remains retryable because it uses a child
+	// context and is not visible through ctx here.
+	if terminal := requestContextTerminalError(ctx, ""); terminal != nil {
+		lastErr = terminal
+	}
 	if lastErr == nil {
 		writeJSONError(c, http.StatusBadGateway, "gateway_error", "all providers failed")
+		return
+	}
+	if lastErr.ErrorType == provider.ErrorTypeClientDisconnected {
+		// 客户端已经离开，不能再写错误 body。未提交响应时只保留 499 口径；
+		// 已提交的流保持实际 HTTP status（通常是 200）。
+		if !c.Writer.Written() {
+			c.Status(499)
+		}
+		return
+	}
+	if lastErr.ErrorType == provider.ErrorTypeTimeout &&
+		ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if !c.Writer.Written() {
+			c.Status(http.StatusGatewayTimeout)
+		}
 		return
 	}
 
@@ -977,6 +1537,26 @@ func (e *Engine) handleAllFailed(
 	if lastErr.ErrorType == provider.ErrorTypeModelNotAllowed {
 		c.Writer.Header().Set("X-Request-Id", traceID)
 		writeJSONError(c, http.StatusForbidden, "model_not_allowed", lastErr.Message)
+		return
+	}
+
+	// A relay HTTP response remains authoritative after failover is exhausted,
+	// even when its status/error type was retryable. Only transport failures
+	// without an HTTP response are converted into Gateway 502/504 responses.
+	if lastErr.StatusCode >= 100 && lastErr.StatusCode <= 599 &&
+		lastErr.UpstreamHeaders != nil && e.router.Manager().IsRelay(lastErr.ProviderName) {
+		copyRelayResponseHeaders(c, lastErr.UpstreamHeaders, traceID)
+		c.Writer.WriteHeader(lastErr.StatusCode)
+		e.recordRelayEvent(lastErr.ProviderName, "response_committed", "body")
+		if len(lastErr.RawError) > 0 {
+			_, _ = c.Writer.Write(lastErr.RawError)
+			if entry != nil && e.accessLog != nil {
+				if p, _ := e.accessLog.WriteBody(req.TraceID, "resp", lastErr.RawError); p != "" {
+					entry.RespBodyPath = p
+					entry.RespBodySize = len(lastErr.RawError)
+				}
+			}
+		}
 		return
 	}
 
@@ -1119,7 +1699,7 @@ func (e *Engine) reportKeySuccess(result *router.RouteResult) {
 }
 
 func (e *Engine) reportKeyError(result *router.RouteResult, pe *provider.ProviderError) {
-	if pe == nil || pe.KeyPoolReported {
+	if pe == nil || pe.KeyPoolReported || pe.ErrorType == provider.ErrorTypeClientDisconnected {
 		return
 	}
 	if pool := e.router.Pool(result.ProviderName); pool != nil && result.Key != nil {
@@ -1138,6 +1718,117 @@ func statusFromErr(pe *provider.ProviderError) int {
 		return http.StatusOK
 	}
 	return pe.StatusCode
+}
+
+// requestContextTerminalError maps the parent request context to a terminal
+// routing error. A canceled/deadline parent has no live client to serve, so the
+// candidate loop must stop instead of trying another key/provider.
+type candidateBudgetParentKey struct{}
+
+// candidateBudgetDeadlineKey carries one absolute first-byte deadline for a
+// relay candidate. It is deliberately a value, rather than a context
+// deadline: once the first response byte is committed, the stream must keep
+// running until the client context ends.
+type candidateBudgetDeadlineKey struct{}
+
+// parentRequestContext returns the client request context for a candidate
+// context carrying a local relay budget. Keeping this distinction prevents a
+// local first-byte timeout from being mistaken for a client cancellation or a
+// parent request deadline.
+func parentRequestContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	if parent, ok := ctx.Value(candidateBudgetParentKey{}).(context.Context); ok && parent != nil {
+		return parent
+	}
+	return ctx
+}
+
+func requestContextTerminalError(ctx context.Context, providerName string) *provider.ProviderError {
+	ctx = parentRequestContext(ctx)
+	if ctx == nil {
+		return nil
+	}
+	switch ctx.Err() {
+	case context.Canceled:
+		return &provider.ProviderError{
+			ProviderName: providerName,
+			ErrorType:    provider.ErrorTypeClientDisconnected,
+			Message:      "client disconnected: " + ctx.Err().Error(),
+		}
+	case context.DeadlineExceeded:
+		return &provider.ProviderError{
+			ProviderName: providerName,
+			StatusCode:   http.StatusGatewayTimeout,
+			ErrorType:    provider.ErrorTypeTimeout,
+			Message:      "request deadline exceeded",
+		}
+	}
+	return nil
+}
+
+// candidateBudgetTimeoutError reports expiry of a local relay candidate budget.
+// It is retryable by the outer route loop as long as the parent request is
+// still alive.
+func candidateBudgetTimeoutError(ctx context.Context, providerName string) *provider.ProviderError {
+	deadline, ok := candidateBudgetDeadline(ctx)
+	if !ok || time.Now().Before(deadline) {
+		return nil
+	}
+	parent := parentRequestContext(ctx)
+	if parent != nil && parent.Err() == nil {
+		return &provider.ProviderError{
+			ProviderName: providerName,
+			ErrorType:    provider.ErrorTypeTimeout,
+			Message:      "relay candidate budget exceeded",
+		}
+	}
+	return nil
+}
+
+func candidateBudgetDeadline(ctx context.Context) (time.Time, bool) {
+	if ctx == nil {
+		return time.Time{}, false
+	}
+	deadline, ok := ctx.Value(candidateBudgetDeadlineKey{}).(time.Time)
+	return deadline, ok && !deadline.IsZero()
+}
+
+func candidateBudgetRemaining(ctx context.Context) (time.Duration, bool) {
+	deadline, ok := candidateBudgetDeadline(ctx)
+	if !ok {
+		return 0, false
+	}
+	return time.Until(deadline), true
+}
+
+// candidateAttemptContext starts one absolute budget for a relay stream
+// candidate. Both the initially selected key and its replacement key receive
+// this same context; a replacement cannot reset the full first-byte timeout.
+func (e *Engine) candidateAttemptContext(parent context.Context, req *provider.Request, result *router.RouteResult) (context.Context, func()) {
+	if parent == nil || req == nil || !req.IsStream || e == nil || e.router == nil ||
+		result == nil || !e.router.Manager().IsRelay(result.ProviderName) || e.relayFirstByteTimeout <= 0 {
+		return parent, func() {}
+	}
+	// Keep the local budget out of ctx.Done(). A context deadline would
+	// terminate an already committed stream (for example after a relay PING).
+	// doStream applies this absolute deadline only until the first body byte;
+	// both key attempts therefore consume the same budget.
+	deadline := time.Now().Add(e.relayFirstByteTimeout)
+	budgetCtx := context.WithValue(parent, candidateBudgetParentKey{}, parent)
+	budgetCtx = context.WithValue(budgetCtx, candidateBudgetDeadlineKey{}, deadline)
+	return budgetCtx, func() {}
+}
+
+// clientDisconnectError is retained for provider internals that only need to
+// distinguish a client cancellation from an upstream timeout.
+func clientDisconnectError(ctx context.Context, providerName string) *provider.ProviderError {
+	pe := requestContextTerminalError(ctx, providerName)
+	if pe == nil || pe.ErrorType != provider.ErrorTypeClientDisconnected {
+		return nil
+	}
+	return pe
 }
 
 // runWithFirstResult 用已经 Next 出来的第一个 result 开始循环
@@ -1186,7 +1877,17 @@ func (e *Engine) runCandidateLoop(
 	outLastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
 ) {
+	if pe := requestContextTerminalError(ctx, ""); pe != nil {
+		*outLastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		e.handleAllFailed(c, ctx, req, pe, req.TraceID, entry)
+		e.logCancellationSummary(req, 0)
+		return
+	}
 	attempts := 0 // 当前层「实际尝试」次数(白名单 skip 不计入预算)
+	candidateCount := 0
 	currentTier := ""
 	quotaEvidenceInTier := false // 当前层是否出现过额度证据(仅 token_plan 层可产生,决策 9)
 	tierSawFailure := false      // 当前层是否有过实际失败(白名单 skip 不算,决策:纯 skip 层自由推进)
@@ -1204,7 +1905,7 @@ func (e *Engine) runCandidateLoop(
 	// 返回 false = 已 handleAllFailed,调用方直接 return。
 	acceptTier := func(newTier string) bool {
 		if currentTier != "" && tierSawFailure && !quotaEvidenceInTier {
-			e.handleAllFailed(c, req, *outLastErr, req.TraceID)
+			e.handleAllFailed(c, ctx, req, *outLastErr, req.TraceID, entry)
 			return false
 		}
 		quotaEvidenceInTier = false
@@ -1234,6 +1935,15 @@ func (e *Engine) runCandidateLoop(
 	}
 
 	for {
+		if pe := requestContextTerminalError(ctx, *outProviderName); pe != nil {
+			*outLastErr = pe
+			if entry != nil {
+				entry.ErrorType = string(pe.ErrorType)
+			}
+			e.handleAllFailed(c, ctx, req, pe, req.TraceID, entry)
+			e.logCancellationSummary(req, candidateCount)
+			return
+		}
 		var result *router.RouteResult
 		var err error
 
@@ -1269,9 +1979,23 @@ func (e *Engine) runCandidateLoop(
 			zap.String("key_status", keyStatusOf(result.Key)),
 			zap.String("model", result.ModelID),
 			zap.String("tier", result.Tier),
+			zap.Bool("passthrough", e.router.Manager().IsRelay(result.ProviderName)),
 			zap.Int("attempt", attempts+1))
 
 		outcome, quotaEv, attempted := e.tryCandidate(c, ctx, req, result, outProviderName, outLastErr, entry)
+		if attempted {
+			attempts++
+			candidateCount++
+		}
+		if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+			*outLastErr = pe
+			if entry != nil {
+				entry.ErrorType = string(pe.ErrorType)
+			}
+			e.handleAllFailed(c, ctx, req, pe, req.TraceID, entry)
+			e.logCancellationSummary(req, candidateCount)
+			return
+		}
 		quotaEvidenceInTier = quotaEvidenceInTier || quotaEv
 		tierSawFailure = tierSawFailure || attempted
 		// P-key: 记录实际发请求的上游 key ID(换 key 重试后 result.Key 已是最终 key)。
@@ -1285,14 +2009,25 @@ func (e *Engine) runCandidateLoop(
 		if entry != nil && result.Protocol != "" {
 			entry.Protocol = string(result.Protocol)
 		}
-		if attempted {
-			attempts++
+		if outcome != outcomeOK && c.Writer.Written() {
+			if e.router.Manager().IsRelay(result.ProviderName) {
+				e.recordRelayEvent(result.ProviderName, "switch_after_response_committed", "none")
+			}
+			e.logger.Error("candidate switch blocked after response commit",
+				zap.String("provider", result.ProviderName),
+				zap.Bool("passthrough", e.router.Manager().IsRelay(result.ProviderName)),
+				zap.Bool("response_committed", true),
+				zap.String("trace_id", req.TraceID))
+			return
 		}
 		switch outcome {
 		case outcomeOK:
+			if *outLastErr != nil && (*outLastErr).ErrorType == provider.ErrorTypeClientDisconnected {
+				e.logCancellationSummary(req, candidateCount)
+			}
 			return
 		case outcomeFatal:
-			e.handleAllFailed(c, req, *outLastErr, req.TraceID)
+			e.handleAllFailed(c, ctx, req, *outLastErr, req.TraceID, entry)
 			return
 		case outcomeContinue:
 			// 继续下一候选
@@ -1300,7 +2035,14 @@ func (e *Engine) runCandidateLoop(
 	}
 
 	// 所有尝试都失败(迭代器穷尽 / 最后一层无下一层可降)
-	e.handleAllFailed(c, req, *outLastErr, req.TraceID)
+	e.handleAllFailed(c, ctx, req, *outLastErr, req.TraceID, entry)
+}
+
+func (e *Engine) logCancellationSummary(req *provider.Request, candidateCount int) {
+	e.logger.Info("candidate chain canceled",
+		zap.String("trace_id", req.TraceID),
+		zap.Int("candidate_count", candidateCount),
+		zap.Int("post_cancel_candidate_count", 0))
 }
 
 // tryCandidate 处理单个候选:白名单校验 → 发请求 → 失败后按错误分类路由。
@@ -1321,6 +2063,56 @@ func (e *Engine) runCandidateLoop(
 //     全层穷尽时按「无证据」失败返回(所有 key 都坏,去 api 层一样坏,不降档)
 //   - 额度类(quota_exceeded / rate_limit)→ token_plan 层记证据;api/free 层无证据
 //   - 其他 retryable(model_not_allowed 等)→ 继续,无证据
+func (e *Engine) buildAttemptRequest(base *provider.Request, result *router.RouteResult) *provider.Request {
+	requestedModel := base.RequestedModel
+	if requestedModel == "" {
+		requestedModel = base.Model
+	}
+	attempt := &provider.Request{
+		Method:         base.Method,
+		Path:           base.Path,
+		RawQuery:       base.RawQuery,
+		Headers:        base.Headers.Clone(),
+		Body:           bytes.Clone(base.Body),
+		RequestedModel: requestedModel,
+		RoutingModel:   base.RoutingModel,
+		Model:          result.ModelID,
+		IsStream:       base.IsStream,
+		GatewayKeyID:   base.GatewayKeyID,
+		TraceID:        base.TraceID,
+		Key:            result.Key,
+	}
+	if attempt.RoutingModel == "" {
+		attempt.RoutingModel = base.Model
+	}
+	if attempt.Headers == nil {
+		attempt.Headers = make(http.Header)
+	}
+	if attempt.Headers.Get("X-Request-Id") == "" && attempt.TraceID != "" {
+		attempt.Headers.Set("X-Request-Id", attempt.TraceID)
+	}
+
+	if e.router.Manager().IsRelay(result.ProviderName) {
+		attempt.Model = requestedModel
+		e.bindKey(attempt, result)
+		return attempt
+	}
+
+	if isResponsesPath(attempt.Path) {
+		if body, _ := stripResponsesReasoning(attempt.Body); body != nil {
+			attempt.Body = body
+		}
+	}
+	if body, ok := rewriteModelField(attempt.Body, result.ModelID); ok {
+		attempt.Body = body
+	}
+	if e.fingerprintSanitizer != nil {
+		attempt.Body = e.fingerprintSanitizer(attempt.Body)
+	}
+	e.bindKey(attempt, result)
+	return attempt
+}
+
 func (e *Engine) tryCandidate(
 	c *gin.Context,
 	ctx context.Context,
@@ -1330,8 +2122,19 @@ func (e *Engine) tryCandidate(
 	lastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
 ) (candidateOutcome, bool, bool) {
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		*outProviderName = result.ProviderName
+		*lastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		return outcomeFatal, false, false
+	}
+	attemptCtx, cancelCandidate := e.candidateAttemptContext(ctx, req, result)
+	defer cancelCandidate()
+	isRelay := e.router.Manager().IsRelay(result.ProviderName)
 	// P-relay-passthrough: 中转站模式跳过白名单校验（直接透传客户端模型名）
-	if e.router.Manager().IsRelay(result.ProviderName) {
+	if isRelay {
 		goto afterWhitelist
 	}
 
@@ -1384,28 +2187,30 @@ afterWhitelist:
 	if e.inflight != nil {
 		e.inflight.SetFinalModel(req.TraceID, result.ModelID)
 	}
-	req.Headers.Set("X-Request-Id", req.TraceID)
-	// P-key-mismatch: 把已 acquire 的 key 传给 Provider — 否则 Provider 内部
-	// 再 acquire 一次可能拿到不同 key,429 上报冷却标错 key(2026-08-06 实测)
-	e.bindKey(req, result)
-	// P-catch-all: 上游必须收到真实 model 名,不能发客户端原始名。
-	// 长格式 alias / catch_all 的每个候选带各自的目标 model(如 MiniMax-M3 与
-	// deepseek-v4-flash 并存),按当前候选重写 body — 否则 failover 到 DeepSeek
-	// 这类严格校验的 provider 会 400 model_not_found(MiniMax 宽容别名所以一直没暴露)。
-	// 真实 model 直连时 result.ModelID == 客户端名,重写为 no-op
-	if newBody, ok2 := rewriteModelField(req.Body, result.ModelID); ok2 {
-		req.Body = newBody
+	// Every candidate derives from the immutable client snapshot. Relay gets
+	// raw bytes; builtin providers receive their existing candidate-specific
+	// reasoning/model/fingerprint adaptations.
+	attemptReq := e.buildAttemptRequest(req, result)
+	if isRelay && !bytes.Equal(req.Body, attemptReq.Body) {
+		e.recordRelayEvent(result.ProviderName, "body_mismatch", "request")
 	}
 
 	// 首次尝试(用候选自带的 key)
-	if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+	if e.attemptOne(c, attemptCtx, attemptReq, result, outProviderName, lastErr, entry) {
 		return outcomeOK, false, true
 	}
-	pe := *lastErr
-	if pe == nil {
+	if pe := requestContextTerminalError(attemptCtx, result.ProviderName); pe != nil {
+		*lastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		return outcomeFatal, false, true
+	}
+	if lastErr == nil || *lastErr == nil {
 		// 没有错误信息(理论不可达)— 按未知继续,不产生证据
 		return outcomeContinue, false, true
 	}
+	pe := *lastErr
 
 	// 不可重试(invalid_request / model_not_found / client_disconnected)→ 直接失败
 	if !errorIsRetryable(pe) {
@@ -1430,8 +2235,9 @@ afterWhitelist:
 	//   - 非 429 rate_limit(常见为 403 配额/权限问题,也可能是 HTTP 200 内嵌错误),
 	//     立即换 key,不同 key 重试 — 避免用同一把 key 反复请求(tokenmarket-kiro 403
 	//     重试 11 次才换 key 的根因)
-	//   - 429 rate_limit: 瞬时限流,用「同一把 key」重试到 10 次(限流是瞬态,重试同一把
-	//     大概率 429 消失),10 次还限流才标 COOLING 并推进下一把 key
+	//   - 429 rate_limit: 内建 Provider 保持同 key 重试到 10 次；透明 relay
+	//     由 Proxy 单独拥有重试预算，首个 429 后立即切同站下一把 key，避免
+	//     协议基座和 Proxy 双层重试放大真实上游请求数
 	if pe.ErrorType == provider.ErrorTypeRateLimit {
 		// 非 429 rate_limit(403 配额/权限,以及 200 内嵌限流错误等):
 		// 立即换 key,不进入同 key 重试循环。
@@ -1440,8 +2246,8 @@ afterWhitelist:
 			// 这里不要再次 ReportRateLimit,否则一次上游错误会把
 			// CoolingCount 累加两次,过早把 token_plan key 升级为 QE。
 			// 尝试换 key 重试一次
-			if e.swapToOtherKey(c, req, result) {
-				if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+			if e.swapToOtherKeyWithContext(attemptCtx, c, attemptReq, result) {
+				if e.attemptOne(c, attemptCtx, attemptReq, result, outProviderName, lastErr, entry) {
 					return outcomeOK, false, true
 				}
 				if lastErr == nil || *lastErr == nil {
@@ -1457,11 +2263,14 @@ afterWhitelist:
 			return outcomeContinue, false, true
 		}
 
-		// 429 rate_limit: 瞬时限流,允许同 key 重试(最多 10 次)
-		if e.retrySameKeyRateLimit(c, ctx, req, result, outProviderName, lastErr, entry) {
+		// 429 rate_limit: 内建 Provider 允许同 key 重试；relay passthrough
+		// 必须立即换 key，保留原始 429 给 Proxy 的 failover 决策，不能在
+		// 协议基座/Proxy 两层各自重试。
+		if !isRelay && e.retrySameKeyRateLimit(c, attemptCtx, attemptReq, result, outProviderName, lastErr, entry) {
 			return outcomeOK, false, true
 		}
-		// 10 次全 429 → 已 ReportRateLimit(COOLING),推进到下一把 key
+		// 内建路径:10 次全 429；relay 路径:首个 429。两者都在这里推进
+		// 到同 provider 的替代 key。
 		if lastErr == nil || *lastErr == nil {
 			return outcomeContinue, false, true
 		}
@@ -1470,8 +2279,8 @@ afterWhitelist:
 			return outcomeFatal, false, true
 		}
 		// 429 之后换 key 重试一次(同网络类语义)
-		if e.swapToOtherKey(c, req, result) {
-			if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+		if e.swapToOtherKeyWithContext(attemptCtx, c, attemptReq, result) {
+			if e.attemptOne(c, attemptCtx, attemptReq, result, outProviderName, lastErr, entry) {
 				return outcomeOK, false, true
 			}
 			if lastErr == nil || *lastErr == nil {
@@ -1489,16 +2298,16 @@ afterWhitelist:
 	// 需要换 key 重试的类:网络类 + auth(决策表 row 3;ModelNotAllowed 除外 —
 	// 白名单是 model 级,换 key 无用)。
 	if isNetworkClass(pe) || pe.ErrorType == provider.ErrorTypeAuth {
-		if e.swapToOtherKey(c, req, result) {
+		if e.swapToOtherKeyWithContext(attemptCtx, c, attemptReq, result) {
 			// 换 key 后重发 — result.Key 已更新为真正发请求的 key,
 			// 429 冷却/熔断上报都会标到这把新 key 上(踩坑 #15)
-			if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
+			if e.attemptOne(c, attemptCtx, attemptReq, result, outProviderName, lastErr, entry) {
 				return outcomeOK, false, true
 			}
-			pe2 := *lastErr
-			if pe2 == nil {
+			if lastErr == nil || *lastErr == nil {
 				return outcomeContinue, false, true
 			}
+			pe2 := *lastErr
 			if !errorIsRetryable(pe2) {
 				// 同首次尝试:候选不适配 → 继续下一站(单源 candidateUnfitNotFatal)
 				if e.candidateUnfitNotFatal(result, req.Model, pe2) {
@@ -1540,7 +2349,7 @@ afterWhitelist:
 			// 无 checker(未注入)→ 不探测,按未知处理
 			return outcomeContinue, false, true
 		}
-		has, qerr := e.quotaChecker.CheckQuota(ctx, result.ProviderName, e.endpointFor(result.ProviderName), result.Key)
+		has, qerr := e.quotaChecker.CheckQuota(attemptCtx, result.ProviderName, e.endpointFor(result.ProviderName), result.Key)
 		if qerr != nil || has {
 			return outcomeContinue, false, true
 		}
@@ -1551,13 +2360,81 @@ afterWhitelist:
 	// 额度类 → 仅 token_plan 层记证据(决策 9:api 层无套餐额度概念,
 	// api/free 层的 429/quota 是单 key 限流,不构成层切换证据)
 	if isQuotaClass(pe) {
-		if result.Tier == string(keypool.BillingSourceTokenPlan) {
-			return outcomeContinue, true, true
-		}
-		return outcomeContinue, false, true
+		return e.tryOtherKeyAfterQuota(c, attemptCtx, attemptReq, req, result, outProviderName, lastErr, entry)
 	}
 	// 其他 retryable(model_not_allowed 等)→ 继续,无证据
 	return outcomeContinue, false, true
+}
+
+// tryOtherKeyAfterQuota gives a direct quota error the same in-provider key
+// failover opportunity as network/auth errors. A quota response proves only
+// that the selected key is exhausted; it says nothing about a sibling key in
+// the same provider/tier/protocol. The first and replacement attempts share
+// the caller's context, so cancellation/deadline cannot start a new attempt.
+func (e *Engine) tryOtherKeyAfterQuota(
+	c *gin.Context,
+	ctx context.Context,
+	attemptReq *provider.Request,
+	baseReq *provider.Request,
+	result *router.RouteResult,
+	outProviderName *string,
+	lastErr **provider.ProviderError,
+	entry *accesslog.AccessEntry,
+) (candidateOutcome, bool, bool) {
+	quotaEvidence := result.Tier == string(keypool.BillingSourceTokenPlan)
+
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		*outProviderName = result.ProviderName
+		*lastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		return outcomeFatal, false, true
+	}
+	// A response cannot be switched after it has been committed. The outer
+	// candidate loop also enforces this guard for all other error branches.
+	if c != nil && c.Writer != nil && c.Writer.Written() {
+		return outcomeContinue, quotaEvidence, true
+	}
+	if !e.swapToOtherKeyWithContext(ctx, c, attemptReq, result) {
+		return outcomeContinue, quotaEvidence, true
+	}
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		*outProviderName = result.ProviderName
+		*lastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		return outcomeFatal, false, true
+	}
+
+	if e.attemptOne(c, ctx, attemptReq, result, outProviderName, lastErr, entry) {
+		return outcomeOK, false, true
+	}
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		*outProviderName = result.ProviderName
+		*lastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		return outcomeFatal, false, true
+	}
+	if lastErr == nil || *lastErr == nil {
+		return outcomeContinue, quotaEvidence, true
+	}
+	pe := *lastErr
+	// A real request/model error remains fatal (or candidate-unfit) even when
+	// the first key produced quota evidence. Do not hide it behind a downgrade.
+	if !errorIsRetryable(pe) {
+		if e.candidateUnfitNotFatal(result, baseReq.Model, pe) {
+			return outcomeContinue, quotaEvidence, true
+		}
+		return outcomeFatal, quotaEvidence, true
+	}
+	// The initial quota evidence remains valid when the replacement key has a
+	// different retryable failure. This permits the existing tier decision to
+	// downgrade only after all same-tier candidates are exhausted.
+	return outcomeContinue, quotaEvidence, true
 }
 
 // attemptOne 用 result.Key 发一次请求(流式/非流式),更新 lastErr / outProviderName,
@@ -1573,6 +2450,22 @@ func (e *Engine) attemptOne(
 	lastErr **provider.ProviderError,
 	entry *accesslog.AccessEntry,
 ) bool {
+	if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+		*outProviderName = result.ProviderName
+		*lastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		return false
+	}
+	if pe := candidateBudgetTimeoutError(ctx, result.ProviderName); pe != nil {
+		*outProviderName = result.ProviderName
+		*lastErr = pe
+		if entry != nil {
+			entry.ErrorType = string(pe.ErrorType)
+		}
+		return false
+	}
 	pv, ok := e.router.Manager().Get(result.ProviderName)
 	if !ok {
 		*outProviderName = result.ProviderName
@@ -1586,14 +2479,28 @@ func (e *Engine) attemptOne(
 		}
 		return false
 	}
+	isRelay := e.router.Manager().IsRelay(result.ProviderName)
+	if isRelay {
+		e.recordRelayEvent(result.ProviderName, "candidate_attempt", "none")
+		e.addRelayActiveUpstreams(result.ProviderName, 1)
+		defer e.addRelayActiveUpstreams(result.ProviderName, -1)
+	}
 
 	start := time.Now()
 	if req.IsStream {
 		ok, streamUsage, perr, ttftMs := e.doStream(ctx, c, pv, req, result, entry)
-		e.recordMetrics(result.ProviderName, statusFromErr(perr), time.Since(start), true, perr)
+		statusCode := statusFromErr(perr)
 		if ok {
-			e.recordUsageWithTokens(req, result, time.Since(start), ttftMs, http.StatusOK, entryErrorType(entry), true, streamUsage)
+			statusCode = c.Writer.Status()
+		}
+		e.recordMetrics(result.ProviderName, statusCode, time.Since(start), true, perr)
+		if ok {
+			e.recordUsageWithTokens(req, result, time.Since(start), ttftMs, statusCode, entryErrorType(entry), true, streamUsage)
 			*outProviderName = result.ProviderName
+			// A committed stream is terminal for routing even when a client write
+			// fails. Preserve that reason so the candidate loop emits one
+			// cancellation summary without trying another upstream.
+			*lastErr = perr
 			if e.inflight != nil {
 				e.inflight.SetProvider(req.TraceID, result.ProviderName)
 			}
@@ -1626,13 +2533,16 @@ func (e *Engine) attemptOne(
 	// deepseek 只能靠旁证推断根因。现在每轮失败尝试直接可见:
 	// 哪个 provider + key + error_type + status,配合熔断器 transition 日志,
 	// 下波流量来了不用再猜
-	if *lastErr != nil {
+	if *lastErr != nil && (*lastErr).ErrorType != provider.ErrorTypeClientDisconnected {
 		e.logger.Info("candidate failed, failover",
 			zap.String("provider", result.ProviderName),
 			zap.String("key_id", keyIDOf(result.Key)),
 			zap.String("key_status", keyStatusOf(result.Key)),
 			zap.String("error_type", string((*lastErr).ErrorType)),
 			zap.Int("status", (*lastErr).StatusCode),
+			zap.Bool("passthrough", isRelay),
+			zap.String("first_byte_stage", firstByteStageOf(*lastErr)),
+			zap.Bool("response_committed", c.Writer.Written()),
 			zap.String("trace_id", req.TraceID))
 		// P-failover-accesslog: 每次失败尝试都记录到 access_logs,追踪完整 failover 路径。
 		// 克隆当前 entry 快照并填充失败信息,让 access_logs 保留中间尝试的完整链路
@@ -1643,6 +2553,13 @@ func (e *Engine) attemptOne(
 		}
 	}
 	return false
+}
+
+func firstByteStageOf(pe *provider.ProviderError) string {
+	if pe != nil && pe.FirstByteStage != "" {
+		return pe.FirstByteStage
+	}
+	return "none"
 }
 
 // retrySameKeyRateLimit 纯 429 限流:用「同一把 key」重试到 rateLimitSameKeyRetries 次。
@@ -1661,6 +2578,20 @@ func (e *Engine) retrySameKeyRateLimit(
 ) bool {
 	attempts := 0
 	for {
+		if pe := requestContextTerminalError(ctx, result.ProviderName); pe != nil {
+			*lastErr = pe
+			if entry != nil {
+				entry.ErrorType = string(pe.ErrorType)
+			}
+			return false
+		}
+		if pe := candidateBudgetTimeoutError(ctx, result.ProviderName); pe != nil {
+			*lastErr = pe
+			if entry != nil {
+				entry.ErrorType = string(pe.ErrorType)
+			}
+			return false
+		}
 		if e.attemptOne(c, ctx, req, result, outProviderName, lastErr, entry) {
 			return true // 重试成功
 		}
@@ -1699,6 +2630,27 @@ func (e *Engine) bindKey(req *provider.Request, result *router.RouteResult) {
 // I-3 / P34:换 key 同样不能跨出 GatewayKey 绑定的 ProviderKey ID 子集 —
 // 与 RouteIterator.Next 的 idSet 过滤一致(参考 router.go Next() 的用法)
 func (e *Engine) swapToOtherKey(c *gin.Context, req *provider.Request, result *router.RouteResult) bool {
+	var ctx context.Context
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	return e.swapToOtherKeyWithContext(ctx, c, req, result)
+}
+
+// swapToOtherKeyWithContext is the context-aware form used by the candidate
+// loop. Keeping swapToOtherKey as a wrapper preserves the existing unit-test
+// and internal call contract while ensuring quota/key retries use the same
+// authoritative request context as routing.
+func (e *Engine) swapToOtherKeyWithContext(ctx context.Context, c *gin.Context, req *provider.Request, result *router.RouteResult) bool {
+	if ctx == nil && c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	if requestContextTerminalError(ctx, result.ProviderName) != nil {
+		return false
+	}
+	if candidateBudgetTimeoutError(ctx, result.ProviderName) != nil {
+		return false
+	}
 	if result.Key == nil {
 		return false
 	}

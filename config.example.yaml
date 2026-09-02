@@ -141,6 +141,9 @@ retry:
   # 每个计费层最多尝试的候选数；0 表示尝试该层全部候选。
   # HTTP 429 首次失败后最多再同 key 重试 10 次，不由此字段控制。
   max_attempts: 0
+  # Relay 流从发起请求到首个上游 body 字节的候选预算；PING/data 到达后立即停止计时。
+  # 180s 高于当前已观测 115.596s 的正常慢请求；调小前应先看该 relay/model 的 TTFT P99。
+  relay_first_byte_timeout: 180s
 
 logging:
   level: info

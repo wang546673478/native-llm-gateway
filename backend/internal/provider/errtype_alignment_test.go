@@ -25,6 +25,7 @@ func TestErrorTypeAlignment(t *testing.T) {
 		{keypool.ErrorTypeServerError, ErrorTypeServerError},
 		{keypool.ErrorTypeTimeout, ErrorTypeTimeout},
 		{keypool.ErrorTypeConnection, ErrorTypeConnection},
+		{keypool.ErrorTypeClientDisconnected, ErrorTypeClientDisconnected},
 		{keypool.ErrorTypeQuotaExceeded, ErrorTypeQuotaExceeded},
 	}
 	for _, a := range alignments {

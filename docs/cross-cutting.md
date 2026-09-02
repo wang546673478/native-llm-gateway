@@ -69,7 +69,10 @@ YYYY-MM-DD/<trace-id>-req.json
 YYYY-MM-DD/<trace-id>-resp.json
 ```
 
-数据库保存相对于 `body_dir` 的路径，不保存 body 本身。请求 body 在 alias、候选模型和 fingerprint 改写前写入；`/responses` 的 reasoning 清理已经发生。非流式响应保存上游返回 body。
+数据库保存相对于 `body_dir` 的路径，不保存 body 本身。请求文件是客户端进入 Gateway 的
+原始 body，在 reasoning、alias、候选模型和 fingerprint 处理之前写入。relay 的上行 body
+与该文件逐字节一致；内置厂商候选可能在独立副本上适配。非流式成功和最终 relay HTTP
+错误都保存上游原始响应 body。
 
 单文件上限为 16 MiB：
 
@@ -106,12 +109,42 @@ Collector 使用独立 registry。`GET /metrics` 当前始终注册在主 HTTP �
 | `gateway_requests_total` | Counter | `provider`, `status`, `is_stream`, `error_type` |
 | `gateway_tokens_total` | Counter | `provider`, `type` (`input`/`output`) |
 | `gateway_request_duration_seconds` | Histogram | `provider`, `is_stream` |
+| `gateway_stream_ttft_seconds` | Histogram | `provider`, `model`, `request_size`, `phase` |
+| `gateway_relay_events_total` | Counter | `provider`, `event`, `stage` |
+| `gateway_relay_active_upstreams` | Gauge | `provider` |
 | `gateway_quota_probe_total` | Counter | `provider`, `result` |
 | `gateway_quota_poll_total` | Counter | `provider`, `result` |
 | `gateway_quota_key_status_transitions_total` | Counter | `provider`, `from`, `to` |
 | `gateway_quota_pending_probes` | Gauge | 无 |
 
 请求计数和 latency 在每次实际 Provider 尝试后记录，不是每个客户端请求只记一次。一个发生 failover 的 trace 会增加多个 request samples。Token 只在最终成功且上游提供 usage 时记录。
+
+`gateway_stream_ttft_seconds` 当前只记录 relay 流，TTFT 从当前候选开始调用 provider 到指定
+阶段首次出现为止。`phase=body` 表示首个非空原始正文 chunk，`ping` 表示首次 SSE 注释，
+`data` 表示首次 SSE data 行；同一请求可以各产生一个 sample。`request_size` 使用固定桶
+`lt_100kb|100kb_500kb|500kb_1mb|1mb_2mb|gte_2mb`。例如按 relay、模型、请求规模和阶段
+查看一小时 P99：
+
+```promql
+histogram_quantile(
+  0.99,
+  sum by (le, provider, model, request_size, phase) (
+    rate(gateway_stream_ttft_seconds_bucket[1h])
+  )
+)
+```
+
+`gateway_relay_events_total` 的 `event`/`stage` 是代码内固定枚举，不包含模型、trace、key 或
+请求内容：
+
+- `candidate_attempt/none`：真实开始一次 relay 上游调用，包括同候选换 key；
+- `first_byte_timeout/headers|body`：分别表示等待 response headers 或 headers 后等待正文；
+- `response_committed/ping|data|body`：首次向客户端承诺响应的原始字节类型；
+- `stream_interrupted/upstream_error|idle_timeout|client_disconnected`：已提交流的结束原因；
+- `body_mismatch/request` 和 `switch_after_response_committed/none`：必须保持为 0 的硬门禁。
+
+`gateway_relay_active_upstreams` 从实际开始上游调用到非流式完成或流关闭保持 `+1`，所有退出
+路径用 defer 归还。它用于发现取消、超时或断流后的连接/goroutine 泄漏。
 
 常见 `result` 值：
 
@@ -141,7 +174,8 @@ Pool 在 Acquire 时调用 `Allow`，OPEN Key 被过滤。成功调用 `RecordSu
 
 ## 6. 设备指纹归一化
 
-Fingerprint sanitizer 在请求 body 已解析 alias、但尚未构建上游 Provider 请求时执行。默认开关语义是：
+Fingerprint sanitizer 只在构造非 relay 候选请求时执行。relay 无论 Gateway Key 是纯 relay
+还是混合绑定，都直接使用原始快照并跳过 fingerprint。默认开关语义是：
 
 - `fingerprint.enabled` 未配置时开启。
 - 显式 `false` 时关闭。
@@ -156,7 +190,9 @@ Sanitize 只定位以下形态：
 
 它不主动改写 messages、tools、thinking 或 primary working directory。非法 JSON 原样返回。
 
-当前字节级行为需要注意：对任何合法的顶层 JSON object，即使没有命中指纹字段，函数仍会 `json.Marshal` 后返回，所以空白、对象 key 顺序和转义形式可能变化；“无目标字段”只保证语义不变，不保证 body 原始字节不变。
+对非 relay 候选，当前字节级行为需要注意：对任何合法的顶层 JSON object，即使没有命中
+指纹字段，函数仍会 `json.Marshal` 后返回，所以空白、对象 key 顺序和转义形式可能变化；
+“无目标字段”只保证语义不变，不保证 body 原始字节不变。relay 不调用该函数。
 
 管理 API：
 

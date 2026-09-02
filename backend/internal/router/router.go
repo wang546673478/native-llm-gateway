@@ -107,14 +107,27 @@ func NewRouter(logger *zap.Logger, manager provider.ProviderLookup, pools map[st
 	if cfg.DefaultStrategy == "" {
 		cfg.DefaultStrategy = "priority"
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	// Keep the caller's map out of the router.  Pool reloads use copy-on-write,
+	// but callers may still finish assembling or reuse the map passed at startup;
+	// retaining it would let that external mutation race Route snapshots.
+	poolSnapshot := make(map[string]*keypool.Pool, len(pools))
+	for name, pool := range pools {
+		poolSnapshot[name] = pool
+	}
 	r := &Router{
 		logger:   logger,
 		manager:  manager,
-		pools:    pools,
-		aliases:  cfg.Aliases,
-		catchAll: cfg.CatchAll,
+		pools:    poolSnapshot,
+		aliases:  cloneAliases(cfg.Aliases),
+		catchAll: cloneAliasConfigPtr(cfg.CatchAll),
 		cfg:      cfg,
 	}
+	r.cfg.Aliases = r.aliases
+	r.cfg.CatchAll = r.catchAll
+	r.cfg.ProviderOrder = cloneProviderOrder(cfg.ProviderOrder)
 	r.policies = map[string]policy.Policy{
 		"priority": policy.NewPriorityPolicy(),
 		"weight":   policy.NewWeightPolicy(),
@@ -130,28 +143,64 @@ var ErrNoRoute = errors.New("router: no route matches the request")
 
 // Route 把请求解析成一个 RouteIterator(支持 failover)
 func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...RouteOption) (*RouteIterator, error) {
+	if r == nil || r.manager == nil {
+		return nil, ErrNoRoute
+	}
 	o := &routeOpts{}
 	for _, opt := range opts {
 		opt(o)
 	}
-	rule, ok := r.aliases[req.Model]
+	// A route must be bound to a known wire protocol before candidates are
+	// built.  Otherwise an unknown path can fan out across every multi-relay
+	// face and only fail after a provider has already been selected (or, worse,
+	// fall back to a face's primary endpoint).  Reject locally so the caller
+	// gets ErrNoRoute and no upstream request can be started.
+	if req == nil || detectProtocol(req.Path) == "" {
+		return nil, ErrNoRoute
+	}
+	model := requestRoutingModel(req)
+	r.mu.RLock()
+	aliases := r.aliases
+	catchAll := r.catchAll
+	r.mu.RUnlock()
+	rule, ok := aliases[model]
 	if !ok {
 		// P-catch-all: 配了 catch_all → 一律走兜底链,客户端模型名只是标签,
 		// 不参与路由决策 — 真实模型名也不直连声明它的 provider。
 		// 路由只按「请求路径选协议面 + tier 计费(token_plan → api → free)」,
 		// 链上能用哪些模型由 gateway key 白名单细化。空规则 = 自动模式
-		if r.catchAll != nil {
+		if catchAll != nil {
 			r.logger.Debug("catch_all chain (client model name ignored)",
-				zap.String("model", req.Model))
-			if len(r.catchAll.Providers) == 0 && r.catchAll.TargetModel == "" {
-				return r.routeCatchAllAuto(ctx, req.Model, req, o)
+				zap.String("model", model))
+			if len(catchAll.Providers) == 0 && catchAll.TargetModel == "" {
+				return r.routeCatchAllAuto(ctx, model, req, o)
 			}
-			return r.routeAliasRule(ctx, *r.catchAll, req.Model, req, o)
+			return r.routeAliasRule(ctx, *catchAll, model, req, o)
 		}
 		// 无 catch_all(旧行为):自动发现真实 model 名
-		return r.routeDirectModelWithOpts(ctx, req.Model, req, o)
+		return r.routeDirectModelWithOpts(ctx, model, req, o)
 	}
-	return r.routeAliasRule(ctx, rule, req.Model, req, o)
+	return r.routeAliasRule(ctx, rule, model, req, o)
+}
+
+func requestRequestedModel(req *provider.Request) string {
+	if req != nil && req.RequestedModel != "" {
+		return req.RequestedModel
+	}
+	if req == nil {
+		return ""
+	}
+	return req.Model
+}
+
+func requestRoutingModel(req *provider.Request) string {
+	if req != nil && req.RoutingModel != "" {
+		return req.RoutingModel
+	}
+	if req == nil {
+		return ""
+	}
+	return req.Model
 }
 
 // routeCatchAllAuto P-catch-all 自动模式(catch_all: {}):
@@ -165,6 +214,7 @@ func (r *Router) Route(ctx context.Context, req *provider.Request, opts ...Route
 // AcquireFromTier 自然跳过。加新 provider + key 即自动进链 — 无路由表可维护
 func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *provider.Request, o *routeOpts) (*RouteIterator, error) {
 	reqProto := detectProtocol(req.Path)
+	requestedModel := requestRequestedModel(req)
 	isResponses := reqProto == provider.ProtocolOpenAI && strings.HasSuffix(strings.ToLower(req.Path), "/responses")
 	var routes []ProviderRoute
 	for name, p := range r.manager.GetAll() {
@@ -179,7 +229,7 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		}
 
 		// 检查协议匹配:支持多协议 Provider
-		if reqProto != "" && !supportsProtocol(p, reqProto) {
+		if reqProto != "" && !supportsProviderProtocol(r.manager, name, p, reqProto) {
 			continue
 		}
 		// P-per-key-circuit: 熔断器已下沉到 keypool(per-key),provider 级
@@ -211,12 +261,12 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		//
 		// 普通厂商不走这里 — 它们的 default_model + 白名单选择逻辑完全不变。
 		if r.manager.IsRelay(name) {
-			if !relayServesModel(r.manager.ModelsFor(name), req.Model) {
+			if !relayServesModel(r.manager.ModelsFor(name), requestedModel) {
 				continue
 			}
 			routes = append(routes, ProviderRoute{
 				Name:          name,
-				Model:         req.Model, // 直接透传客户端请求的模型名
+				Model:         requestedModel, // 直接透传客户端请求的模型名
 				BillingSource: r.manager.BillingSourceFor(name),
 			})
 			continue
@@ -250,7 +300,7 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 	// key 的时间(先来的优先);无 pool/无 key 的 provider 按 name 兜底,保证确定性。
 	pools := r.poolsSnapshot() // F4: RLock 快照,与 SetPools 写同步
 	earliest := func(name string) time.Time {
-		if pool, ok := pools[name]; ok && pool != nil {
+		if pool := poolForName(pools, r.manager, name); pool != nil {
 			return pool.EarliestKeyTime()
 		}
 		return time.Time{}
@@ -304,7 +354,7 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		}
 		return ni < nj
 	})
-	keyCandidates := buildKeyCandidates(routes, pools)
+	keyCandidates := buildKeyCandidates(routes, pools, r.manager)
 	return &RouteIterator{
 		alias:          aliasName,
 		candidates:     keyCandidates,
@@ -313,6 +363,7 @@ func (r *Router) routeCatchAllAuto(ctx context.Context, aliasName string, req *p
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
 }
+
 // sliceContains 简单 contains helper(避免引入 slices 依赖的版本问题)
 func sliceContains(list []string, v string) bool {
 	for _, s := range list {
@@ -372,7 +423,9 @@ func (r *Router) routeAliasRule(ctx context.Context, rule AliasConfig, aliasName
 
 	strategy := rule.Strategy
 	if strategy == "" {
+		r.mu.RLock()
 		strategy = r.cfg.DefaultStrategy
+		r.mu.RUnlock()
 	}
 	pol, ok := r.policies[strategy]
 	if !ok {
@@ -392,12 +445,13 @@ func (r *Router) routeAliasRule(ctx context.Context, rule AliasConfig, aliasName
 	if err != nil {
 		return nil, err
 	}
-	keyCandidates := buildKeyCandidates(ordered, r.poolsSnapshot())
+	pools := r.poolsSnapshot()
+	keyCandidates := buildKeyCandidates(ordered, pools, r.manager)
 
 	return &RouteIterator{
 		alias:          aliasName,
 		candidates:     keyCandidates,
-		pools:          r.poolsSnapshot(),
+		pools:          pools,
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
@@ -413,16 +467,20 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 	reqProto := detectProtocol(req.Path)
 	candidates := make([]ProviderRoute, 0)
 	for name, p := range r.manager.GetAll() {
+		candidateModel := modelID
+		if r.manager.IsRelay(name) {
+			candidateModel = requestRequestedModel(req)
+		}
 		for _, m := range r.manager.ModelsFor(name) {
-			if m != modelID {
+			if !strings.EqualFold(m, candidateModel) {
 				continue
 			}
 			// 如果请求有明确协议,过滤掉不匹配的
-			if reqProto != "" && p.Protocol() != reqProto {
+			if reqProto != "" && providerProtocol(r.manager, name, p) != reqProto {
 				continue
 			}
 			candidates = append(candidates, ProviderRoute{
-				Name: name, Model: modelID,
+				Name: name, Model: candidateModel,
 				BillingSource: r.manager.BillingSourceFor(name), // P-mixed-tier-pool
 			})
 		}
@@ -432,12 +490,13 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 	}
 
 	// P64: auto-discovery 路径也按 tier 跨 provider 拉平
-	keyCandidates := buildKeyCandidates(candidates, r.poolsSnapshot())
+	pools := r.poolsSnapshot()
+	keyCandidates := buildKeyCandidates(candidates, pools, r.manager)
 
 	return &RouteIterator{
 		alias:          modelID,
 		candidates:     keyCandidates,
-		pools:          r.poolsSnapshot(),
+		pools:          pools,
 		manager:        r.manager,
 		providerKeyIDs: o.ProviderKeyIDs,
 	}, nil
@@ -451,6 +510,7 @@ func (r *Router) routeDirectModelWithOpts(ctx context.Context, modelID string, r
 // → 白名单校验 403 "does not allow model mimo-v2.5"。现统一两种模式。
 func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute, req *provider.Request, o *routeOpts) []ProviderRoute {
 	reqProto := detectProtocol(req.Path)
+	requestedModel := requestRequestedModel(req)
 	out := make([]ProviderRoute, 0, len(providers))
 	// 白名单参与选择(与 routeCatchAllAuto 同逻辑)
 	whitelistSelect := len(o.AllowedModels) > 0 && !sliceContains(o.AllowedModels, "*")
@@ -459,7 +519,7 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		if !ok {
 			continue
 		}
-		if reqProto != "" && pv.Protocol() != reqProto {
+		if reqProto != "" && providerProtocol(r.manager, p.Name, pv) != reqProto {
 			continue
 		}
 		// P-per-key-circuit: provider 级健康过滤已移除 — 熔断器在 keypool(per-key)
@@ -472,10 +532,10 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 		// 注意 Model 是无条件覆盖成 req.Model(不是仅 p.Model=="" 时):中转站的模型名
 		// 以客户端为准,配置里写死的 model 字段对中转站没有意义。
 		if r.manager.IsRelay(p.Name) {
-			if !relayServesModel(r.manager.ModelsFor(p.Name), req.Model) {
+			if !relayServesModel(r.manager.ModelsFor(p.Name), requestedModel) {
 				continue
 			}
-			p.Model = req.Model
+			p.Model = requestedModel
 			out = append(out, p)
 			continue
 		}
@@ -504,19 +564,8 @@ func (r *Router) filterCandidates(ctx context.Context, providers []ProviderRoute
 
 // detectProtocol 从 URL 路径推断客户端协议
 func detectProtocol(path string) provider.Protocol {
-	p := strings.ToLower(path)
-	switch {
-	case strings.Contains(p, "/v1/messages"):
-		return provider.ProtocolAnthropic
-	case strings.Contains(p, "/chat/completions"):
-		return provider.ProtocolOpenAI
-	case strings.Contains(p, "/responses"): // P-responses: OpenAI Responses API(Codex)
-		return provider.ProtocolOpenAI
-	case strings.Contains(p, ":generatecontent") || strings.Contains(p, "/v1beta/models"):
-		return provider.ProtocolGoogle
-	default:
-		return ""
-	}
+	proto, _ := provider.ProtocolForPath(path)
+	return proto
 }
 
 // supportsProtocol 检查 provider 是否支持指定协议
@@ -528,6 +577,52 @@ func supportsProtocol(p provider.Provider, proto provider.Protocol) bool {
 	}
 	// 回退到标准协议检查
 	return p.Protocol() == proto
+}
+
+// providerProtocol returns the protocol of the registered face, falling back
+// to the Provider implementation for legacy single-face registrations. A
+// multi relay may share one GenericRelayProvider pointer across faces, so the
+// implementation's primary Protocol() is not authoritative for routing.
+func providerProtocol(manager provider.ProviderLookup, name string, p provider.Provider) provider.Protocol {
+	if manager != nil {
+		if proto := manager.ProtocolFor(name); proto != "" {
+			return proto
+		}
+	}
+	if p == nil {
+		return ""
+	}
+	return p.Protocol()
+}
+
+// supportsProviderProtocol combines face metadata with the optional
+// MultiProtocolProvider capability. Metadata wins over a shared instance's
+// primary protocol, while the implementation still must advertise the face
+// when it exposes per-protocol capabilities.
+func supportsProviderProtocol(manager provider.ProviderLookup, name string, p provider.Provider, proto provider.Protocol) bool {
+	faceProto := providerProtocol(manager, name, p)
+	if faceProto != "" && faceProto != proto {
+		return false
+	}
+	if mp, ok := p.(provider.MultiProtocolProvider); ok {
+		return mp.SupportsProtocol(proto)
+	}
+	return faceProto == proto || supportsProtocol(p, proto)
+}
+
+// poolForName resolves both the normal provider/face key and the shared
+// vendor alias. The alias fallback keeps routing correct during startup or a
+// hot reload if a face map entry is briefly absent.
+func poolForName(pools map[string]*keypool.Pool, manager provider.ProviderLookup, name string) *keypool.Pool {
+	if pool := pools[name]; pool != nil {
+		return pool
+	}
+	if manager != nil {
+		if vendor := manager.VendorFor(name); vendor != "" && vendor != name {
+			return pools[vendor]
+		}
+	}
+	return nil
 }
 
 // KeyCandidate P64: 把候选从 provider 维度展开到 (provider, tier) 维度
@@ -563,7 +658,8 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 			continue
 		}
 
-		if pool, ok := it.pools[c.Name]; ok && pool != nil {
+		if pool := poolForName(it.pools, it.manager, c.Name); pool != nil {
+			proto := providerProtocol(it.manager, c.Name, pv)
 			var (
 				k   *keypool.Key
 				err error
@@ -575,9 +671,9 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 					idSet[id] = struct{}{}
 				}
 				// P-provider-vendor: 按请求协议过滤 key(Protocols 为空 = 不过滤)
-				k, err = pool.AcquireFromTier(c.Tier, idSet, string(pv.Protocol()))
+				k, err = pool.AcquireFromTier(c.Tier, idSet, string(proto))
 			} else {
-				k, err = pool.AcquireFromTier(c.Tier, nil, string(pv.Protocol()))
+				k, err = pool.AcquireFromTier(c.Tier, nil, string(proto))
 			}
 			if err != nil {
 				// 已知缝隙:整层熔断 OPEN 时所有候选都在此静默跳过、直落 api 层 —
@@ -588,7 +684,7 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 				ProviderName: c.Name,
 				ModelID:      c.Model,
 				Key:          k,
-				Protocol:     pv.Protocol(),
+				Protocol:     proto,
 				Tier:         c.Tier,
 			}, nil
 		}
@@ -597,7 +693,7 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 		return &RouteResult{
 			ProviderName: c.Name,
 			ModelID:      c.Model,
-			Protocol:     pv.Protocol(),
+			Protocol:     providerProtocol(it.manager, c.Name, pv),
 			Tier:         c.Tier,
 		}, nil
 	}
@@ -610,7 +706,11 @@ func (it *RouteIterator) Next() (*RouteResult, error) {
 //   - provider 没有 pool → 兜底按 "api" 产一个 KeyCandidate
 //   - provider 没有声明任何 key → pool.Tiers() 返回 [],同样兜底 "api"
 //     (调用方 AcquireFromTier 实际拿不到 key 时会自动 continue)
-func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool) []KeyCandidate {
+func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool, lookups ...provider.ProviderLookup) []KeyCandidate {
+	var manager provider.ProviderLookup
+	if len(lookups) > 0 {
+		manager = lookups[0]
+	}
 	tierOrder := keypool.TierOrder
 	buckets := make(map[string][]KeyCandidate, 3)
 	for _, t := range tierOrder {
@@ -625,7 +725,7 @@ func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool) 
 		// 声明的层 — 块未声明 billing 默认 api 但池全 token_plan)→ 回退池并集,
 		// 保持旧行为。空 route(没填 BillingSource)→ 也走池并集
 		var tiers []string
-		if pool, ok := pools[r.Name]; ok && pool != nil {
+		if pool := poolForName(pools, manager, r.Name); pool != nil {
 			tiers = pool.Tiers()
 		}
 		if len(tiers) == 0 {
@@ -656,11 +756,12 @@ func buildKeyCandidates(routes []ProviderRoute, pools map[string]*keypool.Pool) 
 
 // Aliases 返回所有已注册的别名
 func (r *Router) Aliases() map[string]AliasConfig {
-	out := make(map[string]AliasConfig, len(r.aliases))
-	for k, v := range r.aliases {
-		out[k] = v
+	if r == nil {
+		return nil
 	}
-	return out
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return cloneAliases(r.aliases)
 }
 
 // ResolveAlias 把请求中的 model 名解析成最终要路由的真实 model 名
@@ -690,6 +791,9 @@ func (r *Router) Aliases() map[string]AliasConfig {
 //
 // 这避免了用户被迫列出 claude-3-5-sonnet-* / claude-sonnet-4-5 等所有探测名。
 func (r *Router) ResolveAlias(model string) (target string, isAlias bool) {
+	if r == nil {
+		return "", false
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	rule, exists := r.aliases[model]
@@ -706,16 +810,23 @@ func (r *Router) ResolveAlias(model string) (target string, isAlias bool) {
 // ReloadAliases 原子替换别名表(P14 热重载)
 // 注意:这不会改变 underlying Manager / Pools,只更新路由规则
 func (r *Router) ReloadAliases(aliases map[string]AliasConfig) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.aliases = aliases
-	r.logger.Info("router aliases reloaded", zap.Int("count", len(aliases)))
+	r.aliases = cloneAliases(aliases)
+	r.cfg.Aliases = r.aliases
+	r.logger.Info("router aliases reloaded", zap.Int("count", len(r.aliases)))
 }
 
 // ReloadStrategy P14: 热重载 default_strategy。
 // 此前只在 NewRouter 构造时固化,Server.Reload 只刷 aliases —— 热改配置里
 // 的 routing.default_strategy 会静默保留旧值。这里补上,让热重载对路由策略也生效。
 func (r *Router) ReloadStrategy(defaultStrategy string) {
+	if r == nil {
+		return
+	}
 	if defaultStrategy == "" {
 		defaultStrategy = "priority"
 	}
@@ -730,23 +841,25 @@ func (r *Router) ReloadStrategy(defaultStrategy string) {
 
 // ReloadCatchAll P-catch-all: 原子替换兜底路由规则(与 ReloadAliases 同频)
 func (r *Router) ReloadCatchAll(c *AliasConfig) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.catchAll = c
-	r.logger.Info("router catch_all reloaded", zap.Bool("enabled", c != nil))
+	r.catchAll = cloneAliasConfigPtr(c)
+	r.cfg.CatchAll = r.catchAll
+	r.logger.Info("router catch_all reloaded", zap.Bool("enabled", r.catchAll != nil))
 }
 
 // CatchAllConfig 返回当前 catch_all 规则的拷贝(供 /routing 端点展示)
 // Providers 保证非 nil(空规则也返回 [] 而非 null,前端可直接 .length)
 func (r *Router) CatchAllConfig() *AliasConfig {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.catchAll == nil {
+	if r == nil {
 		return nil
 	}
-	c := *r.catchAll
-	c.Providers = append([]ProviderRoute{}, r.catchAll.Providers...)
-	return &c
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return cloneAliasConfigPtr(r.catchAll)
 }
 
 // Manager 返回窄接口 provider.ProviderLookup(Proxy 用其查 Provider/Cost)
@@ -757,7 +870,7 @@ func (r *Router) Manager() provider.ProviderLookup { return r.manager }
 func (r *Router) Pool(providerName string) *keypool.Pool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.pools[providerName]
+	return poolForName(r.pools, r.manager, providerName)
 }
 
 // poolsSnapshot 返回当前 pool map 的引用(RLock 读),供 routing 路径一次性快照。
@@ -772,10 +885,15 @@ func (r *Router) poolsSnapshot() map[string]*keypool.Pool {
 func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.pools == nil {
-		r.pools = make(map[string]*keypool.Pool)
+	// Copy-on-write keeps maps handed to an in-flight RouteIterator immutable.
+	// A direct assignment here would race with readers holding a previous
+	// snapshot while a key CRUD/reload updates one face.
+	newPools := make(map[string]*keypool.Pool, len(r.pools)+1)
+	for name, existing := range r.pools {
+		newPools[name] = existing
 	}
-	r.pools[providerName] = pool
+	newPools[providerName] = pool
+	r.pools = newPools
 }
 
 // SetPools 整表替换 Router 持有的 pool map(引用替换,不就地写)。
@@ -784,14 +902,80 @@ func (r *Router) SetPool(providerName string, pool *keypool.Pool) {
 func (r *Router) SetPools(newMap map[string]*keypool.Pool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pools = newMap
+	// Do not retain a caller-owned map: callers may continue assembling or
+	// reusing it after this method returns.  Route snapshots must see an
+	// immutable map for their entire lifetime.
+	if newMap == nil {
+		r.pools = nil
+		return
+	}
+	copyMap := make(map[string]*keypool.Pool, len(newMap))
+	for name, pool := range newMap {
+		copyMap[name] = pool
+	}
+	r.pools = copyMap
 }
 
 // SetProviderOrder P-route-order(2026-08-10):热更新 Level 2 层内 provider 排序改写。
 // 在 r.mu 写锁下替换 cfg.ProviderOrder(PUT /routing/order 后由 server 调用)。
 // routeCatchAllAuto 读时在同一锁下快照,避免 data race。
 func (r *Router) SetProviderOrder(m map[string]map[string]int) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
-	r.cfg.ProviderOrder = m
+	r.cfg.ProviderOrder = cloneProviderOrder(m)
 	r.mu.Unlock()
+}
+
+// cloneProviderRoutes and the related helpers establish the ownership rule
+// for route configuration: once published, Router-owned maps/slices are never
+// mutated by callers. This lets Route take a short read lock and then iterate
+// an immutable snapshot without racing hot-reload writers.
+func cloneProviderRoutes(in []ProviderRoute) []ProviderRoute {
+	if in == nil {
+		return nil
+	}
+	out := make([]ProviderRoute, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneAliasConfig(in AliasConfig) AliasConfig {
+	in.Providers = cloneProviderRoutes(in.Providers)
+	return in
+}
+
+func cloneAliasConfigPtr(in *AliasConfig) *AliasConfig {
+	if in == nil {
+		return nil
+	}
+	out := cloneAliasConfig(*in)
+	return &out
+}
+
+func cloneAliases(in map[string]AliasConfig) map[string]AliasConfig {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]AliasConfig, len(in))
+	for name, alias := range in {
+		out[name] = cloneAliasConfig(alias)
+	}
+	return out
+}
+
+func cloneProviderOrder(in map[string]map[string]int) map[string]map[string]int {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]map[string]int, len(in))
+	for tier, byVendor := range in {
+		inner := make(map[string]int, len(byVendor))
+		for vendor, order := range byVendor {
+			inner[vendor] = order
+		}
+		out[tier] = inner
+	}
+	return out
 }

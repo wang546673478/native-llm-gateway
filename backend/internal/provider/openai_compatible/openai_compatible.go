@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -57,6 +58,9 @@ type Config struct {
 	// UsageParser 可选的 Usage 解析器,用于提取厂商特殊的计费字段
 	// nil 时使用默认的 OpenAI 标准解析器
 	UsageParser provider.UsageParser
+	// Passthrough enables relay semantics. It disables request injection and
+	// forwards streaming response body bytes without SSE reconstruction.
+	Passthrough bool
 }
 
 // Base 是 OpenAI 兼容 Provider 的共享实现
@@ -65,6 +69,9 @@ type Base struct {
 	cfg         Config
 	client      *http.Client
 	usageParser provider.UsageParser
+	// pool is atomically replaced by SetPool during hot reload. Each request
+	// captures one pointer so key acquisition and reporting stay consistent.
+	pool atomic.Pointer[keypool.Pool]
 }
 
 // NewBase 构造 Base
@@ -95,17 +102,26 @@ func NewBase(cfg Config) *Base {
 		usageParser = &DefaultOpenAIUsageParser{}
 	}
 
-	return &Base{
+	client := &http.Client{Timeout: timeout}
+	if cfg.Passthrough {
+		client = provider.NewPassthroughHTTPClient(timeout)
+	}
+	b := &Base{
 		cfg:         cfg,
-		client:      &http.Client{Timeout: timeout},
+		client:      client,
 		usageParser: usageParser,
 	}
+	b.pool.Store(cfg.Pool)
+	return b
 }
+
+func (b *Base) keyPool() *keypool.Pool { return b.pool.Load() }
 
 // upstreamPath P-responses: 按客户端请求路径选上游端点路径。
 //   - /responses、/v1/responses(Codex)→ {endpoint}{ResponsesPath},body 原样透传
 //     (DeepSeek / MiniMax 官方原生支持 Responses API)
 //   - 其他 → ChatPath(chat/completions)
+//
 // 自动适配 endpoint 是否已包含 /v1: 若 endpoint 以 /v1 结尾且路径以 /v1 开头,
 // 则去掉路径的 /v1 前缀避免重复 (如 endpoint=http://x/v1 + path=/v1/responses → /responses)
 func (b *Base) upstreamPath(req *provider.Request) string {
@@ -126,6 +142,61 @@ func (b *Base) upstreamPath(req *provider.Request) string {
 	return path
 }
 
+func (b *Base) requestURL(req *provider.Request) (string, error) {
+	target := strings.TrimRight(b.cfg.Endpoint, "/") + b.upstreamPath(req)
+	if !b.cfg.Passthrough {
+		return target, nil
+	}
+	return provider.URLWithRawQuery(target, req.RawQuery)
+}
+
+func (b *Base) applyRequestHeaders(httpReq *http.Request, req *provider.Request, key *keypool.Key, stream bool) {
+	if b.cfg.Passthrough {
+		provider.CopyRelayRequestHeaders(httpReq.Header, req.Headers)
+		httpReq.Header.Set("Authorization", "Bearer "+key.Key)
+		provider.SetHeaderDefault(httpReq.Header, "Content-Type", "application/json")
+		if stream {
+			provider.SetHeaderDefault(httpReq.Header, "Accept", "text/event-stream")
+		}
+		if req.TraceID != "" {
+			provider.SetHeaderDefault(httpReq.Header, "X-Request-Id", req.TraceID)
+		}
+		return
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+key.Key)
+	httpReq.Header.Set("Content-Type", "application/json")
+	if stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
+	if req.TraceID != "" {
+		httpReq.Header.Set("X-Request-Id", req.TraceID)
+	}
+	if !stream {
+		for _, h := range []string{"Accept", "Accept-Language"} {
+			if v := req.Headers.Get(h); v != "" {
+				httpReq.Header.Set(h, v)
+			}
+		}
+	}
+}
+
+func (b *Base) streamClient(timeout time.Duration) *http.Client {
+	if b.cfg.Passthrough {
+		return &http.Client{Timeout: timeout, Transport: b.client.Transport}
+	}
+	return &http.Client{Timeout: timeout}
+}
+
+// newReportedError marks failures that have already been applied to the
+// provider key pool. The proxy sees this marker and will not count the same
+// upstream result a second time.
+func newReportedError(providerName string, status int, errType provider.ErrorType, msg string, rawErr ...[]byte) *provider.ProviderError {
+	pe := provider.NewError(providerName, status, errType, msg, rawErr...)
+	pe.KeyPoolReported = true
+	return pe
+}
+
 // Name / Protocol / Models 由 wrapper 提供
 // 这里把方法放在 wrapper 中,Base 只提供 HTTP 调用
 
@@ -136,7 +207,11 @@ func (b *Base) upstreamPath(req *provider.Request) string {
 //  4. body 原样透传
 //  5. 解析 OpenAI 格式响应,提取 Usage
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
-	if b.cfg.Pool == nil {
+	if req == nil {
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeInvalidRequest, "request is nil")
+	}
+	pool := b.keyPool()
+	if pool == nil {
 		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 优先用路由层已 acquire 的 key — 否则双 acquire 可能拿到
@@ -144,55 +219,54 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
+		key, err = pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
 		if err != nil {
 			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+b.upstreamPath(req),
-		bytes.NewReader(req.Body))
+	target, err := b.requestURL(req)
 	if err != nil {
 		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+key.Key)
-	httpReq.Header.Set("Content-Type", "application/json")
-	if req.TraceID != "" {
-		httpReq.Header.Set("X-Request-Id", req.TraceID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(req.Body))
+	if err != nil {
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
-	// 透传客户端的部分 header(hop-by-hop 已在 Server 层删除)
-	for _, h := range []string{"Accept", "Accept-Language"} {
-		if v := req.Headers.Get(h); v != "" {
-			httpReq.Header.Set(h, v)
-		}
-	}
+	b.applyRequestHeaders(httpReq, req, key, false)
 
 	httpResp, err := b.client.Do(httpReq)
 	if err != nil {
 		errType := provider.ClassifyTransportError(ctx, err)
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		b.cfg.Pool.ReportError(key, string(provider.ErrorTypeConnection)) // io read 失败即连接型 — 与返回的 ErrorTypeConnection 一致,触发 per-key 熔断
-		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
+		errType := provider.ClassifyTransportError(ctx, err)
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 	}
 
 	// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
 	// 下面 >= 400 分支看不到它。1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded,
 	// 触发 failover 到下一 provider + key 标记 QUOTA_EXCEEDED;其他非零 → server_error
-	if code, msg := provider.ParseMiniMaxBaseResp(body); code != 0 {
+	if code, msg := provider.ParseMiniMaxBaseResp(body); !b.cfg.Passthrough && code != 0 {
 		errType := provider.ErrorTypeServerError
 		if provider.IsMiniMaxQuotaCode(code) {
 			errType = provider.ErrorTypeQuotaExceeded
 		}
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), body)
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, provider.WithUpstreamHeaders(newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), body), httpResp.Header)
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -201,28 +275,37 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 
 		if errType == provider.ErrorTypeRateLimit {
-			b.cfg.Pool.ReportRateLimit(key, retryAfter)
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportRateLimit(key, retryAfter)
+			}
 		} else {
-			b.cfg.Pool.ReportError(key, string(errType))
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
 		}
 
-		pe := provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
+		pe := newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
 			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
 		pe.RetryAfter = retryAfter // 429 冷却时常(failover 计冷却用);其他类型为 0
-		return nil, pe
+		return nil, provider.WithUpstreamHeaders(pe, httpResp.Header)
 	}
 
-	// 成功
-	b.cfg.Pool.ReportSuccess(key)
+	// 成功。记录是否已更新池，避免 proxy 在收到 Response 后再次上报。
+	keyPoolReported := false
+	if provider.ShouldReportKeyPool(ctx, provider.ErrorType("")) {
+		pool.ReportSuccess(key)
+		keyPoolReported = true
+	}
 
 	// 解析 Usage - 使用注入的 UsageParser
 	usage := b.usageParser.Parse(body)
 
 	return &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
-		Body:       body,
-		Usage:      usage,
+		StatusCode:      httpResp.StatusCode,
+		Headers:         httpResp.Header,
+		Body:            body,
+		Usage:           usage,
+		KeyPoolReported: keyPoolReported,
 	}, nil
 }
 
@@ -232,14 +315,18 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 //	data: {json}\n\n
 //	data: [DONE]\n\n
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
-	if b.cfg.Pool == nil {
+	if req == nil {
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeInvalidRequest, "request is nil")
+	}
+	pool := b.keyPool()
+	if pool == nil {
 		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
+		key, err = pool.AcquireForProtocol(string(provider.ProtocolOpenAI)) // P-provider-vendor: 按本包协议过滤
 		if err != nil {
 			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
@@ -249,7 +336,7 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	// (Responses API 透传不注入 — 该字段是 chat.completions 专有,
 	// usage 在 response.completed 事件里自带)
 	streamBody := req.Body
-	if b.cfg.StreamUsage && !strings.HasSuffix(strings.ToLower(req.Path), "/responses") {
+	if !b.cfg.Passthrough && b.cfg.StreamUsage && !strings.HasSuffix(strings.ToLower(req.Path), "/responses") {
 		streamBody = injectStreamUsage(streamBody)
 	}
 
@@ -262,26 +349,25 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if streamTimeout < b.cfg.StreamTimeoutFloor {
 		streamTimeout = b.cfg.StreamTimeoutFloor
 	}
-	client := &http.Client{Timeout: streamTimeout}
+	client := b.streamClient(streamTimeout)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(b.cfg.Endpoint, "/")+b.upstreamPath(req),
-		bytes.NewReader(streamBody))
+	target, err := b.requestURL(req)
 	if err != nil {
 		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+key.Key)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if req.TraceID != "" {
-		httpReq.Header.Set("X-Request-Id", req.TraceID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(streamBody))
+	if err != nil {
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 	}
+	b.applyRequestHeaders(httpReq, req, key, true)
 
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		errType := provider.ClassifyTransportError(ctx, err)
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, provider.NewError(b.cfg.Name, 0, errType, err.Error())
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 	}
 
 	if httpResp.StatusCode >= 400 {
@@ -290,12 +376,41 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		// P49: 带 body 检测 quota
 		errType := provider.ClassifyErrorWithBody(httpResp.StatusCode, body)
 		if errType == provider.ErrorTypeRateLimit {
-			b.cfg.Pool.ReportRateLimit(key, 0)
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportRateLimit(key, 0)
+			}
 		} else {
-			b.cfg.Pool.ReportError(key, string(errType))
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
 		}
-		return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body)
+		return nil, nil, provider.WithUpstreamHeaders(newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream returned %d", httpResp.StatusCode), body), httpResp.Header)
+	}
+
+	if b.cfg.Passthrough {
+		resp := &provider.Response{
+			StatusCode: httpResp.StatusCode,
+			Headers:    httpResp.Header,
+		}
+		observer := &provider.SSEEventObserver{
+			OnEvent: func(event []byte) {
+				for _, line := range bytes.Split(event, []byte("\n")) {
+					line = bytes.TrimSpace(line)
+					if !bytes.HasPrefix(line, []byte("data:")) {
+						continue
+					}
+					payload := bytes.TrimSpace(line[len("data:"):])
+					if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+						continue
+					}
+					if usage := b.usageParser.Parse(payload); usage != nil {
+						resp.SetUsage(usage)
+					}
+				}
+			},
+		}
+		return provider.ForwardRawStream(ctx, httpResp.Body, observer.Observe, observer.Finish), resp, nil
 	}
 
 	// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
@@ -316,9 +431,11 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		if provider.IsMiniMaxQuotaCode(code) {
 			errType = provider.ErrorTypeQuotaExceeded
 		}
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, nil, provider.WithUpstreamHeaders(newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked), httpResp.Header)
 	}
 	// P-sse-stream-error: 上游 200 之后在流里发错误事件然后收流(实测
 	// tokenmarket-codex:整条流只有一个 response.failed + rate_limit_exceeded)。
@@ -327,25 +444,30 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if se := provider.ParseSSEStreamError(peeked); se != nil {
 		httpResp.Body.Close()
 		errType := provider.ClassifySSEStreamError(se)
-		b.cfg.Pool.ReportError(key, string(errType))
-		return nil, nil, provider.NewError(b.cfg.Name, httpResp.StatusCode, errType,
-			fmt.Sprintf("upstream stream error %s: %s", se.Code, se.Message), peeked)
+		if provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
+		}
+		return nil, nil, provider.WithUpstreamHeaders(newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
+			fmt.Sprintf("upstream stream error %s: %s", se.Code, se.Message), peeked), httpResp.Header)
 	}
 	// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
 	streamReader := io.MultiReader(bytes.NewReader(peeked), reader)
 
-	// 流式响应开始 — 上报 Key 成功
-	b.cfg.Pool.ReportSuccess(key)
+	// 流式响应开始 — 上报 Key 成功。Response 携带标记，让 proxy 不重复上报。
+	resp := &provider.Response{
+		StatusCode: httpResp.StatusCode,
+		Headers:    httpResp.Header,
+	}
+	if provider.ShouldReportKeyPool(ctx, provider.ErrorType("")) {
+		pool.ReportSuccess(key)
+		resp.KeyPoolReported = true
+	}
 
 	ch := make(chan *provider.StreamChunk, 16)
 	// P42: 收集流中的 usage — 最后一个带 usage 字段的 chunk 才是 totals
 	// OpenAI 在 stream_options.include_usage=true 时才会在最后一个 chunk 发 usage
 	var lastUsage *provider.Usage
 	// resp.Usage 由 goroutine 在 close(ch) 之前填好;caller 必须先 drain channel 再读
-	resp := &provider.Response{
-		StatusCode: httpResp.StatusCode,
-		Headers:    httpResp.Header,
-	}
 	go func() {
 		defer func() {
 			// 在 channel 关闭前先填 usage,这样 caller drain 完就能安全读
@@ -412,12 +534,6 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if b.cfg.Pool != nil {
-		if k, err := b.acquireOwnFaceKey(); err == nil { // P-provider-vendor: 按本面(协议+计费源)取 key
-			req.Header.Set("Authorization", "Bearer "+k.Key)
-			defer b.cfg.Pool.ReportSuccess(k)
-		}
-	}
 	resp, err := b.client.Do(req)
 	if err != nil {
 		return err
@@ -435,16 +551,17 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 // 为什么不能一律用 AcquireForProtocol:同 vendor 的多个协议面共享 key 池,
 // 而 key 与端点是绑定的 —— mimo 的 tp- key 发到 api 端点、sk- key 发到
 // token-plan 端点都会 401(2026-08-20 实测 2×2 全矩阵)。
-func (b *Base) acquireOwnFaceKey() (*keypool.Key, error) {
+func (b *Base) acquireOwnFaceKey(pool *keypool.Pool) (*keypool.Key, error) {
 	proto := string(provider.ProtocolOpenAI)
 	if b.cfg.BillingSource != "" {
-		return b.cfg.Pool.AcquireFromTier(b.cfg.BillingSource, nil, proto)
+		return pool.AcquireFromTier(b.cfg.BillingSource, nil, proto)
 	}
-	return b.cfg.Pool.AcquireForProtocol(proto)
+	return pool.AcquireForProtocol(proto)
 }
 
 // ListModels 调 GET {endpoint}{ModelsPath} 拉上游模型 id 列表。
 func (b *Base) ListModels(ctx context.Context) ([]string, error) {
+	pool := b.keyPool()
 	endpoint := strings.TrimRight(b.cfg.Endpoint, "/")
 	modelsPath := b.cfg.ModelsPath
 
@@ -458,10 +575,10 @@ func (b *Base) ListModels(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if b.cfg.Pool != nil {
-		if k, err := b.acquireOwnFaceKey(); err == nil {
+	if pool != nil {
+		if k, err := b.acquireOwnFaceKey(pool); err == nil {
 			req.Header.Set("Authorization", "Bearer "+k.Key)
-			defer b.cfg.Pool.ReportSuccess(k)
+			defer pool.ReportSuccess(k)
 		} else {
 			// Log when we can't acquire a key for ListModels
 			return nil, fmt.Errorf("list models: failed to acquire key: %w", err)
@@ -508,7 +625,7 @@ func (b *Base) Close() error {
 // 因为 Manager.LoadFromConfig 时 Pool 还是 nil(那时 DB 还没读),
 // 启动后 Server.New 再注入
 func (b *Base) SetPool(p *keypool.Pool) {
-	b.cfg.Pool = p
+	b.pool.Store(p)
 }
 
 // DefaultOpenAIUsageParser 标准 OpenAI 协议的 Usage 解析器

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -32,12 +33,19 @@ type Config struct {
 	// 会剥离 thinking 块,导致 400 "content[].thinking ... must be passed back"(实测复现)。
 	// deepseek-v4-flash 本来就是非 thinking 模型,显式 disabled 不损失能力(实测 200)
 	ForceThinkingDisabled bool
+	// Passthrough enables relay semantics. Streaming response bytes are copied
+	// directly; parsing is passive and cannot delay or rewrite PING/comments.
+	Passthrough bool
 }
 
 // Base Anthropic 兼容 Provider 的共享实现
 type Base struct {
 	cfg    Config
 	client *http.Client
+	// pool is swapped atomically during startup/hot reload. A request captures
+	// one pointer at entry so all status updates for that attempt use the same
+	// pool even if a reload replaces the live pool concurrently.
+	pool atomic.Pointer[keypool.Pool]
 }
 
 // NewBase 构造 Base
@@ -49,16 +57,21 @@ func NewBase(cfg Config) *Base {
 	if cfg.StreamTimeoutFloor <= 0 {
 		cfg.StreamTimeoutFloor = 600 * time.Second // anthropic 协议默认 10 分钟
 	}
-	return &Base{
-		cfg:    cfg,
-		client: &http.Client{Timeout: timeout},
+	client := &http.Client{Timeout: timeout}
+	if cfg.Passthrough {
+		client = provider.NewPassthroughHTTPClient(timeout)
 	}
+	b := &Base{cfg: cfg, client: client}
+	b.pool.Store(cfg.Pool)
+	return b
 }
+
+func (b *Base) keyPool() *keypool.Pool { return b.pool.Load() }
 
 // prepareBody 上行前的 body 预处理:ForceThinkingDisabled 时把 thinking 强制写成 disabled。
 // 失败(非法 JSON)时原样返回 — 透传语义不变,让上游自己报错
 func (b *Base) prepareBody(body []byte) []byte {
-	if !b.cfg.ForceThinkingDisabled {
+	if b.cfg.Passthrough || !b.cfg.ForceThinkingDisabled {
 		return body
 	}
 	var req map[string]any
@@ -132,6 +145,47 @@ func (b *Base) buildMessagesURL() string {
 	return endpoint + "/v1/messages"
 }
 
+func (b *Base) requestURL(req *provider.Request) (string, error) {
+	target := b.buildMessagesURL()
+	if !b.cfg.Passthrough {
+		return target, nil
+	}
+	return provider.URLWithRawQuery(target, req.RawQuery)
+}
+
+func (b *Base) applyRequestHeaders(httpReq *http.Request, req *provider.Request, key *keypool.Key, stream bool) {
+	if b.cfg.Passthrough {
+		provider.CopyRelayRequestHeaders(httpReq.Header, req.Headers)
+		httpReq.Header.Set("x-api-key", key.Key)
+		provider.SetHeaderDefault(httpReq.Header, "anthropic-version", "2023-06-01")
+		provider.SetHeaderDefault(httpReq.Header, "Content-Type", "application/json")
+		if stream {
+			provider.SetHeaderDefault(httpReq.Header, "Accept", "text/event-stream")
+		}
+		if req.TraceID != "" {
+			provider.SetHeaderDefault(httpReq.Header, "X-Request-Id", req.TraceID)
+		}
+		return
+	}
+
+	httpReq.Header.Set("x-api-key", key.Key)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("Content-Type", "application/json")
+	if stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
+	if req.TraceID != "" {
+		httpReq.Header.Set("X-Request-Id", req.TraceID)
+	}
+}
+
+func (b *Base) streamClient(timeout time.Duration) *http.Client {
+	if b.cfg.Passthrough {
+		return &http.Client{Timeout: timeout, Transport: b.client.Transport}
+	}
+	return &http.Client{Timeout: timeout}
+}
+
 // classifyUpstream 统一分类 Anthropic 兼容上游的失败响应:
 //  1. MiniMax base_resp 错误(藏在 HTTP 200 body)— 1008/2056 → quota,其余 → server_error
 //  2. HTTP >= 400 → ClassifyErrorWithBody
@@ -144,7 +198,13 @@ func (b *Base) classifyUpstream(status int, header http.Header, body []byte, key
 		errType := provider.ErrorTypeServerError
 		if provider.IsMiniMaxQuotaCode(code) {
 			errType = provider.ErrorTypeQuotaExceeded
-			if b.balanceGuardHealthy(key) {
+			// A transparent relay must preserve an explicit upstream quota
+			// signal. The balance guard is an adaptation for built-in
+			// MiniMax-compatible providers, where a transient 2056 can be
+			// misreported despite a recently healthy balance; applying it to a
+			// relay would turn a quota response into rate_limit and lose the
+			// key-scoped quota evidence needed by P4.
+			if !b.cfg.Passthrough && b.balanceGuardHealthy(key) {
 				errType = provider.ErrorTypeRateLimit
 			}
 		}
@@ -152,7 +212,7 @@ func (b *Base) classifyUpstream(status int, header http.Header, body []byte, key
 	}
 	if status >= 400 {
 		errType := provider.ClassifyErrorWithBody(status, body)
-		if errType == provider.ErrorTypeQuotaExceeded && b.balanceGuardHealthy(key) {
+		if errType == provider.ErrorTypeQuotaExceeded && !b.cfg.Passthrough && b.balanceGuardHealthy(key) {
 			errType = provider.ErrorTypeRateLimit
 		}
 		return errType, fmt.Sprintf("upstream returned %d", status)
@@ -171,7 +231,11 @@ func (b *Base) classifyUpstream(status int, header http.Header, body []byte, key
 //	  Content-Type: application/json
 //	Body 原样透传
 func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
-	if b.cfg.Pool == nil {
+	if req == nil {
+		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeInvalidRequest, "request is nil")
+	}
+	pool := b.keyPool()
+	if pool == nil {
 		return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 优先用路由层已 acquire 的 key — 否则双 acquire 可能
@@ -179,7 +243,7 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
+		key, err = pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
 		if err != nil {
 			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
@@ -190,60 +254,84 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 	// 后用同一把 key 重试一次 — 瞬时限流下请求留在本 provider,不落 failover
 	retried := false
 	for {
+		target, err := b.requestURL(req)
+		if err != nil {
+			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
+		}
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			b.buildMessagesURL(),
+			target,
 			bytes.NewReader(body))
 		if err != nil {
 			return nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 		}
-		httpReq.Header.Set("x-api-key", key.Key)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
-		httpReq.Header.Set("Content-Type", "application/json")
-		if req.TraceID != "" {
-			httpReq.Header.Set("X-Request-Id", req.TraceID)
-		}
+		b.applyRequestHeaders(httpReq, req, key, false)
 		httpResp, err := b.client.Do(httpReq)
 		if err != nil {
 			errType := provider.ClassifyTransportError(ctx, err)
-			b.cfg.Pool.ReportError(key, string(errType))
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
 			return nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 		}
 		respBody, readErr := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
 		if readErr != nil {
-			b.cfg.Pool.ReportError(key, string(provider.ErrorTypeConnection)) // io read 失败即连接型 — 与返回的 ErrorTypeConnection 一致
-			return nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeConnection, readErr.Error())
+			errType := provider.ClassifyTransportError(ctx, readErr)
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
+			return nil, newReportedError(b.cfg.Name, 0, errType, readErr.Error())
 		}
 		// P-quota-minimax: MiniMax 错误藏在 HTTP 200 的 body 里(base_resp.status_code≠0),
 		// 1008(余额不足)/ 2056(超 Token Plan)→ quota_exceeded;P-quota-guard 见 classifyUpstream
-		errType, msg := b.classifyUpstream(httpResp.StatusCode, httpResp.Header, respBody, key)
+		errType, msg := provider.ErrorType(""), ""
+		var retryAfter time.Duration
+		if !b.cfg.Passthrough || httpResp.StatusCode >= 400 {
+			errType, msg = b.classifyUpstream(httpResp.StatusCode, httpResp.Header, respBody, key)
+		}
 		if errType == provider.ErrorTypeRateLimit {
-			retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
-			b.cfg.Pool.ReportRateLimit(key, retryAfter)
-			if shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
+			retryAfter = provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportRateLimit(key, retryAfter)
+			}
+			// A transparent relay has one retry owner: the proxy. Retrying here
+			// would hide the original 429 and multiply real upstream requests
+			// before the proxy can move to the sibling key. Built-in providers
+			// retain the historical one-retry behaviour.
+			if !b.cfg.Passthrough && shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
 				retried = true
 				select {
 				case <-time.After(rateLimitRetryDelay(retryAfter)):
 				case <-ctx.Done():
-					return nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+					errType := provider.ClassifyTransportError(ctx, ctx.Err())
+					return nil, newReportedError(b.cfg.Name, 0, errType, ctx.Err().Error())
 				}
 				continue
 			}
-		} else if errType != "" {
-			b.cfg.Pool.ReportError(key, string(errType))
+		} else if errType != "" && provider.ShouldReportKeyPool(ctx, errType) {
+			pool.ReportError(key, string(errType))
 		}
 		if errType != "" {
-			return nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
+			pe := newReportedError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
+			if errType == provider.ErrorTypeRateLimit {
+				pe.RetryAfter = retryAfter
+			}
+			return nil, provider.WithUpstreamHeaders(pe, httpResp.Header)
 		}
 
-		b.cfg.Pool.ReportSuccess(key)
+		keyPoolReported := false
+		if provider.ShouldReportKeyPool(ctx, provider.ErrorType("")) {
+			pool.ReportSuccess(key)
+			keyPoolReported = true
+		}
 		usage := parseAnthropicUsage(respBody)
 
 		return &provider.Response{
-			StatusCode: httpResp.StatusCode,
-			Headers:    httpResp.Header,
-			Body:       respBody,
-			Usage:      usage,
+			StatusCode:      httpResp.StatusCode,
+			Headers:         httpResp.Header,
+			Body:            respBody,
+			Usage:           usage,
+			KeyPoolReported: keyPoolReported,
 		}, nil
 	}
 }
@@ -263,14 +351,18 @@ func (b *Base) SendRequest(ctx context.Context, req *provider.Request) (*provide
 //	event: message_stop
 //	data: {"type":"message_stop"}
 func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
-	if b.cfg.Pool == nil {
+	if req == nil {
+		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeInvalidRequest, "request is nil")
+	}
+	pool := b.keyPool()
+	if pool == nil {
 		return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, "keypool not configured")
 	}
 	// P-key-mismatch: 同 SendRequest — 优先用路由层已 acquire 的 key
 	key := req.Key
 	var err error
 	if key == nil {
-		key, err = b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
+		key, err = pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
 		if err != nil {
 			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, fmt.Sprintf("no available key: %v", err))
 		}
@@ -288,30 +380,31 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 	if streamTimeout < b.cfg.StreamTimeoutFloor {
 		streamTimeout = b.cfg.StreamTimeoutFloor
 	}
-	client := &http.Client{Timeout: streamTimeout}
+	client := b.streamClient(streamTimeout)
 
 	body := b.prepareBody(req.Body)
 	// P-quota-guard-retry: 与 SendRequest 相同 — 限流等 Retry-After(≤2s)重试一次
 	retried := false
+	var retryAfter time.Duration
 	for {
+		target, err := b.requestURL(req)
+		if err != nil {
+			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
+		}
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			b.buildMessagesURL(),
+			target,
 			bytes.NewReader(body))
 		if err != nil {
 			return nil, nil, provider.NewError(b.cfg.Name, 0, provider.ErrorTypeConnection, err.Error())
 		}
-		httpReq.Header.Set("x-api-key", key.Key)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "text/event-stream")
-		if req.TraceID != "" {
-			httpReq.Header.Set("X-Request-Id", req.TraceID)
-		}
+		b.applyRequestHeaders(httpReq, req, key, true)
 
 		httpResp, err := client.Do(httpReq)
 		if err != nil {
 			errType := provider.ClassifyTransportError(ctx, err)
-			b.cfg.Pool.ReportError(key, string(errType))
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
 			return nil, nil, newReportedError(b.cfg.Name, 0, errType, err.Error())
 		}
 
@@ -321,21 +414,55 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 			// P49: 带 body 检测 quota + P-quota-guard 降级
 			errType, msg := b.classifyUpstream(httpResp.StatusCode, httpResp.Header, respBody, key)
 			if errType == provider.ErrorTypeRateLimit {
-				retryAfter := provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
-				b.cfg.Pool.ReportRateLimit(key, retryAfter)
-				if shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
+				retryAfter = provider.ParseRetryAfter(httpResp.Header.Get("Retry-After"))
+				if provider.ShouldReportKeyPool(ctx, errType) {
+					pool.ReportRateLimit(key, retryAfter)
+				}
+				// Keep 429 retry ownership in the proxy for transparent relays;
+				// protocol-native providers still get their bounded retry.
+				if !b.cfg.Passthrough && shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
 					retried = true
 					select {
 					case <-time.After(rateLimitRetryDelay(retryAfter)):
 					case <-ctx.Done():
-						return nil, nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+						errType := provider.ClassifyTransportError(ctx, ctx.Err())
+						return nil, nil, newReportedError(b.cfg.Name, 0, errType, ctx.Err().Error())
 					}
 					continue
 				}
-			} else if errType != "" {
-				b.cfg.Pool.ReportError(key, string(errType))
+			} else if errType != "" && provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
 			}
-			return nil, nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
+			pe := newReportedError(b.cfg.Name, httpResp.StatusCode, errType, msg, respBody)
+			if errType == provider.ErrorTypeRateLimit {
+				pe.RetryAfter = retryAfter
+			}
+			return nil, nil, provider.WithUpstreamHeaders(pe, httpResp.Header)
+		}
+
+		if b.cfg.Passthrough {
+			resp := &provider.Response{
+				StatusCode: httpResp.StatusCode,
+				Headers:    httpResp.Header,
+			}
+			var inputTokens, outputTokens, cacheCreation, cacheRead int
+			var upstreamModel string
+			observer := &provider.SSEEventObserver{
+				OnEvent: func(event []byte) {
+					extractAnthropicStreamUsage(event, &inputTokens, &outputTokens, &cacheCreation, &cacheRead, &upstreamModel)
+				},
+			}
+			finish := func() {
+				observer.Finish()
+				if inputTokens > 0 || outputTokens > 0 || cacheCreation > 0 || cacheRead > 0 {
+					resp.SetUsage(&provider.Usage{
+						Model: upstreamModel, PromptTokens: inputTokens, CompletionTokens: outputTokens,
+						TotalTokens:         inputTokens + outputTokens + cacheCreation + cacheRead,
+						CacheCreationTokens: cacheCreation, CacheReadTokens: cacheRead,
+					})
+				}
+			}
+			return provider.ForwardRawStream(ctx, httpResp.Body, observer.Observe, finish), resp, nil
 		}
 
 		// P-quota-minimax: 流式场景下 MiniMax 也可能 HTTP 200 + 首段 body 是
@@ -360,21 +487,25 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 				}
 			}
 			if errType == provider.ErrorTypeRateLimit {
-				b.cfg.Pool.ReportRateLimit(key, 0)
-				if shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
+				if provider.ShouldReportKeyPool(ctx, errType) {
+					pool.ReportRateLimit(key, 0)
+				}
+				if !b.cfg.Passthrough && shouldRetryRateLimitStatus(httpResp.StatusCode) && !retried {
 					retried = true
 					select {
 					case <-time.After(rateLimitRetryDelay(0)):
 					case <-ctx.Done():
-						return nil, nil, newReportedError(b.cfg.Name, 0, provider.ErrorTypeClientDisconnected, "client disconnected during rate-limit retry")
+						errType := provider.ClassifyTransportError(ctx, ctx.Err())
+						return nil, nil, newReportedError(b.cfg.Name, 0, errType, ctx.Err().Error())
 					}
 					continue
 				}
-			} else {
-				b.cfg.Pool.ReportError(key, string(errType))
+			} else if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
 			}
-			return nil, nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
-				fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked)
+			return nil, nil, provider.WithUpstreamHeaders(
+				newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
+					fmt.Sprintf("upstream base_resp error %d: %s", code, msg), peeked), httpResp.Header)
 		}
 		// P-sse-stream-error: 上游 200 之后在流里发错误事件然后收流。
 		// 与上面 base_resp 同一范式:错误落在 peek 窗口内 → 客户端还没收到任何字节,
@@ -382,24 +513,30 @@ func (b *Base) SendStreamRequest(ctx context.Context, req *provider.Request) (<-
 		if se := provider.ParseSSEStreamError(peeked); se != nil {
 			httpResp.Body.Close()
 			errType := provider.ClassifySSEStreamError(se)
-			b.cfg.Pool.ReportError(key, string(errType))
-			return nil, nil, newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
-				fmt.Sprintf("upstream stream error %s: %s", se.Code, se.Message), peeked)
+			if provider.ShouldReportKeyPool(ctx, errType) {
+				pool.ReportError(key, string(errType))
+			}
+			return nil, nil, provider.WithUpstreamHeaders(
+				newReportedError(b.cfg.Name, httpResp.StatusCode, errType,
+					fmt.Sprintf("upstream stream error %s: %s", se.Code, se.Message), peeked), httpResp.Header)
 		}
 		// 正常流:peeked 行已在 reader 外,用 MultiReader 接回
 		streamReader := io.MultiReader(bytes.NewReader(peeked), reader)
 
-		b.cfg.Pool.ReportSuccess(key)
+		resp := &provider.Response{
+			StatusCode: httpResp.StatusCode,
+			Headers:    httpResp.Header,
+		}
+		if provider.ShouldReportKeyPool(ctx, provider.ErrorType("")) {
+			pool.ReportSuccess(key)
+			resp.KeyPoolReported = true
+		}
 
 		ch := make(chan *provider.StreamChunk, 16)
 		// P42: 收集流中的 usage — Anthropic 在 message_start (input+cache) 和 message_delta (output) 里发
 		// P65: 也从 message_start 抽 model(message.model 字段)
 		var inputTokens, outputTokens, cacheCreation, cacheRead int
 		var upstreamModel string
-		resp := &provider.Response{
-			StatusCode: httpResp.StatusCode,
-			Headers:    httpResp.Header,
-		}
 		go func() {
 			defer func() {
 				// 在 close(ch) 前填 usage
@@ -558,12 +695,6 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if b.cfg.Pool != nil {
-		if k, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic)); err == nil {
-			req.Header.Set("x-api-key", k.Key)
-			defer b.cfg.Pool.ReportSuccess(k)
-		}
-	}
 	resp, err := b.client.Do(req)
 	if err != nil {
 		return err
@@ -587,10 +718,11 @@ func (b *Base) HealthCheck(ctx context.Context) error {
 //
 // 先尝试 /api/models (New API),失败后降级到 /v1/models (Anthropic 标准)。
 func (b *Base) ListModels(ctx context.Context) ([]string, error) {
-	if b.cfg.Pool == nil {
+	pool := b.keyPool()
+	if pool == nil {
 		return nil, fmt.Errorf("keypool not configured")
 	}
-	key, err := b.cfg.Pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
+	key, err := pool.AcquireForProtocol(string(provider.ProtocolAnthropic))
 	if err != nil {
 		return nil, fmt.Errorf("no available key: %w", err)
 	}
@@ -737,7 +869,7 @@ func (b *Base) Close() error {
 
 // SetPool P30:让 Server 把从 DB 读出来的 Pool 注入到 Base
 func (b *Base) SetPool(p *keypool.Pool) {
-	b.cfg.Pool = p
+	b.pool.Store(p)
 }
 
 // newError helper

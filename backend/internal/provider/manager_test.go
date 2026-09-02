@@ -13,7 +13,9 @@ import (
 // 构造方式照抄 router_test.go 的 fakeProvider:注册到独立 Registry,
 // 经 LoadFromConfig 加载
 type fakeProviderForEndpoint struct {
-	name string
+	name     string
+	endpoint string
+	billing  string
 }
 
 func (p *fakeProviderForEndpoint) Name() string { return p.name }
@@ -32,6 +34,8 @@ func (p *fakeProviderForEndpoint) ListModels(ctx context.Context) ([]string, err
 }
 func (p *fakeProviderForEndpoint) SetPool(*keypool.Pool) {}
 func (p *fakeProviderForEndpoint) Close() error          { return nil }
+func (p *fakeProviderForEndpoint) Endpoint() string      { return p.endpoint }
+func (p *fakeProviderForEndpoint) BillingSource() string { return p.billing }
 
 // TestManager_EndpointFor 查 provider 的 endpoint(baseURL,给 quotacheck.CheckQuota 用)
 // 注册的 provider 返回其配置的 endpoint;未注册返回空串
@@ -59,6 +63,70 @@ func TestManager_EndpointFor(t *testing.T) {
 	}
 	if got := mgr.EndpointFor("nope"); got != "" {
 		t.Errorf("EndpointFor(nope) = %q, want empty string", got)
+	}
+}
+
+// TestManager_DynamicEndpointUsesVendorFallback verifies the metadata path
+// used by DB-loaded relay faces.  A multi face may share a station/vendor
+// endpoint, and removing one face must not erase it while another remains.
+func TestManager_DynamicEndpointUsesVendorFallback(t *testing.T) {
+	const (
+		vendor = "dynamic-station"
+		open   = vendor + "-openai"
+		anth   = vendor + "-anthropic"
+		url    = "https://relay.example"
+	)
+	reg := NewRegistry()
+	reg.RegisterWithProtocolVendorRelay(open, func(cfg ProviderConfig) (Provider, error) {
+		return &fakeProviderForEndpoint{name: open, endpoint: url}, nil
+	}, ProtocolOpenAI, vendor, true)
+	reg.RegisterWithProtocolVendorRelay(anth, func(cfg ProviderConfig) (Provider, error) {
+		return &fakeProviderForEndpoint{name: anth, endpoint: url}, nil
+	}, ProtocolAnthropic, vendor, true)
+	mgr := NewManager(reg, zap.NewNop())
+	if err := mgr.AddProvider(context.Background(), open, &fakeProviderForEndpoint{name: open, endpoint: url, billing: "token_plan"}); err != nil {
+		t.Fatalf("AddProvider(open): %v", err)
+	}
+	if err := mgr.AddProvider(context.Background(), anth, &fakeProviderForEndpoint{name: anth, endpoint: url, billing: "token_plan"}); err != nil {
+		t.Fatalf("AddProvider(anth): %v", err)
+	}
+
+	if got := mgr.EndpointFor(vendor); got != url {
+		t.Fatalf("EndpointFor(vendor) = %q, want %q", got, url)
+	}
+	if got := mgr.BillingSourceFor(open); got != "token_plan" {
+		t.Fatalf("BillingSourceFor(open) = %q, want token_plan", got)
+	}
+	if got := mgr.BillingSourceFor(anth); got != "token_plan" {
+		t.Fatalf("BillingSourceFor(anth) = %q, want token_plan", got)
+	}
+	// A config-only reload must preserve metadata for DB-loaded faces that are
+	// intentionally absent from cfg.Providers.
+	mgr.ReloadPricing(&ManagerConfig{Providers: map[string]ManagerProviderConfig{}})
+	if got := mgr.BillingSourceFor(open); got != "token_plan" {
+		t.Fatalf("BillingSourceFor(open) after ReloadPricing = %q, want token_plan", got)
+	}
+	// Delete the face-specific entry to exercise the vendor fallback explicitly.
+	mgr.mu.Lock()
+	delete(mgr.endpoints, open)
+	mgr.mu.Unlock()
+	if got := mgr.EndpointFor(open); got != url {
+		t.Fatalf("EndpointFor(face) fallback = %q, want %q", got, url)
+	}
+
+	mgr.RemoveProvider(open)
+	if got := mgr.EndpointFor(vendor); got != url {
+		t.Fatalf("EndpointFor(vendor) after removing one face = %q, want %q", got, url)
+	}
+	if got := mgr.BillingSourceFor(vendor); got != "token_plan" {
+		t.Fatalf("BillingSourceFor(vendor) after removing one face = %q, want token_plan", got)
+	}
+	mgr.RemoveProvider(anth)
+	if got := mgr.EndpointFor(vendor); got != "" {
+		t.Fatalf("EndpointFor(vendor) after removing all faces = %q, want empty", got)
+	}
+	if got := mgr.BillingSourceFor(vendor); got != "api" {
+		t.Fatalf("BillingSourceFor(vendor) after removing all faces = %q, want api fallback", got)
 	}
 }
 

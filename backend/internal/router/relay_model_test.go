@@ -11,6 +11,50 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
 )
 
+func TestRelayRoutingUsesRequestedModelNotRoutingModel(t *testing.T) {
+	relay := &fakeProvider{name: "relay-requested", proto: provider.ProtocolAnthropic, models: []string{"client-model"}}
+	builtin := &fakeProvider{name: "builtin-routing", proto: provider.ProtocolAnthropic, models: []string{"routing-model"}}
+
+	reg := provider.NewRegistry()
+	reg.RegisterWithProtocolVendorRelay(relay.name, func(provider.ProviderConfig) (provider.Provider, error) {
+		return relay, nil
+	}, relay.proto, relay.name, true)
+	reg.Register(builtin.name, func(provider.ProviderConfig) (provider.Provider, error) { return builtin, nil })
+	mgr := provider.NewManager(reg, zap.NewNop())
+	if err := mgr.LoadFromConfig(context.Background(), &provider.ManagerConfig{Providers: map[string]provider.ManagerProviderConfig{
+		relay.name:   {Enabled: true, Protocol: relay.proto},
+		builtin.name: {Enabled: true, Protocol: builtin.proto},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = mgr.LoadModelsFromStore(context.Background(), fakeModelStore{rows: []provider.DBModelRow{
+		{Vendor: relay.name, ModelID: "client-model"},
+		{Vendor: builtin.name, ModelID: "routing-model"},
+	}})
+
+	r := NewRouter(zap.NewNop(), mgr, nil, Config{CatchAll: &AliasConfig{}})
+	it, err := r.Route(context.Background(), &provider.Request{
+		Path: "/v1/messages", Model: "routing-model", RoutingModel: "routing-model", RequestedModel: "client-model",
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	seen := map[string]string{}
+	for {
+		result, err := it.Next()
+		if err != nil {
+			break
+		}
+		seen[result.ProviderName] = result.ModelID
+	}
+	if seen[relay.name] != "client-model" {
+		t.Fatalf("relay model = %q, want client-model; all=%v", seen[relay.name], seen)
+	}
+	if seen[builtin.name] != "routing-model" {
+		t.Fatalf("builtin model = %q, want routing-model; all=%v", seen[builtin.name], seen)
+	}
+}
+
 // newFakeRelayManager 构造一个「全部 provider 都注册为中转站」的 Manager,
 // 并按 fakeProvider.models 喂 provider_model_faces 等价的面归属行。
 // 中转站的 vendor = name(与 relay/loader.go 的 RegisterWithProtocolVendorRelay 一致)。

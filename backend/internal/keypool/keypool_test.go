@@ -156,6 +156,25 @@ func TestPool_ReportErrorInvalidRequestKeepsKeyActive(t *testing.T) {
 	}
 }
 
+func TestPool_ReportErrorClientDisconnectedIsIgnored(t *testing.T) {
+	pool := NewPool("test", newTestKeys(1), NewScheduler("round_robin"), Config{})
+	before := pool.Keys()[0]
+
+	pool.ReportError(pool.keys[0], string(ErrorTypeClientDisconnected))
+
+	after := pool.Keys()[0]
+	if after.ErrorCount != before.ErrorCount {
+		t.Fatalf("client disconnect changed error count: before=%d after=%d", before.ErrorCount, after.ErrorCount)
+	}
+	if after.Status != before.Status {
+		t.Fatalf("client disconnect changed key status: before=%s after=%s", before.Status, after.Status)
+	}
+	if after.CircuitState != before.CircuitState || after.CircuitOpen != before.CircuitOpen {
+		t.Fatalf("client disconnect changed circuit: before=%s/%v after=%s/%v",
+			before.CircuitState, before.CircuitOpen, after.CircuitState, after.CircuitOpen)
+	}
+}
+
 func TestPool_RoundRobinDistributes(t *testing.T) {
 	keys := newTestKeys(3)
 	pool := NewPool("test", keys, NewScheduler("round_robin"), Config{})

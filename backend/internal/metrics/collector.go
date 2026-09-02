@@ -13,9 +13,12 @@ import (
 
 // Collector 持有所有 Prometheus 指标
 type Collector struct {
-	requestsTotal *prometheus.CounterVec
-	tokensTotal   *prometheus.CounterVec
-	latencySecs   *prometheus.HistogramVec
+	requestsTotal  *prometheus.CounterVec
+	tokensTotal    *prometheus.CounterVec
+	latencySecs    *prometheus.HistogramVec
+	streamTTFTSecs *prometheus.HistogramVec
+	relayEvents    *prometheus.CounterVec
+	relayActive    *prometheus.GaugeVec
 	// P68: quota restore metrics
 	quotaProbeTotal     *prometheus.CounterVec // probe 调用结果
 	quotaPollTotal      *prometheus.CounterVec // poll 调用结果
@@ -41,6 +44,19 @@ func NewCollector() *Collector {
 			Help:    "Request latency distribution.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120},
 		}, []string{"provider", "is_stream"}),
+		streamTTFTSecs: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "gateway_stream_ttft_seconds",
+			Help:    "Streaming time-to-first response phase by provider, model, request size bucket and phase (body|ping|data).",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 90, 120, 150, 180, 240, 300},
+		}, []string{"provider", "model", "request_size", "phase"}),
+		relayEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_relay_events_total",
+			Help: "Relay lifecycle events by provider, event and bounded stage.",
+		}, []string{"provider", "event", "stage"}),
+		relayActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "gateway_relay_active_upstreams",
+			Help: "Current relay upstream attempts, including active response streams.",
+		}, []string{"provider"}),
 		// P68
 		quotaProbeTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_quota_probe_total",
@@ -61,10 +77,24 @@ func NewCollector() *Collector {
 		registry: reg,
 	}
 	reg.MustRegister(
-		c.requestsTotal, c.tokensTotal, c.latencySecs,
+		c.requestsTotal, c.tokensTotal, c.latencySecs, c.streamTTFTSecs, c.relayEvents, c.relayActive,
 		c.quotaProbeTotal, c.quotaPollTotal, c.quotaKeyTransitions, c.quotaPendingProbes,
 	)
 	return c
+}
+
+func (c *Collector) RecordRelayEvent(provider, event, stage string) {
+	c.relayEvents.WithLabelValues(provider, event, stage).Inc()
+}
+
+func (c *Collector) AddRelayActiveUpstreams(provider string, delta int) {
+	c.relayActive.WithLabelValues(provider).Add(float64(delta))
+}
+
+func (c *Collector) RecordStreamTTFT(provider, model, requestSize, phase string, duration time.Duration) {
+	c.streamTTFTSecs.With(prometheus.Labels{
+		"provider": provider, "model": model, "request_size": requestSize, "phase": phase,
+	}).Observe(duration.Seconds())
 }
 
 // RecordRequest 记录一次请求

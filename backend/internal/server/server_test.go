@@ -3,11 +3,13 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -18,6 +20,7 @@ import (
 	"github.com/wang546673478/native-llm-gateway/internal/database"
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
 	"github.com/wang546673478/native-llm-gateway/internal/provider"
+	"github.com/wang546673478/native-llm-gateway/internal/quotacheck"
 	// P-provider-vendor: init() 注册 deepseek / deepseek-anthropic(vendor=deepseek)
 	// TestVendorHasBalancer 也用它作"有 balancer"的正例
 	_ "github.com/wang546673478/native-llm-gateway/internal/provider/deepseek"
@@ -39,7 +42,7 @@ func (f *fakeProvider) HealthCheck(context.Context) error { return nil }
 func (f *fakeProvider) ListModels(context.Context) ([]string, error) {
 	return nil, nil
 }
-func (f *fakeProvider) Close() error                      { return nil }
+func (f *fakeProvider) Close() error { return nil }
 
 // newReloadTestServer 构造可测 ReloadProviderPool 的 Server:
 // 内存 sqlite(provider_api_keys 表,key 存在 vendor 名下)+ manager 含 deepseek / deepseek-anthropic
@@ -110,6 +113,65 @@ func TestReloadProviderPool_FullRebuildVendorGrouped(t *testing.T) {
 	}
 	if got := s.pools["deepseek"].Size(); got != 1 {
 		t.Errorf("rebuilt pool Size = %d, want 1", got)
+	}
+}
+
+// TestPoolFor_UsesVendorFallback keeps admin/probe lookups aligned with
+// Router when a multi-protocol face alias is absent from the current map.
+func TestPoolFor_UsesVendorFallback(t *testing.T) {
+	s := newReloadTestServer(t)
+	shared := keypool.NewPool("deepseek", nil, nil, keypool.Config{})
+	s.pools = map[string]*keypool.Pool{"deepseek": shared}
+
+	got, ok := s.poolFor("deepseek-anthropic")
+	if !ok || got != shared {
+		t.Fatalf("poolFor(face) = %p/%v, want shared vendor pool %p/true", got, ok, shared)
+	}
+}
+
+// TestReloadRelayStations_RemovesPoolsWhenDatabaseBecomesEmpty guards the
+// delete-all path. ReloadFromDatabase removes the old relay faces first; the
+// subsequent pool rebuild must therefore replace the whole pool map even when
+// no relay face remains, including the quota worker's PoolsRef.
+func TestReloadRelayStations_RemovesPoolsWhenDatabaseBecomesEmpty(t *testing.T) {
+	name := fmt.Sprintf("relay-reload-empty-%d", time.Now().UnixNano())
+	provider.Default().RegisterWithProtocolVendorRelay(name, func(cfg provider.ProviderConfig) (provider.Provider, error) {
+		return &fakeProvider{name: name}, nil
+	}, provider.ProtocolOpenAI, name, true)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&database.RelayStation{}, &database.ProviderAPIKey{}); err != nil {
+		t.Fatalf("auto migrate: %v", err)
+	}
+
+	mgr := provider.NewManager(provider.Default(), zap.NewNop())
+	mgr.SetForTesting(name, &fakeProvider{name: name})
+	oldPool := keypool.NewPool(name, nil, nil, keypool.Config{})
+	pools := map[string]*keypool.Pool{name: oldPool}
+	quotaM := quotacheck.NewManager(zap.NewNop(), quotacheck.NewPoolsRef(pools), mgr, nil, quotacheck.DefaultManagerConfig())
+	s := &Server{
+		cfg:     &config.Config{Providers: map[string]config.Provider{}},
+		logger:  zap.NewNop(),
+		db:      db,
+		manager: mgr,
+		pools:   pools,
+		quotaM:  quotaM,
+	}
+
+	if err := s.reloadRelayStations(); err != nil {
+		t.Fatalf("reloadRelayStations: %v", err)
+	}
+	if _, ok := mgr.Get(name); ok {
+		t.Fatalf("relay provider %q still registered after empty DB reload", name)
+	}
+	if got := s.poolSnapshot(); len(got) != 0 {
+		t.Fatalf("server pool map after empty relay reload = %v, want empty", got)
+	}
+	if got := quotaM.Pools().Get(); len(got) != 0 {
+		t.Fatalf("quota pool map after empty relay reload = %v, want empty", got)
 	}
 }
 

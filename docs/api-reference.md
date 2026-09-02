@@ -58,6 +58,7 @@ OpenAI Chat/Responses 或 Anthropic Messages 的上游路径；`/v1/completions`
 | `POST` | `/api/v1/providers/:name/api-keys` | 新增上游 key |
 | `DELETE` | `/api/v1/providers/:name/api-keys/:id` | 删除并热重建共享池 |
 | `POST` | `/api/v1/providers/:name/api-keys/:id/mark-quota-exceeded` | 调试用，强制标记额度耗尽 |
+| `POST` | `/api/v1/providers/:name/api-keys/:id/diagnose` | 管理员单 key、单次、只读诊断；不重试、不切换、不改变池状态 |
 | `GET` | `/api/v1/providers/models` | vendor 模型、价格和面归属 |
 | `POST` | `/api/v1/providers/sync-models` | body `{vendor}`，同步单厂商 |
 | `POST` | `/api/v1/providers/sync-all-models` | 同步全部 vendor，逐项返回成功/错误 |
@@ -81,6 +82,22 @@ OpenAI Chat/Responses 或 Anthropic Messages 的上游路径；`/v1/completions`
 `billing_source` 只接受 `token_plan|api|free`，`protocols` 为空表示全部协议面。注册面
 名会先归一到 vendor；动态中转站 key 必须在中转站 API/页面维护，Provider Key API 会
 拒绝 relay。
+
+单 key 诊断请求 body：
+
+```json
+{
+  "protocol": "anthropic",
+  "path": "/v1/messages",
+  "model": "claude-opus-5"
+}
+```
+
+`protocol` 和 `path` 可省略，省略时使用注册面的默认协议和路径；显式值必须是该注册面
+支持的协议入口。诊断只对实现 `KeyDiagnoser` 的注册面可用；不支持时返回 HTTP 503
+`{"error":"diagnostic_unavailable"}`。成功响应只包含 provider/key ID、协议、HTTP
+状态、可达性、错误分类和耗时等 metadata，不返回上游 body、headers 或任何 secret；诊断
+会完整读取上游响应后才结束，避免因探针主动断流制造 `client_gone`。
 
 价格保存 body：
 

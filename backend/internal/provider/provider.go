@@ -224,11 +224,20 @@ func ParseProtocol(s string) (Protocol, error) {
 // Request 是 Gateway 收到的原始请求的包装
 // 重要:Body 是原始字节,Gateway 不做解析或转换
 type Request struct {
-	Method       string
-	Path         string
-	Headers      http.Header
-	Body         []byte
-	Model        string // 解析后的目标模型 ID(已从别名解析)
+	Method   string
+	Path     string
+	RawQuery string
+	Headers  http.Header
+	Body     []byte
+	// RequestedModel is the exact model string from the client body. Relay
+	// routing and relay upstream requests use this value unchanged.
+	RequestedModel string
+	// RoutingModel is the alias/default-model resolved logical model used to
+	// select and adapt builtin provider candidates.
+	RoutingModel string
+	// Model remains the routing model for compatibility with existing
+	// providers and tests. New routing code should prefer RoutingModel when set.
+	Model        string
 	IsStream     bool
 	GatewayKeyID string
 	TraceID      string
@@ -249,7 +258,12 @@ type Response struct {
 	Headers    http.Header
 	Body       []byte
 	Usage      *Usage
-	usageMu    sync.RWMutex // 保护 Usage 字段的并发访问
+	// KeyPoolReported is true when the Provider already applied the outcome to
+	// the key pool.  The proxy checks this marker before recording a success so
+	// one real upstream request cannot increment TotalRequests twice.  Error
+	// responses use ProviderError.KeyPoolReported for the same purpose.
+	KeyPoolReported bool
+	usageMu         sync.RWMutex // 保护 Usage 字段的并发访问
 }
 
 // SetUsage 线程安全地设置 Usage
@@ -405,6 +419,13 @@ type ProviderError struct {
 	Message      string
 	RetryAfter   time.Duration
 	RawError     []byte
+	// FirstByteStage is a bounded relay observation value. It is set to
+	// "headers" when a first-byte budget expires before response headers and
+	// "body" when headers arrived but the response body stayed silent.
+	FirstByteStage string
+	// UpstreamHeaders contains the end-to-end response headers received with
+	// RawError. It is nil for DNS/TLS/transport failures without an HTTP response.
+	UpstreamHeaders http.Header
 	// KeyPoolReported 表示 Provider 已将本次失败上报给 KeyPool。
 	// Proxy 看到该标记后不再重复上报，避免一次上游错误累计两次冷却/错误计数。
 	KeyPoolReported bool

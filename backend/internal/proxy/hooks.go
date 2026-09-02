@@ -24,6 +24,20 @@ type MetricsRecorder interface {
 	RecordRequest(provider string, statusCode int, latency time.Duration, isStream bool, errorType string)
 }
 
+// StreamTTFTRecorder is optional so alternate/test MetricsRecorder
+// implementations do not need to change. Prometheus implements it to expose
+// first body, first ping and first data distributions for relay budgeting.
+type StreamTTFTRecorder interface {
+	RecordStreamTTFT(provider, model, requestSize, phase string, duration time.Duration)
+}
+
+// RelayEventRecorder is optional and exposes bounded relay lifecycle events.
+// Event and stage values are code-defined enums, never request-derived data.
+type RelayEventRecorder interface {
+	RecordRelayEvent(provider, event, stage string)
+	AddRelayActiveUpstreams(provider string, delta int)
+}
+
 // NoopUsageRecorder / NoopMetricsRecorder 默认 no-op 实现
 // P-per-key-circuit: CircuitReporter 已移除 — 熔断器下沉到 keypool(per-key),
 // 由 Pool.ReportSuccess / ReportError(server_error|timeout|connection)内部上报
@@ -35,6 +49,10 @@ func (NoopUsageRecorder) Record(*UsageRecord) {}
 type NoopMetricsRecorder struct{}
 
 func (NoopMetricsRecorder) RecordRequest(string, int, time.Duration, bool, string) {}
+func (NoopMetricsRecorder) RecordStreamTTFT(string, string, string, string, time.Duration) {
+}
+func (NoopMetricsRecorder) RecordRelayEvent(string, string, string) {}
+func (NoopMetricsRecorder) AddRelayActiveUpstreams(string, int)     {}
 
 // errorIsRetryable 集中判断错误是否触发 failover
 func errorIsRetryable(pe *provider.ProviderError) bool {

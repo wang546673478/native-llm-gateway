@@ -5,6 +5,7 @@ package relay
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/wang546673478/native-llm-gateway/internal/keypool"
@@ -27,8 +28,11 @@ const DefaultTimeout = 400 * time.Second
 
 // Config 通用中转站配置
 type Config struct {
-	Name               string
-	BaseURL            string
+	Name    string
+	BaseURL string
+	// BillingSource is the station default for dynamically loaded route faces.
+	// Individual key records may still override this value.
+	BillingSource      string
 	ProtocolMode       string // "single" | "multi"
 	PrimaryProtocol    provider.Protocol
 	SupportedProtocols []provider.Protocol
@@ -39,11 +43,23 @@ type Config struct {
 // GenericRelayProvider 通用中转站 Provider
 // 根据协议动态路由到对应的协议实现(透传)
 type GenericRelayProvider struct {
-	name               string
-	protocolMode       string // "single" | "multi"
-	primaryProtocol    provider.Protocol
-	implementations    map[provider.Protocol]provider.Provider
-	pool               *keypool.Pool
+	name            string
+	baseURL         string
+	billingSource   string
+	protocolMode    string // "single" | "multi"
+	primaryProtocol provider.Protocol
+	implementations map[provider.Protocol]provider.Provider
+	pool            *keypool.Pool
+	poolMu          sync.Mutex
+	// closeStates is shared by GenericRelayProvider and its face views. A
+	// multi-protocol station is registered under one name per face, so Manager
+	// may call Close once for each view during reload.
+	closeStates map[provider.Protocol]*faceCloseState
+	// closeMu protects lazy initialization of closeStates for providers built
+	// directly in tests or by legacy callers. Constructor-created providers
+	// already initialize the map, but face Close calls may still race with a
+	// legacy GenericRelayProvider.Close call during reload.
+	closeMu sync.Mutex
 }
 
 // NewGenericRelayProvider 创建通用中转站 Provider
@@ -56,6 +72,9 @@ func NewGenericRelayProvider(cfg Config) (*GenericRelayProvider, error) {
 	}
 	if cfg.PrimaryProtocol == "" {
 		return nil, fmt.Errorf("relay station primary_protocol is required")
+	}
+	if cfg.BillingSource == "" {
+		cfg.BillingSource = "api"
 	}
 
 	timeout := time.Duration(cfg.Timeout) * time.Second
@@ -82,13 +101,12 @@ func NewGenericRelayProvider(cfg Config) (*GenericRelayProvider, error) {
 				Endpoint:    cfg.BaseURL,
 				Timeout:     timeout,
 				StreamUsage: true,
+				Passthrough: true,
 			})
 			impl = &RelayOpenAIProvider{Base: base, name: cfg.Name}
 		case provider.ProtocolAnthropic:
 			base := anthropic_compatible.NewBase(anthropic_compatible.Config{
-				Name:     cfg.Name,
-				Endpoint: cfg.BaseURL,
-				Timeout:  timeout,
+				Name: cfg.Name, Endpoint: cfg.BaseURL, Timeout: timeout, Passthrough: true,
 			})
 			impl = &RelayAnthropicProvider{Base: base, name: cfg.Name}
 		case provider.ProtocolGoogle:
@@ -104,11 +122,19 @@ func NewGenericRelayProvider(cfg Config) (*GenericRelayProvider, error) {
 		implementations[proto] = impl
 	}
 
+	closeStates := make(map[provider.Protocol]*faceCloseState, len(implementations))
+	for proto := range implementations {
+		closeStates[proto] = &faceCloseState{}
+	}
+
 	return &GenericRelayProvider{
 		name:            cfg.Name,
+		baseURL:         cfg.BaseURL,
+		billingSource:   cfg.BillingSource,
 		protocolMode:    cfg.ProtocolMode,
 		primaryProtocol: cfg.PrimaryProtocol,
 		implementations: implementations,
+		closeStates:     closeStates,
 	}, nil
 }
 

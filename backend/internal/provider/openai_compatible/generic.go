@@ -35,10 +35,10 @@ func NewGeneric(cfg provider.ProviderConfig) (provider.Provider, error) {
 	}, nil
 }
 
-func (p *Generic) Name() string                  { return p.name }
-func (p *Generic) Protocol() provider.Protocol   { return provider.ProtocolOpenAI }
-func (p *Generic) SetPool(pool *keypool.Pool)    { p.base.SetPool(pool) }
-func (p *Generic) Close() error                  { return p.base.Close() }
+func (p *Generic) Name() string                { return p.name }
+func (p *Generic) Protocol() provider.Protocol { return provider.ProtocolOpenAI }
+func (p *Generic) SetPool(pool *keypool.Pool)  { p.base.SetPool(pool) }
+func (p *Generic) Close() error                { return p.base.Close() }
 
 func (p *Generic) SendRequest(ctx context.Context, req *provider.Request) (*provider.Response, error) {
 	return p.base.SendRequest(ctx, req)
@@ -46,6 +46,12 @@ func (p *Generic) SendRequest(ctx context.Context, req *provider.Request) (*prov
 
 func (p *Generic) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	return p.base.SendStreamRequest(ctx, req)
+}
+
+// DiagnoseKey forwards the explicit read-only probe to the OpenAI
+// compatibility base. The base deliberately does not acquire or report keys.
+func (p *Generic) DiagnoseKey(ctx context.Context, key *keypool.Key, req provider.KeyDiagnosticRequest) (*provider.KeyDiagnosticResult, error) {
+	return p.base.DiagnoseKey(ctx, key, req)
 }
 
 func (p *Generic) ListModels(ctx context.Context) ([]string, error) {

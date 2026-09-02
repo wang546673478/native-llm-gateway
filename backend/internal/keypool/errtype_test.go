@@ -9,15 +9,16 @@ import (
 // internal/provider/errtype_alignment_test.go 兜底(放 provider 侧避免 import cycle)。
 func TestTripsBreaker(t *testing.T) {
 	trip := map[string]bool{
-		"server_error":    true,
-		"timeout":         true,
-		"connection":      true,
-		"rate_limit":      false,
-		"auth":            false,
-		"invalid_request": false,
-		"quota_exceeded":  false,
-		"model_not_found": false,
-		"":                false,
+		"server_error":        true,
+		"timeout":             true,
+		"connection":          true,
+		"client_disconnected": false,
+		"rate_limit":          false,
+		"auth":                false,
+		"invalid_request":     false,
+		"quota_exceeded":      false,
+		"model_not_found":     false,
+		"":                    false,
 	}
 	for errType, want := range trip {
 		if got := TripsBreaker(errType); got != want {

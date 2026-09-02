@@ -4,10 +4,22 @@
 
 ## 待发布
 
+### Relay 透明透传与流可靠性
+
+- Relay 候选改为从不可变客户端快照派生，请求 body 不再经过 reasoning、model、thinking、
+  fingerprint 或 stream usage 改写；raw query 和安全的端到端多值 headers 保持不变。
+- Relay SSE 改为原始字节通道，PING/注释/data 不再重建；收到任意正文即提交上游
+  status/headers，提交后断流不注入 Gateway error event，也不再切换候选。
+- 增加可配置的 relay 首包预算、TTFT 分层、生命周期事件和活动上游指标；客户端取消后立即
+  停止全候选链，不再制造后续 `connection`/502。
+- Relay 成功及最终 HTTP 错误响应保留上游 status、端到端 headers 和 body；无 HTTP
+  response 的 transport 错误才生成 Gateway 错误。
+
 ### 文档
 
 - 按当前架构重写文档集，覆盖配置、API、Provider、中转站、前端、运维和排错。
-- 删除已完成的实施计划、重复事故报告、过期 TokenMarket 接入说明和旧 v2 规格书。
+- 删除重复事故报告、过期 TokenMarket 接入说明和旧 v2 规格书；需要保留验证证据的实施
+  计划可作为故障记录留存。
 - 用数据库动态中转站指南替代特定中转商文档，并将两个示例配置收敛到当前内置厂商。
 
 ### 运维与安全

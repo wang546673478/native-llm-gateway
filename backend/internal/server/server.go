@@ -81,11 +81,15 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 	for name := range manager.GetAll() {
 		if registry.IsRelay(name) {
 			vendor := registry.VendorFor(name)
-			if _, exists := pools[vendor]; !exists {
-				pool := buildProviderPool(cfg, db, vendor, logger)
+			pool, exists := pools[vendor]
+			if !exists || pool == nil {
+				pool = buildProviderPool(cfg, db, vendor, logger)
 				pools[vendor] = pool
 				logger.Info("built keypool for relay station", zap.String("vendor", vendor), zap.String("name", name))
 			}
+			// Multi-protocol relay faces share the vendor pool.  Router and
+			// proxy address pools by face name, so retain both aliases.
+			pools[name] = pool
 		}
 	}
 
@@ -188,8 +192,9 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 			return quotacheck.CheckQuota(ctx, providerName, baseURL, k)
 		}),
 		// 设备指纹归一化(热切换):闭包每次请求读 fpEnabled,off 时原样透传。
-		FingerprintSanitizer: fingerprintSanitizer(fpEnabled, fpSnap),
-		MaxRetry:             cfg.Retry.MaxAttempts,
+		FingerprintSanitizer:  fingerprintSanitizer(fpEnabled, fpSnap),
+		MaxRetry:              cfg.Retry.MaxAttempts,
+		RelayFirstByteTimeout: cfg.Retry.RelayFirstByteTimeout,
 		// 流式写 deadline 续期预算 — 与 http.Server.WriteTimeout 同源,
 		// 流式场景下按 chunk 续期成空闲超时(非流式仍是绝对上限)
 		WriteTimeout: cfg.Server.WriteTimeout,
@@ -208,13 +213,10 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		logger.Warn("load models from store failed (pricing/defaultModels empty)", zap.Error(err))
 	}
 
-	// P68: 构造 quotacheck.Manager(quota restore worker)
-	endpoints := make(map[string]string, len(cfg.Providers))
-	for name, p := range cfg.Providers {
-		if p.Enabled && p.Endpoint != "" {
-			endpoints[name] = p.Endpoint
-		}
-	}
+	// P68: 构造 quotacheck.Manager(quota restore worker)。直接传入运行时
+	// provider.Manager，而不是启动时拍下的 StaticProviderLookup：DB relay
+	// 在热重载时会新增/删除/更新 endpoint，quota worker 必须看到同一份
+	// live metadata，否则会继续探测已删除的 URL，或完全漏掉新 relay。
 	quotaCfg := quotacheck.ManagerConfig{
 		Enabled:           cfg.KeyPool.QuotaEnabled,
 		ProbeInitialDelay: cfg.KeyPool.QuotaProbeInitialDelay,
@@ -226,7 +228,7 @@ func New(cfg *config.Config, logger *zap.Logger, db *gorm.DB, manager *provider.
 		UserAgent:         cfg.KeyPool.QuotaUserAgent,
 		WarnThresholdPct:  cfg.KeyPool.QuotaWarnThresholdPct,
 	}
-	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), &quotacheck.StaticProviderLookup{Endpoints: endpoints}, metricsC, quotaCfg)
+	quotaM := quotacheck.NewManager(logger, quotacheck.NewPoolsRef(pools), manager, metricsC, quotaCfg)
 
 	// P-admin-auth: 管理员认证管理器(若启用)
 	var adminAuthM *adminauth.Manager
@@ -347,7 +349,20 @@ func (s *Server) poolFor(providerName string) (*keypool.Pool, bool) {
 	s.poolsMu.RLock()
 	defer s.poolsMu.RUnlock()
 	pool, ok := s.pools[providerName]
-	return pool, ok
+	if ok && pool != nil {
+		return pool, true
+	}
+	// Multi-protocol relay faces share one vendor pool.  A face alias can be
+	// absent briefly during reload, so resolve the same fallback used by Router.
+	if s.manager != nil {
+		vendor := s.manager.VendorFor(providerName)
+		if vendor != "" && vendor != providerName {
+			if pool := s.pools[vendor]; pool != nil {
+				return pool, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // poolSnapshot 返回全部最新 pools 的浅拷贝(供 admin 注入,读路加锁)。
@@ -842,7 +857,7 @@ func (s *Server) saveKeyStateSnapshot() {
 	// P-provider-vendor: 同一 vendor 的多个注册名共享同一 pool — 按指针去重,
 	// 避免 deepseek / deepseek-anthropic 各导出一次(快照文件冗余)
 	seen := make(map[*keypool.Pool]bool)
-	for _, pool := range s.pools {
+	for _, pool := range s.poolSnapshot() {
 		if seen[pool] {
 			continue
 		}
@@ -992,19 +1007,7 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 		// P-relay-station: 中转站管理 Store
 		database.NewRelayStationStore(s.db),
 		// P-relay-station: 中转站热重载函数
-		func() error {
-			if err := relay.ReloadFromDatabase(s.db, s.manager); err != nil {
-				return err
-			}
-			// P-relay-independent: 重载后重建中转站的 KeyPool
-			registry := provider.Default()
-			for name := range s.manager.GetAll() {
-				if registry.IsRelay(name) {
-					s.ReloadProviderPool(name)
-				}
-			}
-			return nil
-		},
+		s.reloadRelayStations,
 		// P-relay-cascade: 删站时按面清 provider_api_keys(和 relay 的 key 同步用同一张表)
 		auth.NewProviderKeyStore(s.db),
 	)
@@ -1077,6 +1080,55 @@ func (s *Server) registerRoutes(r *gin.Engine) {
 				return
 			}
 		}
+	})
+	// P6: inject a narrow, read-only key diagnostic callback. It snapshots the
+	// live key from the pool so the provider receives the configured secret, but
+	// no pool pointer or mutation capability crosses the admin handler boundary.
+	pkHandler.SetKeyDiagnosticFunc(func(ctx context.Context, providerName, keyID string, d provider.KeyDiagnosticRequest) (*provider.KeyDiagnosticResult, error) {
+		pv, ok := s.manager.Get(providerName)
+		if !ok {
+			return nil, provider.NewDiagnosticUnavailable(d.Protocol, d.Path, "provider face is not loaded")
+		}
+		if d.Protocol == "" {
+			// A supplied path identifies the requested wire protocol and must
+			// win over a face's primary/default protocol (important for a
+			// multi-protocol adapter). Only fall back to registration metadata
+			// when the caller omitted both path and protocol.
+			if inferred, ok := provider.DiagnosticProtocolForPath(d.Path); ok {
+				d.Protocol = inferred
+			} else {
+				if info, exists := provider.Default().ListRegisteredInfo()[providerName]; exists {
+					d.Protocol = info.Protocol
+				}
+				if d.Protocol == "" {
+					d.Protocol = pv.Protocol()
+				}
+			}
+		}
+		pool, ok := s.poolFor(providerName)
+		if !ok || pool == nil {
+			// Multi-protocol relay faces share the station/vendor pool.
+			pool, ok = s.poolFor(provider.Default().VendorFor(providerName))
+		}
+		if !ok || pool == nil {
+			return nil, provider.NewDiagnosticUnavailable(d.Protocol, d.Path, "provider key pool is not loaded")
+		}
+		var snapshot *keypool.Key
+		for _, k := range pool.Keys() {
+			if k.ID == keyID {
+				kCopy := k
+				snapshot = &kCopy
+				break
+			}
+		}
+		if snapshot == nil {
+			return nil, provider.NewDiagnosticUnavailable(d.Protocol, d.Path, "provider key is not active")
+		}
+		diagnoser, ok := pv.(provider.KeyDiagnoser)
+		if !ok {
+			return nil, provider.NewDiagnosticUnavailable(d.Protocol, d.Path, "provider face has no key diagnostic implementation")
+		}
+		return diagnoser.DiagnoseKey(ctx, snapshot, d)
 	})
 	pkHandler.RegisterOn(adminGroup)
 
@@ -1269,10 +1321,14 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		// 低耦合修复:构建新 map(copy + 该 vendor 更新)后整表原子替换,
 		// 不再就地写 s.pools —— 消除与 quotacheck poll 的 Get()(RLock 拷贝)
 		// 并发 map 读写的进程崩溃。旧 map 永不就地变,读方持旧快照也安全。
-		newPools := make(map[string]*keypool.Pool, len(s.pools))
-		for k, v := range s.pools {
+		currentPools := s.poolSnapshot()
+		newPools := make(map[string]*keypool.Pool, len(currentPools)+len(names)+1)
+		for k, v := range currentPools {
 			newPools[k] = v
 		}
+		// Multi-protocol relay faces share one vendor pool. Keep the vendor
+		// alias as well as each face alias for quota workers and diagnostics.
+		newPools[vendor] = pool
 		for i, name := range names {
 			newPools[name] = pool
 			// SetPool 已在 Provider 接口,直接调用(编译期强制,不再 type-assert)
@@ -1324,6 +1380,30 @@ func (s *Server) ReloadProviderPool(providerName string) {
 			s.quotaM.ReinjectCallback(name, pool)
 		}
 	}
+	// Relay stations are loaded from the database and therefore do not
+	// appear in cfg.Providers. Re-add every registered face on a full
+	// rebuild, sharing one pool by vendor just like startup does.
+	registry := provider.Default()
+	for name := range s.manager.GetAll() {
+		if !registry.IsRelay(name) {
+			continue
+		}
+		vendor := registry.VendorFor(name)
+		pool, ok := vendorPools[vendor]
+		if !ok {
+			pool = buildOnePool(ctx, vendor, sched, toPoolCfg(s.cfg, vendor, s.logger), store, s.logger, loadKeyOrder(s.db, vendor))
+			vendorPools[vendor] = pool
+		}
+		newPools[vendor] = pool
+		newPools[name] = pool
+		if pv, ok := s.manager.Get(name); ok {
+			pv.SetPool(pool)
+		}
+		if s.quotaM != nil && !injectedPools[pool] {
+			injectedPools[pool] = true
+			s.quotaM.ReinjectCallback(name, pool)
+		}
+	}
 	// 整表原子替换(不再就地写 s.pools,防并发 map 崩溃)
 	s.poolsMu.Lock()
 	s.pools = newPools
@@ -1335,6 +1415,19 @@ func (s *Server) ReloadProviderPool(providerName string) {
 		s.quotaM.Pools().SwapPools(newPools)
 	}
 	s.logger.Info("all provider pools reloaded", zap.Int("providers", len(newPools)))
+}
+
+// reloadRelayStations reloads the DB-backed relay providers and then rebuilds
+// the complete pool map. A full rebuild is intentional: ReloadFromDatabase
+// removes old faces before loading the new set, so the new set may be empty.
+// Rebuilding only currently loaded faces would leave removed relay aliases
+// (and their quota-worker pool references) behind indefinitely.
+func (s *Server) reloadRelayStations() error {
+	if err := relay.ReloadFromDatabase(s.db, s.manager); err != nil {
+		return err
+	}
+	s.ReloadProviderPool("")
+	return nil
 }
 
 // fingerprintSanitizer 构造设备指纹归一化闭包。闭包捕获 fpEnabled(atomic 开关)

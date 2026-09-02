@@ -44,9 +44,7 @@ func createAnthropicImplementation(name, baseURL string, timeout int) (provider.
 		d = DefaultTimeout
 	}
 	base := anthropic_compatible.NewBase(anthropic_compatible.Config{
-		Name:     name,
-		Endpoint: baseURL,
-		Timeout:  d,
+		Name: name, Endpoint: baseURL, Timeout: d, Passthrough: true,
 	})
 	return &RelayAnthropicProvider{Base: base, name: name}, nil
 }
@@ -62,6 +60,7 @@ func createOpenAIImplementation(name, baseURL string, timeout int) (provider.Pro
 		Endpoint:    baseURL,
 		Timeout:     d,
 		StreamUsage: true,
+		Passthrough: true,
 	})
 	return &RelayOpenAIProvider{Base: base, name: name}, nil
 }

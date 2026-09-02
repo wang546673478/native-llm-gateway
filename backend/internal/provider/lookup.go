@@ -4,7 +4,7 @@ package provider
 //
 // 低耦合:router 与 proxy 此前直接依赖 *provider.Manager 具体类型(违反
 // "Router 只接收窄接口" 的 CLAUDE.md 建议)。抽成窄接口后,router/proxy 只依赖
-// 这 6 个方法,不依赖 Manager 的具体实现细节 —— 替换/测试 Manager 更容易,router
+// 这些方法,不依赖 Manager 的具体实现细节 —— 替换/测试 Manager 更容易,router
 // 也不会因 Manager 新增方法而耦合。Manager 实现该接口。
 type ProviderLookup interface {
 	// Get 按注册名取 Provider(实例;不存在 ok=false)
@@ -24,6 +24,9 @@ type ProviderLookup interface {
 	// VendorFor 查注册名的厂商(vendor)。路由 Level 2 排序的改写键是厂商名
 	// (route_order provider 作用域),而候选是注册面名,需归 vendor 再查改写。
 	VendorFor(name string) string
+	// ProtocolFor 查注册面的协议元数据。多协议 relay 的多个 face 可能共享同一
+	// Provider 实例,此时不能用 Provider.Protocol() 的主协议代替当前 face。
+	ProtocolFor(name string) Protocol
 	// ModelsFor 返回某注册面按 vendor 归位后的模型 id 列表(见 Manager.ModelsFor)。
 	ModelsFor(name string) []string
 	// IsRelay 判断 provider 是否为中转站(中转站直通模式,透传客户端模型名)

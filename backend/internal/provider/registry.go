@@ -135,6 +135,15 @@ func (r *Registry) VendorFor(name string) string {
 	return name
 }
 
+// ProtocolFor returns the protocol metadata of a registered face.  Unlike a
+// Provider.Protocol call this remains correct when several registry names
+// intentionally share one multi-protocol provider instance.
+func (r *Registry) ProtocolFor(name string) Protocol {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.protocols[name]
+}
+
 // ListRegisteredInfo 返回所有已注册 name 的注册元数据
 func (r *Registry) ListRegisteredInfo() map[string]RegisteredInfo {
 	r.mu.RLock()
@@ -227,4 +236,21 @@ func (r *Registry) IsRelay(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.relays[name]
+}
+
+// UnregisterRelay removes a dynamically loaded relay registration and its
+// associated protocol/vendor metadata. Static provider registrations are left
+// untouched. Relay stations are reloaded from the database, so retaining a
+// deleted face here would make admin discovery and later name reuse observe a
+// stale protocol or incorrectly classify a builtin provider as a relay.
+func (r *Registry) UnregisterRelay(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.relays[name] {
+		return
+	}
+	delete(r.factories, name)
+	delete(r.protocols, name)
+	delete(r.vendors, name)
+	delete(r.relays, name)
 }

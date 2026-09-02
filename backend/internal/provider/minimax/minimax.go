@@ -50,6 +50,12 @@ func (p *Provider) SendRequest(ctx context.Context, req *provider.Request) (*pro
 func (p *Provider) SendStreamRequest(ctx context.Context, req *provider.Request) (<-chan *provider.StreamChunk, *provider.Response, error) {
 	return p.base.SendStreamRequest(ctx, req)
 }
+
+// DiagnoseKey forwards the explicit read-only probe to the Anthropic
+// compatibility base. The base deliberately does not acquire or report keys.
+func (p *Provider) DiagnoseKey(ctx context.Context, key *keypool.Key, req provider.KeyDiagnosticRequest) (*provider.KeyDiagnosticResult, error) {
+	return p.base.DiagnoseKey(ctx, key, req)
+}
 func (p *Provider) HealthCheck(ctx context.Context) error { return p.base.HealthCheck(ctx) }
 func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 	return p.base.ListModels(ctx)

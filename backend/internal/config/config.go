@@ -225,10 +225,11 @@ type TimeoutsConfig struct {
 
 // RetryConfig 重试配置
 type RetryConfig struct {
-	Enabled      bool     `mapstructure:"enabled"`
-	MaxAttempts  int      `mapstructure:"max_attempts"`
-	NoFailoverOn []string `mapstructure:"no_failover_on"`
-	FailoverOn   []string `mapstructure:"failover_on"`
+	Enabled               bool          `mapstructure:"enabled"`
+	MaxAttempts           int           `mapstructure:"max_attempts"`
+	RelayFirstByteTimeout time.Duration `mapstructure:"relay_first_byte_timeout"`
+	NoFailoverOn          []string      `mapstructure:"no_failover_on"`
+	FailoverOn            []string      `mapstructure:"failover_on"`
 }
 
 // LoggingConfig 日志配置
@@ -271,10 +272,10 @@ func (c *FingerprintConfig) FingerprintEnabled() bool {
 
 // AdminAuthConfig 管理员认证配置
 type AdminAuthConfig struct {
-	Enabled           bool          `mapstructure:"enabled"`            // 是否启用管理员认证
-	SessionTTL        time.Duration `mapstructure:"session_ttl"`        // session 有效期,默认 7 天
-	MaxLoginAttempts  int           `mapstructure:"max_login_attempts"` // 最大登录尝试次数,默认 5
-	LoginBanDuration  time.Duration `mapstructure:"login_ban_duration"` // 登录封禁时长,默认 15 分钟
+	Enabled           bool          `mapstructure:"enabled"`             // 是否启用管理员认证
+	SessionTTL        time.Duration `mapstructure:"session_ttl"`         // session 有效期,默认 7 天
+	MaxLoginAttempts  int           `mapstructure:"max_login_attempts"`  // 最大登录尝试次数,默认 5
+	LoginBanDuration  time.Duration `mapstructure:"login_ban_duration"`  // 登录封禁时长,默认 15 分钟
 	SessionCleanupAge time.Duration `mapstructure:"session_cleanup_age"` // session 清理阈值,默认 30 天
 }
 
